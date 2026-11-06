@@ -9,8 +9,10 @@
 ## 1. Resumen
 
 - **Las 10 pruebas de aceptación (A1-A10) pasan.**
-- **Integración continua en verde:** ejecución [42253011564](https://github.com/Adrigr90/kucoin-trading-bot/actions/runs/42253011564) sobre el commit `84d86d7`, con **273 pruebas superadas, 0 omitidas y 0 fallidas**. Los commits posteriores solo cambian documentación.
+- **Integración continua en verde:** ejecución [42254590429](https://github.com/Adrigr90/kucoin-trading-bot/actions/runs/42254590429) sobre el commit `9b19c61`, con **282 pruebas superadas, 0 omitidas y 0 fallidas**. Los commits posteriores solo cambian documentación.
 - **Tras la primera revisión del revisor** se añadieron 38 pruebas sobre privilegios heredados, pertenencias entre roles, propietarios, privilegios por defecto y cambios de esquema (secciones 3 y 4).
+- **Revisión del código de PostgreSQL por el revisor (6 de noviembre de 2026): OK** en concesiones y revocaciones, privilegios heredados, propietarios, autenticación, A6, A7 y A9, sin cambios. Queda pendiente su revisión del núcleo de cálculo y del analizador de SQL.
+- **Revisión propia del analizador de SQL:** se cerró un hueco. Un módulo de migración podía ejecutar un archivo `.sql` situado fuera de `migrations/versions/`, que el analizador no revisaba. Ahora cada módulo debe tener exactamente la forma de la plantilla, con 9 casos de prueba de manipulación (sección 6, punto 5).
 - **Nada está integrado en `main`.** La integración espera la aprobación del propietario (DM §11).
 - La Fase 1 **no se conecta a KuCoin, no usa Oracle y no maneja ninguna clave**.
 
@@ -31,13 +33,13 @@ Fuentes de evidencia: **CI** es la ejecución citada en la sección 1. Cada paso
 | # | Prueba | Resultado | Evidencia |
 |---|---|---|---|
 | A1 | `uv sync --frozen` instala desde `uv.lock` en un entorno limpio | **Pasa** | Paso «A1» de la CI en una máquina nueva; también en el PC |
-| A2 | Toda la CI pasa en la rama de la F1 | **Pasa** | Ejecución 42253011564: todos los pasos en verde |
+| A2 | Toda la CI pasa en la rama de la F1 | **Pasa** | Ejecución 42254590429: todos los pasos en verde |
 | A3 | Ningún cálculo fuera de las cuantizaciones lanza `Inexact`, y un cálculo que perdería precisión falla en lugar de redondear | **Pasa** | `tests/unit/test_decimal.py`: propiedades con 400 casos cada una (sumas, restas, productos, divisiones, cuantizaciones y cocientes frente a un oráculo con fracciones exactas); 1/3 y un producto de más de 80 cifras lanzan `Inexact`; los floats lanzan `FloatOperation`; RC15 |
 | A4 | `jcs` reproduce los ejemplos de la RFC 8785 y serializa los decimales como texto | **Pasa** | `tests/unit/test_jcs.py`: ejemplo de §3.2.2-3.2.3, bytes UTF-8 de §3.2.4, orden de §3.2.3 y los 26 valores del apéndice B |
 | A5 | Dos implementaciones independientes (`hashlib` y OpenSSL) dan los valores de RC14 | **Pasa** | `tests/unit/test_merkle.py`. Raíz vacía `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`; hoja vacía `6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d`. Además, las 9 raíces de referencia de transparency-dev coinciden con las dos implementaciones |
 | A6 | Roles sin contraseña, solo `peer`, sin TCP, identidad no autorizada rechazada, sin `CREATE`, PUBLIC sin derechos | **Pasa** | `tests/db/test_roles.py` y `tests/db/test_privileges.py` en PostgreSQL 18.6. Detalle en la sección 4 |
 | A7 | `config.risk_limits` coincide con el DM; un servicio que intenta modificarla recibe «permiso denegado»; la huella coincide | **Pasa** | `tests/db/test_risk_limits.py`: los 9 roles con login (8 servicios y `kbot_backup`), conectados de verdad, reciben `42501` en `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `ALTER TABLE`, `DROP TABLE` y `SET ROLE kbot_owner`. Después de esos intentos, la tabla sigue intacta. Solo `kbot_risk`, `kbot_watchdog` y `kbot_backup` pueden leerla |
-| A8 | La CI rechaza una sentencia fuera de la lista blanca, un secreto de prueba y un límite distinto del DM | **Pasa** | `tests/ci/test_sql_guard.py` (17 casos en `roles.sql`, 22 en migraciones y 4 en módulos Python); `tests/ci/test_gitleaks.py` (un token generado al vuelo se detecta); `tests/ci/test_limits_check.py` (4 límites cambiados, una huella alterada y un DM cambiado) |
+| A8 | La CI rechaza una sentencia fuera de la lista blanca, un secreto de prueba y un límite distinto del DM | **Pasa** | `tests/ci/test_sql_guard.py` (17 casos en `roles.sql`, 22 en el SQL de las migraciones y 13 en los módulos de migración en Python); `tests/ci/test_gitleaks.py` (un token generado al vuelo se detecta); `tests/ci/test_limits_check.py` (4 límites cambiados, una huella alterada y un DM cambiado) |
 | A9 | Prueba de dos sesiones: las claves foráneas toman `FOR KEY SHARE` | **Pasa** | `tests/db/test_fk_locks.py`: con una fila hija sin confirmar, `FOR NO KEY UPDATE NOWAIT` sobre el padre funciona y `FOR UPDATE NOWAIT` falla con `55P03`; al revertir, funciona |
 | A10 | Coste de GitHub Actions dentro de lo gratuito | **Pasa** | Repositorio público (P2). Según la documentación de GitHub, los runners estándar son gratuitos en repositorios públicos [H, `02` §16]. `tests/ci/test_workflow.py` exige runners estándar, acciones fijadas por commit y permisos de solo lectura. Cada ejecución dura unos 40 segundos |
 
@@ -77,7 +79,7 @@ PostgreSQL 18.6 del repositorio oficial PGDG, **instalado en el propio runner de
 2. **Solo `kbot_risk` y `kbot_watchdog` pueden leer `config.risk_limits`**, porque el riesgo los aplica y el watchdog los vigila. `kbot_backup` los lee a través de `pg_read_all_data`.
 3. **La huella de los límites** es SHA-256 del JSON canónico (RFC 8785) de sus valores. Para los límites del DM es `a9c038cb25b193017be417fa0915ae6076f3d94c26b2fac7c0a8d3697ff57ec1`. Lo que protege y lo que no se explica en la sección 7.
 4. **La comparación con el DM lee su texto literal** (`docs/especificacion/01_Documento_Maestro.md`, §6). Por eso se copió también el Documento Maestro (P1). Si cambia cualquier frase de los límites, la CI falla hasta que alguien lo revise.
-5. **Las migraciones guardan todo su SQL en archivos `.sql`**, y la CI rechaza cualquier módulo de migración que ejecute SQL por otra vía.
+5. **Las migraciones guardan todo su SQL en archivos `.sql`.** La CI exige que cada módulo de migración tenga exactamente la forma de la plantilla: su `upgrade()` solo puede ejecutar el archivo `.sql` que está a su lado, que el analizador revisa. Cualquier otra ruta, código adicional, decorador o valor calculado se rechaza.
 6. **Cadena de suministro:** solo paquetes publicados al menos una semana antes del bloqueo; acciones de GitHub fijadas por commit; gitleaks fijado por su SHA-256, comprobado contra la lista oficial de su versión.
 7. **Los commits usan la dirección privada de GitHub del propietario**, no su correo personal.
 

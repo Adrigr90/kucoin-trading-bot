@@ -1,6 +1,6 @@
 # ESPECIFICACIÓN VIGENTE: FASE 0 (CONSOLIDADA)
 
-**Proyecto:** `kucoin-trading-bot` · **Consolidada el:** 5 de noviembre de 2026 · **Fuente de verdad:** `01_Documento_Maestro.md` (DM v1.0) · **Versión 1.2** (6 de noviembre de 2026: ronda 4 de revisión, antes de la Fase 2) · Versión 1.1 (revisión de la sección 9, antes de la Fase 1) · Versión 1.0 congelada el 6 de noviembre de 2026 (cierre de la Fase 0)
+**Proyecto:** `kucoin-trading-bot` · **Consolidada el:** 5 de noviembre de 2026 · **Fuente de verdad:** `01_Documento_Maestro.md` (DM v1.0) · **Versión 1.3** (7 de noviembre de 2026: hechos comprobados en la etapa E1 de la Fase 2) · Versión 1.2 (6 de noviembre de 2026: ronda 4 de revisión, antes de la Fase 2) · Versión 1.1 (revisión de la sección 9, antes de la Fase 1) · Versión 1.0 congelada el 6 de noviembre de 2026 (cierre de la Fase 0)
 
 **Regla de congelación:** desde la versión 1.0, cualquier cambio en este documento necesita una entrada en la sección 18 y la aprobación del propietario. Las rondas 4-7 se hacen justo antes de cada módulo (D35) y sus correcciones siguen esta misma regla.
 
@@ -96,7 +96,7 @@ Este documento **sustituye, para leer y auditar**, al Informe V4 y a los anexos 
 | Sistema operativo | Ubuntu Server 24.04 LTS ARM64 (Oracle A1) |
 | Base de datos | PostgreSQL 18 [H: 18.6; soporte hasta el 14 de noviembre de 2030]. Particionado nativo y ventana caliente de 90 días. **Sin TimescaleDB al inicio** [D17, aprobada el 5 de noviembre de 2026] [H: hay paquetes ARM64 si se necesitan] |
 | Histórico | Parquet (zstd), inmutable, consultado con Polars o DuckDB |
-| Lenguaje | Python 3.12, `uv`, `httpx`, `websockets`, `orjson`, `pydantic` v2, `psycopg 3`, `SQLAlchemy 2`, `Alembic`, `numpy`, `polars`, `structlog`, `anthropic`, `python-telegram-bot`, `fastapi`, `argon2-cffi`, `pyotp`, `feedparser`, `trafilatura`, `rapidfuzz` |
+| Lenguaje | Python 3.12, `uv`, `httpx`, `websockets`, `json` de la biblioteca estándar con `Decimal` (no `orjson`, que lee los decimales como `float` y rompería la regla 5 de §0), `pydantic` v2, `psycopg 3`, `SQLAlchemy 2`, `Alembic`, `numpy`, `polars`, `structlog`, `anthropic`, `python-telegram-bot`, `fastapi`, `argon2-cffi`, `pyotp`, `feedparser`, `trafilatura`, `rapidfuzz` |
 | Indicadores | Implementación propia, validada contra TA-Lib en las pruebas [P: paquetes para aarch64] |
 | Cliente de KuCoin | Propio y **sin el SDK oficial**, que incluye órdenes. **REST: solo GET** y con lista blanca de rutas. **WebSocket: su propia lista blanca de mensajes** (3.1) |
 | Procesos | systemd (`User=`, `IPAddressDeny=`, `ProtectSystem=strict`, `LoadCredential=`, `MemoryMax=`) |
@@ -106,15 +106,15 @@ Este documento **sustituye, para leer y auditar**, al Informe V4 y a los anexos 
 
 ### 3.1 Acceso y límites
 
-- **Pool público:** 2.000 de peso cada 30 s por IP [H]. Se usa como máximo el 50 %, con token bucket y lectura de las cabeceras `gw-ratelimit-*` [H].
+- **Pool público:** 2.000 de peso cada 30 s por IP [H]. Se usa como máximo el 50 %, con una **ventana deslizante de 30 s** y lectura de las cabeceras `gw-ratelimit-*` [H]. No se usa un token bucket: lleno al empezar y con su recarga, permitiría hasta el doble del 50 % dentro de una misma ventana. Los pesos de todas las rutas de la lista blanca se midieron con estas cabeceras el 6 de noviembre de 2026 [H, `docs/kucoin/matriz_v1_v2.md`].
 - **Error 429000 [H], con dos causas que se tratan por separado:**
   - **cuota agotada:** las cabeceras indican cuándo se puede volver a pedir; se paran todas las peticiones hasta `gw-ratelimit-reset`;
   - **sobrecarga temporal del servidor:** la respuesta llega sin la información de límite en las cabeceras y KuCoin recomienda reintentar más tarde; se paran todas las peticiones y se espera con backoff exponencial y aleatorio, de 5 s a 5 min [R].
   - En ningún caso hay reintentos rápidos. El 429001 (límite del sistema, en la tabla de errores de UTA V2 [H]) se trata como la sobrecarga.
 - **WebSocket UTA público:**
   - sin token [H], en `wss://x-push-spot.kucoin.com` y `wss://x-push-futures.kucoin.com` [H];
-  - ping según `pingInterval` [H]. La documentación da dos formatos de ping (`"type": "ping"` y `"op": "ping"`) [P: se resuelve con las pruebas de contrato];
-  - la conexión se corta a las 24 h [H];
+  - ping según `pingInterval` (18.000 ms el 6 de noviembre de 2026) [H]. La documentación da dos formatos de ping (`"type": "ping"` y `"op": "ping"`); **`{"id", "type": "ping"}` recibe su pong** [H, prueba de contrato de E1]. Falta comprobar que la conexión aguanta 24 h con ese formato [P: B31, en E5];
+  - la conexión se corta a las 24 h [H]; el cliente la reabre por su cuenta a las 23,5 h y registra el hueco;
   - sin pong en unos 3 s, la conexión se da por rota [H];
   - como máximo 300 mensajes del cliente cada 10 s, contando suscripciones, cancelaciones y pings [H].
 - **Lista blanca de mensajes del WebSocket:** solo la conexión a los dos endpoints públicos, la suscripción y la cancelación de los canales públicos de mercado de la lista (fijada con la matriz V1/V2 de 3.2) y el ping. Se rechazan, antes de enviarlos, los mensajes de autenticación (`op: auth`), los canales privados, los de órdenes y cualquier canal fuera de la lista.
@@ -134,7 +134,7 @@ Este documento **sustituye, para leer y auditar**, al Informe V4 y a los anexos 
 
 ### 3.2 Endpoints
 
-**Versión de UTA pendiente (D04) [H08].** Existen V1 y V2, con **formatos de respuesta distintos**. No se suponen formatos.
+**Versión de UTA pendiente (D04) [H08].** Existen V1 y V2, con **formatos de respuesta distintos**. No se suponen formatos. **La matriz V1/V2 y las pruebas de contrato con respuestas reales están hechas** (etapa E1, 6 de noviembre de 2026: `docs/kucoin/matriz_v1_v2.md` y `tests/contract/` del repositorio). Hechos comprobados [H]: las velas REST son `[apertura en s, open, high, low, close, volumen, turnover]` (coinciden con la vela etiquetada del WebSocket del mismo minuto); `klineType` solo admite `TRADE` (MARK e INDEX se rechazan con el código 148035), así que **la API UTA no da velas de mark ni de index**; con un símbolo, `productType` no cambia la respuesta del funding V2; V2 envía todos los decimales como texto y V1 mezcla números JSON y texto. Observación [I]: en los minutos grabados, el volumen y el turnover de la vela son exactamente el doble de la suma de las operaciones del canal `trade` (B8 sigue abierta).
 - **Antes de implementar la ingesta (F2)** se elabora una **matriz de revisión V1/V2** de **cada** endpoint usado, con: endpoint, versión, parámetros, estructura de la respuesta, unidades, campos obligatorios y comportamiento ante respuestas vacías y errores.
 - **Pruebas de contrato independientes** para cada versión que se use.
 - **No se da por verificado** ningún endpoint ni formato que no esté descrito en esta especificación.
@@ -151,7 +151,9 @@ Este documento **sustituye, para leer y auditar**, al Informe V4 y a los anexos 
 | Campos del funding [H] | `nextFundingRate`, `fundingTime`, `fundingRateCap`, `fundingRateFloor`, `currentGranularity`, `newGranularity`, `newGranularityStartTime` |
 | Histórico de funding | Público [H] |
 | Metadatos de Futures (Classic) | `GET /api/v1/contracts/active`: `multiplier`, `lotSize`, `maxOrderQty`, `maintainMargin`, `maxRiskLimit`, comisiones, `fundingRateGranularity`, `isInverse` [H] |
-| Tramos de riesgo (Classic) | `GET /api/v1/contracts/risk-limit/{symbol}` (peso 5) [H, a partir de un resultado de búsqueda] |
+| Tramos de riesgo (Classic) | `GET /api/v1/contracts/risk-limit/{symbol}` (peso 5), público [H, respuesta real grabada en E1] |
+| Mark price actual (Classic) | `GET /api/v1/mark-price/{symbol}/current` (peso 3): solo el valor actual [H, E1] |
+| Índice (Classic) | `GET /api/v1/index/query` (peso 2): histórico paginado del índice del contrato (`indexSymbol`, por ejemplo `.KXBTUSDT`) [H, E1] |
 | Operaciones recientes | UTA Get Trades: **solo las 100 últimas**, con `sequence`, `tradeId` y `ts` [H] |
 
 ### 3.3 Universo, libro de órdenes y anomalías
@@ -840,7 +842,7 @@ Una ampliación es una **intención de entrada** sobre una posición existente. 
 
 ## 7. Simulador
 
-**Series:** last, mark (canal UTA y `klineType`) e index.
+**Series:** last, mark (canal UTA `mark-price`, que trae mark e index cada segundo; la API UTA no da velas de mark con `klineType` [H, E1]) e index. La fuente de las velas históricas de mark e index se decide en la etapa E2 [P].
 
 **Liquidación:** se comprueba con el mark **antes** que el stop, según el orden de los mensajes. Supone la pérdida de todo el margen.
 
@@ -1378,3 +1380,4 @@ $$\Delta Cap=\underbrace{8}_{\text{distancia mark-stop de lo cerrado}}+\underbra
 | 6 nov 2026 | **Decisión del propietario: D03 aprobada** (la profundidad se graba desde la Fase 2, con el grabador en Oracle). Actualizada la cabecera | Propietario |
 | 6 nov 2026 | **Versión 1.2: ronda 4 de revisión, antes de la Fase 2.** (1) Persistencia de la profundidad: canal `obu` con snapshots completos, sin guardar los mensajes originales, intervalos de 10 s con métricas, snapshot completo cada minuto y estimación de almacenamiento ligada a esa elección (3.1, 3.3 y 3.5). (2) Riesgo de recuperación de instancias inactivas de Oracle, medido con las métricas de Oracle y revisión manual hasta la F7 (13). (3) Copias: la retención en Object Storage no se da por cumplida mientras no se use, y el RPO frente a la pérdida del servidor depende de la copia externa (10.1). (4) «Solo GET» se limita a REST; el WebSocket tiene su propia lista blanca (2 y 3.1). (5) El error 429000 distingue cuota agotada y sobrecarga (3.1). Fuentes añadidas en la sección 16 | Revisor (ronda 4); aplicada a petición del propietario |
 | 6 nov 2026 | **Alcance de la Fase 2 aprobado por el propietario**, con 10 + 10 candidatos de nivel 50 (en lugar de los 5 + 5 propuestos). Actualizados los candidatos y la estimación de almacenamiento de 3.1 | Propietario |
+| 7 nov 2026 | **Versión 1.3: hechos comprobados en la etapa E1** (cliente de KuCoin de solo lectura, rama `fase-2-e1`). (1) `orjson` se sustituye por el `json` de la biblioteca estándar con `Decimal`, porque `orjson` lee los decimales como `float` (2). (2) El límite REST usa una ventana deslizante en lugar de un token bucket, que permitiría el doble del 50 % dentro de una ventana; pesos de todas las rutas medidos (3.1). (3) Formato del ping comprobado a medias (B31) y reapertura de la conexión a las 23,5 h (3.1). (4) Resultados de la matriz V1/V2: columnas de las velas, `klineType` solo `TRADE`, `productType` sin efecto con símbolo y volumen de la vela igual al doble de las operaciones del WebSocket [I] (3.2). (5) La API UTA no da velas de mark ni de index; su fuente histórica se decide en E2 (7). Sin cambios de reglas de negocio | Claude (alcance aprobado de la F2); pendiente de revisión |

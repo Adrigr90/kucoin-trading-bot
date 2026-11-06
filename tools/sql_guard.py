@@ -18,10 +18,19 @@ from pathlib import Path
 
 from pglast import ast as pg
 from pglast import parse_sql
-from pglast.enums import GrantTargetType, ObjectType, RoleSpecType, RoleStmtType
+from pglast.enums import (
+    A_Expr_Kind,
+    ConstrType,
+    GrantTargetType,
+    ObjectType,
+    RoleSpecType,
+    RoleStmtType,
+)
 from pglast.parser import ParseError
 
 from kbot.db import roles
+from tools import grant_policy
+from tools.grant_policy import ALLOWED_GRANTS, Grant, section_9_conflict
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -34,13 +43,50 @@ ROLE_OPTIONS = frozenset({"canlogin", "password", "connectionlimit"})
 ROLE_SETTINGS = frozenset({"statement_timeout"})
 GRANTABLE_SYSTEM_ROLES = {"pg_read_all_data": frozenset({roles.BACKUP})}
 DATABASE_PRIVILEGES = frozenset({"connect"})
-SCHEMA_PRIVILEGES = frozenset({"usage"})
+SCHEMA_PRIVILEGES = grant_policy.SCHEMA_PRIVILEGES
 # Services never get UPDATE or DELETE directly (02 §8); changes go through functions.
-TABLE_PRIVILEGES = frozenset({"select", "insert"})
+TABLE_PRIVILEGES = grant_policy.TABLE_PRIVILEGES
 INSERT_TARGETS = frozenset({("config", "risk_limits")})
 
-MIGRATION_MODULE_NAMES = frozenset(
-    {"Path", "execute_sql_file", "NotImplementedError", "__file__", "with_suffix"}
+# Table definitions: what a CREATE TABLE may contain. Anything else is rejected until a
+# reviewed change adds it.
+COLUMN_TYPES = frozenset(
+    {"int2", "int4", "int8", "numeric", "text", "bool", "timestamptz", "date", "uuid", "jsonb"}
+)
+EXPRESSION_OPERATORS = frozenset({"=", "<>", "<", ">", "<=", ">=", "~", "+", "-", "*", "/"})
+EXPRESSION_KINDS = frozenset(
+    {
+        A_Expr_Kind.AEXPR_OP,
+        A_Expr_Kind.AEXPR_IN,
+        A_Expr_Kind.AEXPR_BETWEEN,
+        A_Expr_Kind.AEXPR_NOT_BETWEEN,
+    }
+)
+# The only function a DEFAULT may call. It is volatile but has no side effects; CHECK
+# constraints may call no function at all.
+DEFAULT_FUNCTIONS = frozenset({"clock_timestamp"})
+# Foreign key actions: NO ACTION and RESTRICT. Cascades would change rows behind the
+# insert-only rules of the ledger and the audit trail (02 §0, rule 2).
+FOREIGN_KEY_ACTIONS = frozenset({"a", "r"})
+TABLE_OPTIONS = (
+    "inhRelations",
+    "partbound",
+    "partspec",
+    "ofTypename",
+    "options",
+    "tablespacename",
+    "accessMethod",
+    "if_not_exists",
+)
+COLUMN_OPTIONS = ("collClause", "compression", "storage_name", "fdwoptions", "raw_default")
+INDEX_OPTIONS = ("options", "indexspace", "indexname", "including", "without_overlaps")
+
+MIGRATION_IMPORTS = frozenset({("pathlib", "Path"), ("kbot.db.sqlfile", "execute_sql_file")})
+MIGRATION_SETTINGS = frozenset({"revision", "down_revision", "branch_labels", "depends_on"})
+# The only statement an upgrade() may contain: run the .sql file next to the module, which
+# check_repository() analyzes. Any other path could point at SQL that is never analyzed.
+SIBLING_SQL_CALL = ast.dump(
+    ast.parse('execute_sql_file(Path(__file__).with_suffix(".sql"))', mode="eval").body
 )
 
 
@@ -89,36 +135,55 @@ def check_migration_sql(text: str, source: str) -> list[Violation]:
 
 
 def check_migration_module(text: str, source: str) -> list[Violation]:
-    """A migration module may only run its sibling .sql file through execute_sql_file."""
-    problems: list[Violation] = []
+    """A migration module must have exactly the shape of migrations/script.py.mako.
+
+    Allowed at module level: a docstring, the two imports, the four Alembic settings with
+    constant values, ``upgrade()`` running only its sibling .sql file and ``downgrade()``
+    raising NotImplementedError. Anything else is rejected.
+    """
     try:
         tree = ast.parse(text, filename=source)
     except SyntaxError as exc:
         return [Violation(source, 0, f"Python syntax error: {exc}")]
 
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            problems.append(Violation(source, 0, "plain imports are not allowed"))
-        elif isinstance(node, ast.ImportFrom):
-            allowed = {("pathlib", "Path"), ("kbot.db.sqlfile", "execute_sql_file")}
+    messages: list[str] = []
+    functions: set[str] = set()
+    settings: set[str] = set()
+    for index, node in enumerate(tree.body):
+        if index == 0 and _is_docstring(node):
+            continue
+        if isinstance(node, ast.ImportFrom):
             for alias in node.names:
-                if (node.module, alias.name) not in allowed or alias.asname:
-                    problems.append(
-                        Violation(source, 0, f"import not allowed: {node.module}.{alias.name}")
-                    )
-        elif isinstance(node, ast.Name) and node.id not in MIGRATION_MODULE_NAMES:
-            if not isinstance(node.ctx, ast.Store):
-                problems.append(Violation(source, 0, f"name not allowed: {node.id}"))
-        elif isinstance(node, ast.Attribute) and node.attr not in MIGRATION_MODULE_NAMES:
-            problems.append(Violation(source, 0, f"attribute not allowed: {node.attr}"))
-    return problems
+                if (node.module, alias.name) not in MIGRATION_IMPORTS or alias.asname:
+                    messages.append(f"import not allowed: {node.module}.{alias.name}")
+        elif isinstance(node, ast.Assign):
+            names = [target.id for target in node.targets if isinstance(target, ast.Name)]
+            if len(names) != 1 or len(node.targets) != 1 or names[0] not in MIGRATION_SETTINGS:
+                messages.append("only the Alembic settings may be assigned")
+            elif not _is_constant_setting(node.value):
+                messages.append(f"{names[0]} must be a constant")
+            else:
+                settings.add(names[0])
+        elif isinstance(node, ast.FunctionDef) and node.name in {"upgrade", "downgrade"}:
+            functions.add(node.name)
+            messages += _check_migration_function(node)
+        else:
+            messages.append(f"statement not allowed in a migration: {type(node).__name__}")
+
+    if functions != {"upgrade", "downgrade"}:
+        messages.append("a migration needs exactly upgrade() and downgrade()")
+    if "revision" not in settings:
+        messages.append("a migration needs its revision")
+    return [Violation(source, 0, message) for message in messages]
 
 
 def check_repository(root: Path = REPO) -> list[Violation]:
     """Check sql/roles.sql and every migration, as the CI does."""
-    problems: list[Violation] = []
-    roles = root / "sql" / "roles.sql"
-    problems += check_roles_sql(_read(roles), _relative(roles, root))
+    problems: list[Violation] = [
+        Violation("tools/grant_policy.py", 0, message) for message in grant_policy.check_policy()
+    ]
+    roles_file = root / "sql" / "roles.sql"
+    problems += check_roles_sql(_read(roles_file), _relative(roles_file, root))
 
     versions = root / "migrations" / "versions"
     sql_files = sorted(versions.glob("*.sql"))
@@ -254,24 +319,159 @@ def _create_table(stmt: pg.CreateStmt) -> list[str]:
         return [f"table names must use an explicit project schema: {relation.relname}"]
     if relation.relpersistence != "p":
         return ["temporary and unlogged tables are not allowed"]
-    return []
+    problems = [
+        f"CREATE TABLE option not allowed: {option}"
+        for option in TABLE_OPTIONS
+        if getattr(stmt, option, None)
+    ]
+    for element in stmt.tableElts or ():
+        if isinstance(element, pg.ColumnDef):
+            problems += _column(element)
+        elif isinstance(element, pg.Constraint):
+            problems += _constraint(element)
+        else:
+            problems.append(f"table element not allowed: {type(element).__name__}")
+    return problems
+
+
+def _column(column: pg.ColumnDef) -> list[str]:
+    problems = [
+        f"column {column.colname}: option not allowed: {option}"
+        for option in COLUMN_OPTIONS
+        if getattr(column, option, None)
+    ]
+    problems += [f"column {column.colname}: {problem}" for problem in _type(column.typeName)]
+    for constraint in column.constraints or ():
+        problems += [f"column {column.colname}: {problem}" for problem in _constraint(constraint)]
+    return problems
+
+
+def _type(type_name: pg.TypeName) -> list[str]:
+    names = [_string_value(name) for name in type_name.names or ()]
+    if not names or (len(names) == 2 and names[0] != "pg_catalog") or len(names) > 2:
+        return [f"type not allowed: {'.'.join(map(str, names))}"]
+    problems = []
+    if names[-1] not in COLUMN_TYPES:
+        problems.append(f"type not allowed: {names[-1]}")
+    if type_name.setof or type_name.pct_type or type_name.arrayBounds:
+        problems.append("SETOF, %TYPE and array types are not allowed")
+    for modifier in type_name.typmods or ():
+        if not (isinstance(modifier, pg.A_Const) and isinstance(modifier.val, pg.Integer)):
+            problems.append("type modifiers must be integer constants")
+    return problems
+
+
+def _constraint(constraint: pg.Constraint) -> list[str]:
+    kind = constraint.contype
+    if kind in (ConstrType.CONSTR_NOTNULL, ConstrType.CONSTR_NULL):
+        return []
+    if kind == ConstrType.CONSTR_DEFAULT:
+        return _expression(constraint.raw_expr, "DEFAULT", DEFAULT_FUNCTIONS)
+    if kind == ConstrType.CONSTR_CHECK:
+        return _expression(constraint.raw_expr, "CHECK", frozenset())
+    if kind in (ConstrType.CONSTR_PRIMARY, ConstrType.CONSTR_UNIQUE):
+        return [
+            f"{kind.name}: option not allowed: {option}"
+            for option in INDEX_OPTIONS
+            if getattr(constraint, option, None)
+        ]
+    if kind == ConstrType.CONSTR_FOREIGN:
+        problems = []
+        if getattr(constraint.pktable, "schemaname", None) not in PROJECT_SCHEMAS:
+            problems.append("foreign keys must reference a table of a project schema")
+        if {constraint.fk_upd_action, constraint.fk_del_action} - FOREIGN_KEY_ACTIONS:
+            problems.append("foreign keys may only use NO ACTION or RESTRICT")
+        if constraint.fk_del_set_cols:
+            problems.append("foreign keys may not set columns on delete")
+        return problems
+    return [f"constraint not allowed: {kind.name}"]
+
+
+def _expression(node: object, context: str, functions: frozenset[str]) -> list[str]:
+    """Check a CHECK or DEFAULT expression against a whitelist of node kinds."""
+    problems: list[str] = []
+
+    def visit(item: object) -> None:
+        if item is None or isinstance(item, pg.A_Const):
+            return
+        if isinstance(item, tuple):
+            for element in item:
+                visit(element)
+        elif isinstance(item, pg.ColumnRef):
+            fields = item.fields or ()
+            if len(fields) != 1 or not isinstance(fields[0], pg.String):
+                problems.append(f"{context}: only plain column names may be referenced")
+        elif isinstance(item, pg.A_Expr):
+            operator = [_string_value(name) for name in item.name or ()]
+            if item.kind not in EXPRESSION_KINDS or len(operator) != 1:
+                problems.append(f"{context}: expression kind not allowed: {item.kind.name}")
+            elif operator[0] not in EXPRESSION_OPERATORS:
+                problems.append(f"{context}: operator not allowed: {operator[0]}")
+            visit(item.lexpr)
+            visit(item.rexpr)
+        elif isinstance(item, pg.BoolExpr):
+            visit(item.args)
+        elif isinstance(item, pg.NullTest | pg.BooleanTest):
+            visit(item.arg)
+        elif isinstance(item, pg.TypeCast):
+            problems.extend(f"{context}: {problem}" for problem in _type(item.typeName))
+            visit(item.arg)
+        elif isinstance(item, pg.FuncCall):
+            name = ".".join(str(_string_value(part)) for part in item.funcname or ())
+            plain_call = not (
+                item.args
+                or item.agg_order
+                or item.agg_filter
+                or item.over
+                or item.agg_star
+                or item.agg_distinct
+                or item.func_variadic
+            )
+            if name not in functions or not plain_call:
+                problems.append(f"{context} may not call {name}()")
+        else:
+            problems.append(f"{context}: expression not allowed: {type(item).__name__}")
+
+    visit(node)
+    return problems
 
 
 def _grant_in_database(stmt: pg.GrantStmt) -> list[str]:
     if stmt.objtype == ObjectType.OBJECT_SCHEMA:
         problems = _grant_common(stmt, SCHEMA_PRIVILEGES)
+        targets = [(grant_policy.SCHEMA, _string_value(obj)) for obj in stmt.objects or ()]
         if stmt.is_grant:
-            for obj in stmt.objects or ():
-                if _string_value(obj) not in PROJECT_SCHEMAS:
-                    problems.append(f"grants only on project schemas: {_string_value(obj)}")
-        return problems
-    if stmt.objtype == ObjectType.OBJECT_TABLE:
+            for _kind, schema in targets:
+                if schema not in PROJECT_SCHEMAS:
+                    problems.append(f"grants only on project schemas: {schema}")
+    elif stmt.objtype == ObjectType.OBJECT_TABLE:
         problems = _grant_common(stmt, TABLE_PRIVILEGES)
+        targets = []
         for obj in stmt.objects or ():
-            if getattr(obj, "schemaname", None) not in PROJECT_SCHEMAS:
+            schema = getattr(obj, "schemaname", None)
+            if schema not in PROJECT_SCHEMAS:
                 problems.append("table grants need an explicit project schema")
-        return problems
-    return [f"grants on {stmt.objtype.name} are not allowed"]
+            targets.append((grant_policy.TABLE, f"{schema}.{getattr(obj, 'relname', None)}"))
+    else:
+        return [f"grants on {stmt.objtype.name} are not allowed"]
+
+    if stmt.is_grant and not problems:
+        problems += _grants_outside_the_matrix(stmt, targets)
+    return problems
+
+
+def _grants_outside_the_matrix(stmt: pg.GrantStmt, targets: list[tuple[str, str]]) -> list[str]:
+    """Every (role, privilege, object) must be in the exact matrix of tools/grant_policy.py."""
+    problems: list[str] = []
+    for privilege in stmt.privileges or ():
+        for kind, target in targets:
+            for grantee in stmt.grantees or ():
+                grant = Grant(str(_role_name(grantee)), privilege.priv_name, kind, target)
+                if grant in ALLOWED_GRANTS:
+                    continue
+                reason = section_9_conflict(grant) or "not in the role matrix (grant_policy.py)"
+                problems.append(f"grant not allowed: {grant}: {reason}")
+    return problems
 
 
 def _grant_common(stmt: pg.GrantStmt, allowed_privileges: frozenset[str]) -> list[str]:
@@ -314,6 +514,60 @@ def _insert(stmt: pg.InsertStmt) -> list[str]:
             if not isinstance(value, pg.A_Const) or value.isnull:
                 problems.append("INSERT values must be non-null constants")
     return problems
+
+
+def _check_migration_function(node: ast.FunctionDef) -> list[str]:
+    messages: list[str] = []
+    arguments = node.args
+    if (
+        node.decorator_list
+        or arguments.posonlyargs
+        or arguments.args
+        or arguments.vararg
+        or arguments.kwonlyargs
+        or arguments.kwarg
+    ):
+        messages.append(f"{node.name}() must take no arguments and have no decorators")
+
+    body = node.body[1:] if node.body and _is_docstring(node.body[0]) else node.body
+    if node.name == "upgrade":
+        if (
+            len(body) != 1
+            or not isinstance(body[0], ast.Expr)
+            or ast.dump(body[0].value) != SIBLING_SQL_CALL
+        ):
+            messages.append(
+                'upgrade() may only call execute_sql_file(Path(__file__).with_suffix(".sql"))'
+            )
+    elif not (
+        len(body) == 1
+        and isinstance(body[0], ast.Raise)
+        and isinstance(body[0].exc, ast.Call)
+        and isinstance(body[0].exc.func, ast.Name)
+        and body[0].exc.func.id == "NotImplementedError"
+        and all(isinstance(arg, ast.Constant) for arg in body[0].exc.args)
+        and not body[0].exc.keywords
+    ):
+        messages.append("downgrade() may only raise NotImplementedError")
+    return messages
+
+
+def _is_docstring(node: ast.stmt) -> bool:
+    return (
+        isinstance(node, ast.Expr)
+        and isinstance(node.value, ast.Constant)
+        and isinstance(node.value.value, str)
+    )
+
+
+def _is_constant_setting(value: ast.expr) -> bool:
+    if isinstance(value, ast.Constant):
+        return value.value is None or isinstance(value.value, str)
+    if isinstance(value, ast.Tuple | ast.List):
+        return all(
+            isinstance(item, ast.Constant) and isinstance(item.value, str) for item in value.elts
+        )
+    return False
 
 
 def _role_name(role: pg.RoleSpec | None) -> str | None:

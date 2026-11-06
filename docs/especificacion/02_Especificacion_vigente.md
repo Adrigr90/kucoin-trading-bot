@@ -16,7 +16,7 @@ Este documento **sustituye, para leer y auditar**, al Informe V4 y a los anexos 
 | Especificado | Sí, con pendientes |
 | Verificado documentalmente | Parcial |
 | Validado mediante pruebas | **Fase 1** (6 de noviembre de 2026): H07, B18, B20, B25, B26, RC14, RC15 y la parte de PostgreSQL y roles de la sección 9. Informe en `docs/informes/Informe_Fase1.md` del repositorio |
-| Implementado | **Fase 1**, en la rama `fase-1`, **pendiente de integrar en `main`** |
+| Implementado | **Fase 1**: una primera versión integrada en `main` (pull request #1, 6 de noviembre de 2026); las correcciones de la auditoría del revisor, en la rama `fase-1`, **pendientes de integrar** (pull request #2) |
 | Decisiones D01-D35 aprobadas | **4**: D17, D33 y D35, el 5 de noviembre de 2026, y D18, el 6 de noviembre (ver `03_Decisiones.md`) |
 
 **Etiquetas:** [H] hecho oficial verificado (fuente en la sección 16) · [I] inferencia técnica · [R] recomendación · [P] pendiente · [Cxx] corrección de origen · [Dxx] decisión del propietario (pendiente salvo que se indique «aprobada») · [Hxx] hallazgo abierto.
@@ -1341,4 +1341,4 @@ $$\Delta Cap=\underbrace{8}_{\text{distancia mark-stop de lo cerrado}}+\underbra
 | 6 nov 2026 | **Cierre de la Fase 0 y versión 1.0 congelada.** El propietario declara cerrada la Fase 0 (criterio de D35 cumplido) y autoriza la Fase 1. Se añaden la regla de congelación y el estado de la Fase 0 en la cabecera | Propietario |
 | 6 nov 2026 | **Versión 1.1: revisión de la sección 9 antes de la Fase 1 (D35).** `pg_hba.conf` solo con `local ... peer`; tabla de atributos de los roles (login, límite de conexiones y `statement_timeout`, estos dos provisionales); la CI usa PostgreSQL instalado en el runner, no un contenedor, y deja de afirmar que un intento por TCP demuestra que la contraseña falla. Fuentes de PostgreSQL y GitHub añadidas en la sección 16. El resto de la sección 9 se confirmó sin cambios | Revisor (sección 9); aplicada a petición del propietario |
 | 6 nov 2026 | **Decisión del propietario: D18 aprobada** (backtests en su PC con WSL2; el resto de su trabajo, en Windows). Actualizados la cabecera y la sección 2 | Propietario |
-| 6 nov 2026 | **Fase 1 implementada y probada** en la rama `fase-1` (A1-A10 superadas; CI en verde con 235 pruebas). Estados actualizados solo con lo probado: cabecera, `pglast` en la sección 9 y RC14 en la sección 15. Sin cambios de reglas | Claude (alcance aprobado) |
+| 6 nov 2026 | **Fase 1 implementada y probada** en la rama `fase-1` (A1-A10 superadas; CI en verde con 355 pruebas). Estados actualizados solo con lo probado: cabecera, `pglast` en la sección 9 y RC14 en la sección 15. Sin cambios de reglas | Claude (alcance aprobado) |

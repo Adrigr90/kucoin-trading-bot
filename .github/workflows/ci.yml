@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  phase1:
+    name: Fase 1 - comprobaciones
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      KBOT_CI: "1"
+    steps:
+      - name: Descargar el repositorio con todo su historial
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Instalar uv 0.13.7
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.13.7"
+
+      - name: A1 - instalar exactamente uv.lock
+        run: bash ci/step.sh "A1 uv sync --frozen" uv sync --frozen
+
+      - name: Estilo (ruff)
+        run: bash ci/step.sh "ruff" bash -c "uv run ruff check . && uv run ruff format --check ."
+
+      - name: Instalar gitleaks 8.30.1 con huella verificada
+        run: bash ci/step.sh "gitleaks install" bash ci/install_gitleaks.sh
+
+      - name: Buscar secretos en todo el historial (gitleaks)
+        run: bash ci/step.sh "gitleaks" "$RUNNER_TEMP/gitleaks/gitleaks" git --redact --no-banner --verbose .
+
+      - name: B20 - lista blanca de SQL (pglast)
+        run: bash ci/step.sh "sql_guard" uv run python -m tools.sql_guard
+
+      - name: Limites de la migracion frente al DM
+        run: bash ci/step.sh "check_limits" uv run python -m tools.check_limits
+
+      - name: Instalar PostgreSQL 18 en el runner (no en contenedor)
+        run: bash ci/step.sh "postgresql" bash ci/install_postgres.sh
+
+      - name: Crear roles y base de datos (sql/roles.sql)
+        run: >-
+          bash ci/step.sh "roles.sql"
+          psql -X -v ON_ERROR_STOP=1 -h /var/run/postgresql -U postgres -d postgres -f sql/roles.sql
+
+      - name: Aplicar las migraciones como kbot_owner (Alembic)
+        env:
+          KBOT_DB_ADMIN_URL: postgresql+psycopg://postgres@/kbot?host=/var/run/postgresql
+        run: bash ci/step.sh "alembic" uv run alembic upgrade head
+
+      - name: Pruebas unitarias, de propiedades, de la CI y de PostgreSQL
+        env:
+          KBOT_TEST_DB: "1"
+          KBOT_PGHOST: /var/run/postgresql
+          KBOT_GITLEAKS: ${{ runner.temp }}/gitleaks/gitleaks
+        run: bash ci/step.sh "pytest" uv run pytest -p no:cacheprovider

@@ -15,8 +15,8 @@ Este documento **sustituye, para leer y auditar**, al Informe V4 y a los anexos 
 | Fase 0 | **Cerrada** el 6 de noviembre de 2026 (D35). Fase 1 autorizada |
 | Especificado | Sí, con pendientes |
 | Verificado documentalmente | Parcial |
-| Validado mediante pruebas | **0** |
-| Implementado | **0** |
+| Validado mediante pruebas | **Fase 1** (6 de noviembre de 2026): H07, B18, B20, B25, B26, RC14, RC15 y la parte de PostgreSQL y roles de la sección 9. Informe en `docs/informes/Informe_Fase1.md` del repositorio |
+| Implementado | **Fase 1**, en la rama `fase-1`, **pendiente de integrar en `main`** |
 | Decisiones D01-D35 aprobadas | **4**: D17, D33 y D35, el 5 de noviembre de 2026, y D18, el 6 de noviembre (ver `03_Decisiones.md`) |
 
 **Etiquetas:** [H] hecho oficial verificado (fuente en la sección 16) · [I] inferencia técnica · [R] recomendación · [P] pendiente · [Cxx] corrección de origen · [Dxx] decisión del propietario (pendiente salvo que se indique «aprobada») · [Hxx] hallazgo abierto.
@@ -930,7 +930,7 @@ Los límites y tiempos son provisionales: se ajustan con el consumo medido en la
 - `roles.sql` en Git contiene **solo objetos globales**, con `PASSWORD NULL`.
 - Las funciones y los permisos sobre objetos van en las migraciones.
 - **CI en tres capas:**
-  1. analizador SQL real (`pglast` [P]) con lista blanca de sentencias;
+  1. analizador SQL real (`pglast` [H: versión 8.7 con la gramática de PostgreSQL 18.6, validado en la F1]) con lista blanca de sentencias;
   2. búsqueda de secretos (gitleaks);
   3. **PostgreSQL efímero, instalado en el propio runner de Ubuntu.** No se usa un contenedor de servicio al que se llega por TCP, porque `peer` solo funciona por socket Unix local [H]. Comprueba:
      - `rolpassword IS NULL` y el login, el límite de conexiones y el `statement_timeout` de cada rol, según la tabla de atributos;
@@ -1126,7 +1126,7 @@ Los límites y tiempos son provisionales: se ajustan con el consumo medido en la
 | RC11 | Caso 8 en magnitudes de riesgo: (a) se acerca el stop de A con el precio quieto; (b) el precio se mueve 30 en contra de A (**detalle completo en 15.5**) | Capacidad (B1 = B2): inicial 0; (a) **30**; (b) **0** |
 | RC12 | Valoración de contingencia, largo de 10 a 60.000, margen 300, último precio 58.000 | $g$ = 25 % → **+135**; $g$ = 60 % → **−68**; ejemplo 100/130 → **−30** |
 | RC13 | Fórmula oficial de liquidación (ejemplo de KuCoin) | **29.535,9** |
-| RC14 | Merkle | Raíz vacía `e3b0c442…b855`; hoja vacía `6e340b9c…a01d` [P: confirmar en F1 con 2 implementaciones] |
+| RC14 | Merkle | Raíz vacía `e3b0c442…b855`; hoja vacía `6e340b9c…a01d` [H: confirmado en la F1 con `hashlib` y OpenSSL, y con los vectores de transparency-dev] |
 | RC15 | Serialización | `-1.50`→`"-1.5"`; `-0`→`"0"`; 19 decimales → error |
 | RC16 | Polvo: residuo de 0,00001 BTC, $\bar P$ 60.000, bid al traspaso 63.000; al día siguiente, bid 62.000 | Traspaso: `dust_cost` 0,63; coste dado de baja 0,6; realizado de la posición **+0,03**. Día siguiente: $V_{res}$ = 0,62 − 0,63 → $PnL_{res}$ = **−0,01** [H03] |
 
@@ -1341,3 +1341,4 @@ $$\Delta Cap=\underbrace{8}_{\text{distancia mark-stop de lo cerrado}}+\underbra
 | 6 nov 2026 | **Cierre de la Fase 0 y versión 1.0 congelada.** El propietario declara cerrada la Fase 0 (criterio de D35 cumplido) y autoriza la Fase 1. Se añaden la regla de congelación y el estado de la Fase 0 en la cabecera | Propietario |
 | 6 nov 2026 | **Versión 1.1: revisión de la sección 9 antes de la Fase 1 (D35).** `pg_hba.conf` solo con `local ... peer`; tabla de atributos de los roles (login, límite de conexiones y `statement_timeout`, estos dos provisionales); la CI usa PostgreSQL instalado en el runner, no un contenedor, y deja de afirmar que un intento por TCP demuestra que la contraseña falla. Fuentes de PostgreSQL y GitHub añadidas en la sección 16. El resto de la sección 9 se confirmó sin cambios | Revisor (sección 9); aplicada a petición del propietario |
 | 6 nov 2026 | **Decisión del propietario: D18 aprobada** (backtests en su PC con WSL2; el resto de su trabajo, en Windows). Actualizados la cabecera y la sección 2 | Propietario |
+| 6 nov 2026 | **Fase 1 implementada y probada** en la rama `fase-1` (A1-A10 superadas; CI en verde con 235 pruebas). Estados actualizados solo con lo probado: cabecera, `pglast` en la sección 9 y RC14 en la sección 15. Sin cambios de reglas | Claude (alcance aprobado) |

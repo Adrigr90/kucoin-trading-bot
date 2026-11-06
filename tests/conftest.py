@@ -58,6 +58,20 @@ def find_tool() -> Callable[[str, str | None], str]:
     return find
 
 
+@pytest.fixture(scope="session")
+def ci_environment() -> Callable[[str], str]:
+    """Read a value that the CI provides, or skip (fail in the CI) when it is missing."""
+
+    def read(name: str) -> str:
+        value = os.environ.get(name)
+        if not value:
+            _unavailable(f"environment variable not set: {name}")
+            raise AssertionError("unreachable")
+        return value
+
+    return read
+
+
 @pytest.hookimpl(tryfirst=True)
 def pytest_runtest_setup(item: pytest.Item) -> None:
     if item.get_closest_marker("db") and not DB_ENABLED:

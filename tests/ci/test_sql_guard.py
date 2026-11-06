@@ -87,6 +87,102 @@ def test_migration_sql_rejects(sql: str) -> None:
     assert check_migration_sql(sql, "test.sql"), sql
 
 
+# --- grants outside the role matrix of §9 (reviewer finding 1) -------------------------
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        # The reviewer's examples: §9 says kbot_ingest has nothing in trading.
+        "GRANT USAGE ON SCHEMA trading TO kbot_ingest;",
+        "GRANT INSERT ON TABLE trading.signals TO kbot_ingest;",
+        # Approvals belong only to kbot_risk.
+        "GRANT INSERT ON TABLE trading.approved_orders TO kbot_strategy;",
+        "GRANT INSERT ON TABLE trading.risk_decisions TO kbot_broker;",
+        # Nobody but kbot_owner writes the limits.
+        "GRANT INSERT ON TABLE config.risk_limits TO kbot_web;",
+        "GRANT INSERT ON TABLE config.risk_limits TO kbot_risk;",
+        # Risk cannot execute; Telegram can only request a pause; backup never gets grants.
+        "GRANT INSERT ON TABLE trading.paper_fills TO kbot_risk;",
+        "GRANT INSERT ON TABLE trading.signals TO kbot_telegram;",
+        "GRANT SELECT ON TABLE config.risk_limits TO kbot_backup;",
+        # Compatible with §9 but not in the exact matrix yet: also rejected.
+        "GRANT SELECT ON TABLE config.risk_limits TO kbot_web;",
+        "GRANT USAGE ON SCHEMA market TO kbot_ingest;",
+        # One allowed grant does not cover another in the same statement.
+        "GRANT USAGE ON SCHEMA config TO kbot_risk, kbot_ingest;",
+    ],
+)
+def test_grants_outside_the_role_matrix_are_rejected(sql: str) -> None:
+    problems = check_migration_sql(sql, "test.sql")
+    assert any("grant not allowed" in str(problem) for problem in problems), problems
+
+
+def test_the_grants_of_the_matrix_are_accepted() -> None:
+    sql = (
+        "GRANT USAGE ON SCHEMA config TO kbot_risk, kbot_watchdog;"
+        "GRANT SELECT ON TABLE config.risk_limits TO kbot_risk, kbot_watchdog;"
+        "REVOKE ALL ON SCHEMA public FROM PUBLIC;"
+    )
+    assert check_migration_sql(sql, "test.sql") == []
+
+
+# --- table definitions (reviewer finding 2) ---------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        # The reviewer's example: a CHECK with a side effect on every insert.
+        "CREATE TABLE config.example (payload text, CHECK (pg_notify('canal', payload) IS NULL));",
+        "CREATE TABLE config.x (a text CHECK (pg_notify('canal', a) IS NULL));",
+        "CREATE TABLE config.x (a numeric CHECK (a > random()));",
+        "CREATE TABLE config.x (a text CHECK (a = (SELECT 'x')));",
+        "CREATE TABLE config.x (a text CHECK (a OPERATOR(public.=) 'x'));",
+        "CREATE TABLE config.x (a bigint DEFAULT nextval('config.s'));",
+        "CREATE TABLE config.x (a text DEFAULT set_config('search_path', 'public', false));",
+        "CREATE TABLE config.x (a numeric DEFAULT pg_sleep(1));",
+        "CREATE TABLE config.x (a numeric DEFAULT random());",
+        "CREATE TABLE config.x (a text DEFAULT current_user);",
+        "CREATE TABLE config.x (a timestamptz DEFAULT pg_catalog.clock_timestamp());",
+        "CREATE TABLE config.x (a int GENERATED ALWAYS AS IDENTITY);",
+        "CREATE TABLE config.x (a int, b int GENERATED ALWAYS AS (a * 2) STORED);",
+        'CREATE TABLE config.x (a text COLLATE "C");',
+        "CREATE TABLE config.x (a money);",
+        "CREATE TABLE config.x (a public.evil_type);",
+        "CREATE TABLE config.x (a text[]);",
+        "CREATE TABLE config.x (LIKE config.risk_limits);",
+        "CREATE TABLE config.x (a int) WITH (fillfactor = 70);",
+        "CREATE TABLE config.x (a int) INHERITS (config.risk_limits);",
+        "CREATE TABLE config.x (a int) PARTITION BY RANGE (a);",
+        "CREATE TABLE IF NOT EXISTS config.x (a int);",
+        "CREATE TABLE config.x (a int REFERENCES public.t (id));",
+        "CREATE TABLE config.x (a int REFERENCES config.t (id) ON DELETE CASCADE);",
+        "CREATE TABLE config.x (a int, EXCLUDE USING gist (a WITH =));",
+        "CREATE TABLE config.x (a int PRIMARY KEY WITH (fillfactor = 70));",
+    ],
+)
+def test_table_definitions_outside_the_whitelist_are_rejected(sql: str) -> None:
+    assert check_migration_sql(sql, "test.sql"), sql
+
+
+def test_an_ordinary_table_is_accepted() -> None:
+    sql = """
+        CREATE TABLE trading.example (
+            id bigint PRIMARY KEY,
+            parent_id bigint NOT NULL REFERENCES trading.parent (id),
+            side text NOT NULL CHECK (side IN ('buy', 'sell')),
+            qty numeric(38, 18) NOT NULL CHECK (qty > 0 AND qty <= 1000000),
+            note text,
+            settled boolean NOT NULL DEFAULT false,
+            created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+            CHECK (note IS NULL OR note <> ''),
+            UNIQUE (parent_id, side)
+        );
+    """
+    assert check_migration_sql(sql, "test.sql") == []
+
+
 @pytest.mark.parametrize(
     "module",
     [

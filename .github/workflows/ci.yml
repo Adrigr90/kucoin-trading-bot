@@ -67,4 +67,5 @@ jobs:
           KBOT_TEST_DB: "1"
           KBOT_PGHOST: /var/run/postgresql
           KBOT_GITLEAKS: ${{ runner.temp }}/gitleaks/gitleaks
+          KBOT_REPO_VISIBILITY: ${{ github.event.repository.visibility }}
         run: bash ci/step.sh "pytest" uv run pytest -p no:cacheprovider

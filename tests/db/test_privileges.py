@@ -3,6 +3,10 @@
 The matrices use PostgreSQL's own has_table_privilege and has_schema_privilege, which
 include privileges inherited through role membership and those of predefined roles such
 as pg_read_all_data. Anything granted indirectly therefore shows up here as well.
+
+The expected privileges are exactly the role matrix of tools/grant_policy.py plus the
+read-only access of kbot_backup through pg_read_all_data: the live database may have
+neither more nor fewer.
 """
 
 from __future__ import annotations
@@ -11,6 +15,9 @@ import psycopg
 import pytest
 
 from kbot.db.roles import BACKUP, DATABASE, FUNCTION_OWNER, LOGIN_ROLES, OWNER, SCHEMAS
+from tools.grant_policy import ALLOWED_GRANTS
+from tools.grant_policy import SCHEMA as SCHEMA_KIND
+from tools.grant_policy import TABLE as TABLE_KIND
 
 pytestmark = pytest.mark.db
 
@@ -25,8 +32,17 @@ TABLE_PRIVILEGES = [
     "MAINTAIN",
 ]
 SCHEMA_PRIVILEGES = ["USAGE", "CREATE"]
-LIMIT_READERS = ("kbot_risk", "kbot_watchdog")
 CHECKED_SCHEMAS = sorted(SCHEMAS | {"public"})
+MATRIX_TABLE_PRIVILEGES = {
+    (grant.role, grant.target, grant.privilege.upper())
+    for grant in ALLOWED_GRANTS
+    if grant.kind == TABLE_KIND
+}
+MATRIX_SCHEMA_PRIVILEGES = {
+    (grant.role, grant.target, grant.privilege.upper())
+    for grant in ALLOWED_GRANTS
+    if grant.kind == SCHEMA_KIND
+}
 # Every role that must not own anything, plus the PUBLIC pseudo-role.
 NON_OWNERS = [*LOGIN_ROLES, FUNCTION_OWNER, "public"]
 
@@ -74,7 +90,7 @@ def test_effective_table_privileges(admin: psycopg.Connection) -> None:
     assert "config.risk_limits" in relations
 
     expected = {(BACKUP, relation, "SELECT") for relation in relations}
-    expected |= {(role, "config.risk_limits", "SELECT") for role in LIMIT_READERS}
+    expected |= MATRIX_TABLE_PRIVILEGES
     assert set(granted) == expected
 
 
@@ -90,7 +106,7 @@ def test_effective_schema_privileges(admin: psycopg.Connection) -> None:
         (NON_OWNERS, CHECKED_SCHEMAS, SCHEMA_PRIVILEGES),
     ).fetchall()
     expected = {(BACKUP, schema, "USAGE") for schema in CHECKED_SCHEMAS}
-    expected |= {(role, "config", "USAGE") for role in LIMIT_READERS}
+    expected |= MATRIX_SCHEMA_PRIVILEGES
     assert set(granted) == expected
 
 

@@ -136,7 +136,6 @@ def test_only_market_channels_are_whitelisted() -> None:
     [
         ("wss://x-push-spot.kucoin.com", "SPOT"),
         ("wss://x-push-futures.kucoin.com", "FUTURES"),
-        ("ws://127.0.0.1:8765", "SPOT"),
     ],
 )
 def test_public_endpoints_are_allowed(url: str, trade_type: str) -> None:
@@ -153,6 +152,9 @@ def test_public_endpoints_are_allowed(url: str, trade_type: str) -> None:
         ("ws://x-push-spot.kucoin.com", "SPOT"),
         ("ws://10.0.0.1:8765", "SPOT"),
         ("ws://localhost:8765", "SPOT"),
+        ("ws://127.0.0.1:8765", "SPOT"),
+        ("ws://127.0.0.1:8765", "FUTURES"),
+        ("ws://[::1]:8765", "SPOT"),
     ],
 )
 def test_other_endpoints_are_refused(url: str, trade_type: str) -> None:
@@ -178,16 +180,30 @@ def test_stream_construction_checks_everything() -> None:
     assert len(many) > MAX_TOPICS_PER_CONNECTION
     with pytest.raises(ValueError, match="topics"):
         PublicStream("SPOT", many, on_message=lambda *_: None, pacer=pacer)
-    with pytest.raises(ForbiddenMessage, match="endpoint"):
-        PublicStream(
-            "SPOT",
-            [good],
-            on_message=lambda *_: None,
-            pacer=pacer,
-            url="wss://ws-api-spot.kucoin.com",
-        )
     stream = PublicStream("SPOT", [good], on_message=lambda *_: None, pacer=pacer)
     assert stream._url == PUBLIC_ENDPOINTS["SPOT"]
+
+
+@pytest.mark.parametrize("url", ["ws://127.0.0.1:8765", "wss://ws-api-spot.kucoin.com"])
+def test_a_stream_cannot_be_pointed_elsewhere(url: str) -> None:
+    """A3-01: the endpoint is not configurable, so a loopback or private URL is refused
+    before any connection is opened."""
+    opened: list[str] = []
+
+    def connector(target: str, **_options: object) -> object:
+        opened.append(target)
+        raise AssertionError("must not connect")
+
+    with pytest.raises(TypeError, match="url"):
+        PublicStream(  # type: ignore[call-arg]
+            "SPOT",
+            [Subscription("trade", "SPOT", "BTC-USDT")],
+            on_message=lambda *_: None,
+            pacer=ConnectionPacer(),
+            connector=connector,
+            url=url,
+        )
+    assert opened == []
 
 
 class FakeTime:

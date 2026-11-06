@@ -82,6 +82,45 @@ class FuturesInstrument(Model):
     tradingStatus: str
 
 
+# --- UTA V1 (REST), kept as a contract until D04 is decided ------------------------------
+# V1 differs from V2 in the types, not only in the names: status codes are digits, and the
+# Futures instrument mixes JSON numbers with text. Each field below has the type that V1
+# actually sends (recorded on 6 November 2026).
+
+
+class SpotInstrumentV1(Model):
+    symbol: str
+    baseCurrency: str
+    quoteCurrency: str
+    tickSize: TextDecimal
+    baseOrderStep: TextDecimal
+    minBaseOrderSize: TextDecimal
+    minFunds: TextDecimal
+    feeCurrency: str
+    tradingStatus: Annotated[str, Field(pattern=r"^[0-9]+$")]  # a code, "1" when trading
+    feeCategory: Int
+
+
+class FuturesInstrumentV1(Model):
+    symbol: str
+    baseCurrency: str
+    quoteCurrency: str
+    settlementCurrency: str
+    isInverse: bool
+    tickSize: TextDecimal
+    lotSize: TextDecimal
+    unitSize: TextDecimal  # contract multiplier, in base currency
+    makerFeeRate: TextDecimal
+    takerFeeRate: TextDecimal
+    maxLeverage: Int  # a JSON integer in V1, text in V2
+    launchTime: Int  # ms
+    orderPriceRange: NumberDecimal  # JSON numbers in V1
+    indexPriceTickSize: NumberDecimal
+    buyLimit: NumberDecimal
+    sellLimit: NumberDecimal
+    tradingStatus: Annotated[str, Field(pattern=r"^[0-9]+$")]
+
+
 class InstrumentList(Model):
     tradeType: Literal["SPOT", "FUTURES"]
     list: list[dict[str, Any]]

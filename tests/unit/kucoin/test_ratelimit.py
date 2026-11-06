@@ -16,6 +16,7 @@ from kbot.kucoin.ratelimit import (
     POOL_WEIGHT,
     RateLimitHeaders,
     RestRateLimiter,
+    shared_limiter,
 )
 from kbot.kucoin.rest import KucoinApiError, KucoinRestClient
 
@@ -202,3 +203,79 @@ def test_success_returns_data_and_headers() -> None:
     response = run_client(fake, transport)
     assert response.data == []  # type: ignore[attr-defined]
     assert response.ratelimit == RateLimitHeaders(2000, 1997, 29000)  # type: ignore[attr-defined]
+
+
+class SharedTime:
+    """Fake time for concurrent tasks: a sleep moves time forward and yields."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def clock(self) -> float:
+        return self.now
+
+    async def sleep(self, seconds: float) -> None:
+        assert seconds > 0
+        self.now = max(self.now, self.now + seconds)
+        await asyncio.sleep(0)
+
+
+class Stamped(httpx.AsyncBaseTransport):
+    """Records when each request reaches the network, and its weight."""
+
+    def __init__(self, fake: SharedTime, log: list[tuple[float, int]]) -> None:
+        self.fake = fake
+        self.log = log
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        self.log.append((self.fake.now, 15))
+        await asyncio.sleep(0)
+        return httpx.Response(200, json={"code": "200000", "data": []})
+
+
+def worst_window(log: list[tuple[float, int]]) -> int:
+    log = sorted(log)
+    times = [t for t, _ in log]
+    prefix = list(itertools.accumulate((w for _, w in log), initial=0))
+    return max(prefix[bisect.bisect_left(times, t + 30.0)] - prefix[i] for i, t in enumerate(times))
+
+
+def two_clients(shared: bool) -> int:
+    """Two clients sending ticker requests (weight 15) concurrently; worst 30 s window."""
+    fake = SharedTime()
+    log: list[tuple[float, int]] = []
+    common = RestRateLimiter(clock=fake.clock, sleep=fake.sleep)
+
+    def budget() -> RestRateLimiter:
+        return common if shared else RestRateLimiter(clock=fake.clock, sleep=fake.sleep)
+
+    async def client_load(client: KucoinRestClient) -> None:
+        for _ in range(150):
+            await client.get("uta.v2.ticker", params={"tradeType": "SPOT", "symbol": "BTC-USDT"})
+
+    async def go() -> None:
+        async with (
+            KucoinRestClient(limiter=budget(), transport=Stamped(fake, log)) as first,
+            KucoinRestClient(limiter=budget(), transport=Stamped(fake, log)) as second,
+        ):
+            await asyncio.gather(client_load(first), client_load(second))
+
+    asyncio.run(go())
+    assert len(log) == 300
+    return worst_window(log)
+
+
+def test_a2_01_clients_of_one_process_share_one_budget() -> None:
+    """A2-01: two clients together never exceed 1,000 weight in any 30 s window."""
+    assert two_clients(shared=True) <= POOL_WEIGHT / 2
+    # The same load with a budget per client would reach the whole pool: the test above
+    # would catch it.
+    assert two_clients(shared=False) > POOL_WEIGHT / 2
+
+
+def test_a2_01_clients_use_the_shared_budget_by_default() -> None:
+    async def go() -> None:
+        async with KucoinRestClient() as first, KucoinRestClient() as second:
+            assert first.limiter is second.limiter is shared_limiter()
+
+    asyncio.run(go())

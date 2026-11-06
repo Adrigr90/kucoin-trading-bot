@@ -16,9 +16,16 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
+from websockets.asyncio.client import connect as websocket_connect
 from websockets.asyncio.server import ServerConnection, serve
 
-from kbot.kucoin.ws import ConnectionPacer, PublicStream, Subscription, check_outgoing
+from kbot.kucoin.ws import (
+    PUBLIC_ENDPOINTS,
+    ConnectionPacer,
+    PublicStream,
+    Subscription,
+    check_outgoing,
+)
 
 OBU = {
     "T": "obu.SPOT",
@@ -74,6 +81,7 @@ class Observed:
     messages: list[tuple[dict[str, Any], datetime]] = field(default_factory=list)
     states: list[tuple[str, str]] = field(default_factory=list)
     control: list[dict[str, Any]] = field(default_factory=list)
+    targets: list[str] = field(default_factory=list)
 
     def on_message(self, message: dict[str, Any], at: datetime) -> None:
         self.messages.append((message, at))
@@ -89,6 +97,17 @@ SUBSCRIPTIONS = (
     Subscription("obu", "SPOT", "BTC-USDT", (("depth", "5"),)),
     Subscription("trade", "SPOT", "BTC-USDT"),
 )
+
+
+def local_connector(port: int, targets: list[str]) -> Callable[..., Any]:
+    """Test transport: records the URL the stream asks for and connects to the local
+    server instead. The stream itself never accepts any URL but KuCoin's (A3-01)."""
+
+    def connect(url: str, **options: Any) -> Any:
+        targets.append(url)
+        return websocket_connect(f"ws://127.0.0.1:{port}", **options)
+
+    return connect
 
 
 def run_stream(
@@ -112,7 +131,7 @@ def run_stream(
                 on_state=observed.on_state,
                 on_control=observed.on_control,
                 pacer=ConnectionPacer(min_interval=0.0),
-                url=f"ws://127.0.0.1:{port}",
+                connector=local_connector(port, observed.targets),
                 pong_timeout=pong_timeout,
                 ack_timeout=1.0,
                 reconnect_delay=0.1,
@@ -145,6 +164,7 @@ def test_subscribes_receives_and_keeps_alive() -> None:
     observed = run_stream(server, pinged_twice)
 
     assert len(server.received) == 1, "no reconnection while pongs arrive"
+    assert observed.targets == [PUBLIC_ENDPOINTS["SPOT"]], "the stream only asks for KuCoin"
     sent = server.received[0]
     for message in sent:
         check_outgoing(message)
@@ -211,7 +231,7 @@ def test_decimals_in_pushed_numbers_are_exact() -> None:
                 [Subscription("mark-price", "FUTURES", "XBTUSDTM")],
                 on_message=lambda m, _at: received.append(m),
                 pacer=ConnectionPacer(min_interval=0.0),
-                url=f"ws://127.0.0.1:{port}",
+                connector=local_connector(port, []),
             )
             task = asyncio.create_task(stream.run(stop))
             await wait_for(lambda: bool(received), 5.0)

@@ -9,6 +9,7 @@ from typing import Any
 
 import httpx
 import pytest
+from pydantic import ValidationError
 
 from kbot.kucoin.models import (
     Candle,
@@ -17,12 +18,14 @@ from kbot.kucoin.models import (
     FundingHistory,
     FundingRate,
     FuturesInstrument,
+    FuturesInstrumentV1,
     IndexPage,
     InstrumentList,
     KlineData,
     MarkPrice,
     RiskTier,
     SpotInstrument,
+    SpotInstrumentV1,
     TickerList,
     TradeList,
 )
@@ -194,6 +197,55 @@ def test_v1_futures_instrument_mixes_numbers_and_text(recorded: Load) -> None:
     assert isinstance(v1["indexPriceTickSize"], Decimal)
     assert isinstance(v1["maxLeverage"], int) and v2["maxLeverage"] == "125"
     assert v1["unitSize"] == v2["unitSize"] == "0.001"
+
+
+def test_v1_instruments_follow_their_own_contract(recorded: Load) -> None:
+    """A4-01: the V1 instruments are validated with typed V1 models."""
+    spot = InstrumentList.model_validate(body(recorded, "v1_instrument_spot"))
+    btc = SpotInstrumentV1.model_validate(spot.list[0])
+    assert (btc.symbol, btc.tradingStatus, btc.tickSize) == ("BTC-USDT", "1", Decimal("0.1"))
+
+    futures = InstrumentList.model_validate(body(recorded, "v1_instrument_futures"))
+    xbt = FuturesInstrumentV1.model_validate(futures.list[0])
+    assert (xbt.symbol, xbt.unitSize, xbt.maxLeverage, xbt.tradingStatus) == (
+        "XBTUSDTM",
+        Decimal("0.001"),
+        125,
+        "1",
+    )
+    v2 = FuturesInstrument.model_validate(
+        InstrumentList.model_validate(body(recorded, "v2_instrument_futures")).list[0]
+    )
+    assert (xbt.tickSize, xbt.lotSize, xbt.unitSize) == (v2.tickSize, v2.lotSize, v2.unitSize)
+
+
+@pytest.mark.parametrize(
+    ("name", "model", "field", "wrong"),
+    [
+        ("v1_instrument_spot", SpotInstrumentV1, "tickSize", Decimal("0.1")),
+        ("v1_instrument_spot", SpotInstrumentV1, "tradingStatus", "TradingEnabled"),
+        ("v1_instrument_spot", SpotInstrumentV1, "feeCategory", "1"),
+        ("v1_instrument_spot", SpotInstrumentV1, "minFunds", None),
+        ("v1_instrument_futures", FuturesInstrumentV1, "maxLeverage", "125"),
+        ("v1_instrument_futures", FuturesInstrumentV1, "orderPriceRange", "0.05"),
+        ("v1_instrument_futures", FuturesInstrumentV1, "unitSize", Decimal("0.001")),
+        ("v1_instrument_futures", FuturesInstrumentV1, "launchTime", True),
+        ("v1_instrument_futures", FuturesInstrumentV1, "tradingStatus", 1),
+        ("v2_instrument_spot", SpotInstrument, "tickSize", Decimal("0.1")),
+        ("v2_instrument_futures", FuturesInstrument, "maxLeverage", 125),
+    ],
+)
+def test_a_changed_field_type_breaks_the_contract(
+    recorded: Load, name: str, model: type, field: str, wrong: object
+) -> None:
+    item = dict(InstrumentList.model_validate(body(recorded, name)).list[0])
+    model.model_validate(item)  # type: ignore[attr-defined]
+    item[field] = wrong
+    with pytest.raises(ValidationError):
+        model.model_validate(item)  # type: ignore[attr-defined]
+    del item[field]
+    with pytest.raises(ValidationError):
+        model.model_validate(item)  # type: ignore[attr-defined]
 
 
 @pytest.mark.parametrize("name", ["v1_trades_spot", "v1_trades_futures"])

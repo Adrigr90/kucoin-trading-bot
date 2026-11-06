@@ -17,7 +17,7 @@ import httpx
 
 from kbot.core.clock import Clock, SystemClock
 from kbot.kucoin.jsonparse import loads
-from kbot.kucoin.ratelimit import RateLimitHeaders, RestRateLimiter
+from kbot.kucoin.ratelimit import RateLimitHeaders, RestRateLimiter, shared_limiter
 from kbot.kucoin.routes import ROUTES, SAFE_VALUE, Route, find_route
 
 SUCCESS_CODE = "200000"
@@ -103,7 +103,7 @@ class KucoinRestClient:
     ) -> None:
         if max_attempts < 1:
             raise ValueError("max_attempts must be at least 1")
-        self.limiter = limiter or RestRateLimiter()
+        self.limiter = limiter or shared_limiter()
         self._clock = clock or SystemClock()
         self._max_attempts = max_attempts
         inner = transport or httpx.AsyncHTTPTransport(retries=0)

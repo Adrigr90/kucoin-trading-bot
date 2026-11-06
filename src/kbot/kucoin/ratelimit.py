@@ -14,6 +14,7 @@ Error 429000 has two causes that are handled differently:
 from __future__ import annotations
 
 import asyncio
+import functools
 import random
 import time
 from collections import deque
@@ -113,3 +114,14 @@ class RestRateLimiter:
 
     def _block_for(self, seconds: float) -> None:
         self._blocked_until = max(self._blocked_until, self._clock() + seconds)
+
+
+@functools.cache
+def shared_limiter() -> RestRateLimiter:
+    """The one budget of this process. Every REST client uses it unless a test injects
+    its own, so several clients can never add up more than the share of the IP.
+
+    Between processes on the same IP, the server headers are the shared source of truth:
+    ``observe`` stops every client as soon as the IP as a whole has used the share.
+    """
+    return RestRateLimiter()

@@ -34,7 +34,6 @@ PUBLIC_ENDPOINTS: Mapping[str, str] = {
     "SPOT": "wss://x-push-spot.kucoin.com",
     "FUTURES": "wss://x-push-futures.kucoin.com",
 }
-LOOPBACK_ENDPOINT = re.compile(r"ws://127\.0\.0\.1:[0-9]{1,5}")
 ACTIONS = frozenset({"SUBSCRIBE", "UNSUBSCRIBE"})
 MESSAGE_ID = re.compile(r"[A-Za-z0-9_.\-]{1,40}")
 SYMBOL = re.compile(r"[A-Z0-9]{1,20}(-[A-Z0-9]{1,20})?")
@@ -96,10 +95,9 @@ class Subscription:
 
 
 def check_endpoint(url: str, trade_type: str) -> None:
-    """Only the public endpoint of the trade type, or a loopback server in tests."""
-    if PUBLIC_ENDPOINTS.get(trade_type) == url or LOOPBACK_ENDPOINT.fullmatch(url):
-        return
-    raise ForbiddenMessage(f"endpoint not allowed for {trade_type}: {url}")
+    """Only the public endpoint of the trade type; there are no exceptions."""
+    if PUBLIC_ENDPOINTS.get(trade_type) != url:
+        raise ForbiddenMessage(f"endpoint not allowed for {trade_type}: {url}")
 
 
 def check_outgoing(message: Mapping[str, object]) -> None:
@@ -225,7 +223,6 @@ class PublicStream:
         on_state: StateHandler | None = None,
         on_control: MessageHandler | None = None,
         pacer: ConnectionPacer,
-        url: str | None = None,
         connector: Connector = websocket_connect,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -246,7 +243,9 @@ class PublicStream:
             subscription.message("SUBSCRIBE", "check")
         if trade_type not in PUBLIC_ENDPOINTS:
             raise ValueError(f"unknown trade type: {trade_type!r}")
-        self._url = url or PUBLIC_ENDPOINTS[trade_type]
+        # The URL is fixed: there is no way to point a stream elsewhere. Tests replace the
+        # connector in code instead, which still receives this public URL.
+        self._url = PUBLIC_ENDPOINTS[trade_type]
         check_endpoint(self._url, trade_type)
         self._trade_type = trade_type
         self._on_message = on_message

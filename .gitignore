@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+build/
+dist/
+
+# Tool caches
+.pytest_cache/
+.ruff_cache/
+.hypothesis/
+.coverage
+
+# Secrets never go in the repository (DM §8)
+.env
+.env.*
+*.key
+*.pem
+secrets/
+
+# OS files
+.DS_Store
+Thumbs.db

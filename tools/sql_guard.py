@@ -39,8 +39,12 @@ SCHEMA_PRIVILEGES = frozenset({"usage"})
 TABLE_PRIVILEGES = frozenset({"select", "insert"})
 INSERT_TARGETS = frozenset({("config", "risk_limits")})
 
-MIGRATION_MODULE_NAMES = frozenset(
-    {"Path", "execute_sql_file", "NotImplementedError", "__file__", "with_suffix"}
+MIGRATION_IMPORTS = frozenset({("pathlib", "Path"), ("kbot.db.sqlfile", "execute_sql_file")})
+MIGRATION_SETTINGS = frozenset({"revision", "down_revision", "branch_labels", "depends_on"})
+# The only statement an upgrade() may contain: run the .sql file next to the module, which
+# check_repository() analyzes. Any other path could point at SQL that is never analyzed.
+SIBLING_SQL_CALL = ast.dump(
+    ast.parse('execute_sql_file(Path(__file__).with_suffix(".sql"))', mode="eval").body
 )
 
 
@@ -89,36 +93,53 @@ def check_migration_sql(text: str, source: str) -> list[Violation]:
 
 
 def check_migration_module(text: str, source: str) -> list[Violation]:
-    """A migration module may only run its sibling .sql file through execute_sql_file."""
-    problems: list[Violation] = []
+    """A migration module must have exactly the shape of migrations/script.py.mako.
+
+    Allowed at module level: a docstring, the two imports, the four Alembic settings with
+    constant values, ``upgrade()`` running only its sibling .sql file and ``downgrade()``
+    raising NotImplementedError. Anything else is rejected.
+    """
     try:
         tree = ast.parse(text, filename=source)
     except SyntaxError as exc:
         return [Violation(source, 0, f"Python syntax error: {exc}")]
 
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            problems.append(Violation(source, 0, "plain imports are not allowed"))
-        elif isinstance(node, ast.ImportFrom):
-            allowed = {("pathlib", "Path"), ("kbot.db.sqlfile", "execute_sql_file")}
+    messages: list[str] = []
+    functions: set[str] = set()
+    settings: set[str] = set()
+    for index, node in enumerate(tree.body):
+        if index == 0 and _is_docstring(node):
+            continue
+        if isinstance(node, ast.ImportFrom):
             for alias in node.names:
-                if (node.module, alias.name) not in allowed or alias.asname:
-                    problems.append(
-                        Violation(source, 0, f"import not allowed: {node.module}.{alias.name}")
-                    )
-        elif isinstance(node, ast.Name) and node.id not in MIGRATION_MODULE_NAMES:
-            if not isinstance(node.ctx, ast.Store):
-                problems.append(Violation(source, 0, f"name not allowed: {node.id}"))
-        elif isinstance(node, ast.Attribute) and node.attr not in MIGRATION_MODULE_NAMES:
-            problems.append(Violation(source, 0, f"attribute not allowed: {node.attr}"))
-    return problems
+                if (node.module, alias.name) not in MIGRATION_IMPORTS or alias.asname:
+                    messages.append(f"import not allowed: {node.module}.{alias.name}")
+        elif isinstance(node, ast.Assign):
+            names = [target.id for target in node.targets if isinstance(target, ast.Name)]
+            if len(names) != 1 or len(node.targets) != 1 or names[0] not in MIGRATION_SETTINGS:
+                messages.append("only the Alembic settings may be assigned")
+            elif not _is_constant_setting(node.value):
+                messages.append(f"{names[0]} must be a constant")
+            else:
+                settings.add(names[0])
+        elif isinstance(node, ast.FunctionDef) and node.name in {"upgrade", "downgrade"}:
+            functions.add(node.name)
+            messages += _check_migration_function(node)
+        else:
+            messages.append(f"statement not allowed in a migration: {type(node).__name__}")
+
+    if functions != {"upgrade", "downgrade"}:
+        messages.append("a migration needs exactly upgrade() and downgrade()")
+    if "revision" not in settings:
+        messages.append("a migration needs its revision")
+    return [Violation(source, 0, message) for message in messages]
 
 
 def check_repository(root: Path = REPO) -> list[Violation]:
     """Check sql/roles.sql and every migration, as the CI does."""
     problems: list[Violation] = []
-    roles = root / "sql" / "roles.sql"
-    problems += check_roles_sql(_read(roles), _relative(roles, root))
+    roles_file = root / "sql" / "roles.sql"
+    problems += check_roles_sql(_read(roles_file), _relative(roles_file, root))
 
     versions = root / "migrations" / "versions"
     sql_files = sorted(versions.glob("*.sql"))
@@ -314,6 +335,60 @@ def _insert(stmt: pg.InsertStmt) -> list[str]:
             if not isinstance(value, pg.A_Const) or value.isnull:
                 problems.append("INSERT values must be non-null constants")
     return problems
+
+
+def _check_migration_function(node: ast.FunctionDef) -> list[str]:
+    messages: list[str] = []
+    arguments = node.args
+    if (
+        node.decorator_list
+        or arguments.posonlyargs
+        or arguments.args
+        or arguments.vararg
+        or arguments.kwonlyargs
+        or arguments.kwarg
+    ):
+        messages.append(f"{node.name}() must take no arguments and have no decorators")
+
+    body = node.body[1:] if node.body and _is_docstring(node.body[0]) else node.body
+    if node.name == "upgrade":
+        if (
+            len(body) != 1
+            or not isinstance(body[0], ast.Expr)
+            or ast.dump(body[0].value) != SIBLING_SQL_CALL
+        ):
+            messages.append(
+                'upgrade() may only call execute_sql_file(Path(__file__).with_suffix(".sql"))'
+            )
+    elif not (
+        len(body) == 1
+        and isinstance(body[0], ast.Raise)
+        and isinstance(body[0].exc, ast.Call)
+        and isinstance(body[0].exc.func, ast.Name)
+        and body[0].exc.func.id == "NotImplementedError"
+        and all(isinstance(arg, ast.Constant) for arg in body[0].exc.args)
+        and not body[0].exc.keywords
+    ):
+        messages.append("downgrade() may only raise NotImplementedError")
+    return messages
+
+
+def _is_docstring(node: ast.stmt) -> bool:
+    return (
+        isinstance(node, ast.Expr)
+        and isinstance(node.value, ast.Constant)
+        and isinstance(node.value.value, str)
+    )
+
+
+def _is_constant_setting(value: ast.expr) -> bool:
+    if isinstance(value, ast.Constant):
+        return value.value is None or isinstance(value.value, str)
+    if isinstance(value, ast.Tuple | ast.List):
+        return all(
+            isinstance(item, ast.Constant) and isinstance(item.value, str) for item in value.elts
+        )
+    return False
 
 
 def _role_name(role: pg.RoleSpec | None) -> str | None:

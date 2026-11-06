@@ -100,6 +100,35 @@ def test_migration_modules_cannot_run_their_own_sql(module: str) -> None:
     assert check_migration_module(module, "test.py"), module
 
 
-def test_a_valid_migration_module_passes(repo_root: Path) -> None:
+@pytest.fixture(scope="module")
+def valid_module(repo_root: Path) -> str:
     module = next((repo_root / "migrations" / "versions").glob("*.py"))
-    assert check_migration_module(module.read_text(encoding="utf-8"), module.name) == []
+    return module.read_text(encoding="utf-8")
+
+
+def test_a_valid_migration_module_passes(valid_module: str) -> None:
+    assert check_migration_module(valid_module, "valid.py") == []
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        # SQL outside migrations/versions would never be analyzed.
+        ('Path(__file__).with_suffix(".sql")', 'Path("sql/roles.sql")'),
+        ('Path(__file__).with_suffix(".sql")', 'Path(__file__).parent / "other.sql"'),
+        ('Path(__file__).with_suffix(".sql")', 'Path(__file__).with_suffix(".txt")'),
+        ("def upgrade() -> None:\n", "def upgrade() -> None:\n    print('extra')\n"),
+        ("def downgrade() -> None:\n", "@staticmethod\ndef downgrade() -> None:\n"),
+        ("raise NotImplementedError(", "raise RuntimeError("),
+        ('revision = "0001"', 'revision = open("rev").read()'),
+        ("def downgrade", "def upgrade_extra():\n    pass\n\n\ndef downgrade"),
+    ],
+)
+def test_tampered_migration_modules_are_rejected(valid_module: str, old: str, new: str) -> None:
+    assert old in valid_module
+    tampered = valid_module.replace(old, new, 1)
+    assert check_migration_module(tampered, "tampered.py"), new
+
+
+def test_extra_module_level_code_is_rejected(valid_module: str) -> None:
+    assert check_migration_module(valid_module + "\nprint('side effect')\n", "extra.py")

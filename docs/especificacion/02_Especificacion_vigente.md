@@ -17,7 +17,7 @@ Este documento **sustituye, para leer y auditar**, al Informe V4 y a los anexos 
 | Verificado documentalmente | Parcial |
 | Validado mediante pruebas | **0** |
 | Implementado | **0** |
-| Decisiones D01-D35 aprobadas | **3**: D17, D33 y D35, el 5 de noviembre de 2026 (ver `03_Decisiones.md`) |
+| Decisiones D01-D35 aprobadas | **4**: D17, D33 y D35, el 5 de noviembre de 2026, y D18, el 6 de noviembre (ver `03_Decisiones.md`) |
 
 **Etiquetas:** [H] hecho oficial verificado (fuente en la sección 16) · [I] inferencia técnica · [R] recomendación · [P] pendiente · [Cxx] corrección de origen · [Dxx] decisión del propietario (pendiente salvo que se indique «aprobada») · [Hxx] hallazgo abierto.
 
@@ -100,7 +100,7 @@ Este documento **sustituye, para leer y auditar**, al Informe V4 y a los anexos 
 | Indicadores | Implementación propia, validada contra TA-Lib en las pruebas [P: paquetes para aarch64] |
 | Cliente de KuCoin | Propio, **solo GET** y con lista blanca de rutas. **Sin el SDK oficial**, que incluye órdenes |
 | Procesos | systemd (`User=`, `IPAddressDeny=`, `ProtectSystem=strict`, `LoadCredential=`, `MemoryMax=`) |
-| Backtests | En el PC del propietario [D18], con WSL2 |
+| Backtests | En el PC del propietario, con WSL2 [D18, aprobada el 6 de noviembre de 2026]. El resto del trabajo del propietario es en Windows |
 
 ## 3. Datos de mercado de KuCoin
 
@@ -1340,3 +1340,4 @@ $$\Delta Cap=\underbrace{8}_{\text{distancia mark-stop de lo cerrado}}+\underbra
 | 6 nov 2026 | **Revisión de las pruebas y fases de `04`:** A y C correctas; B7 y B9 se verifican solo con documentación o metadatos públicos; B28 (M3) pasa a «antes de la F4». En este documento solo cambia la fila M3 de 6.7 | Revisor |
 | 6 nov 2026 | **Cierre de la Fase 0 y versión 1.0 congelada.** El propietario declara cerrada la Fase 0 (criterio de D35 cumplido) y autoriza la Fase 1. Se añaden la regla de congelación y el estado de la Fase 0 en la cabecera | Propietario |
 | 6 nov 2026 | **Versión 1.1: revisión de la sección 9 antes de la Fase 1 (D35).** `pg_hba.conf` solo con `local ... peer`; tabla de atributos de los roles (login, límite de conexiones y `statement_timeout`, estos dos provisionales); la CI usa PostgreSQL instalado en el runner, no un contenedor, y deja de afirmar que un intento por TCP demuestra que la contraseña falla. Fuentes de PostgreSQL y GitHub añadidas en la sección 16. El resto de la sección 9 se confirmó sin cambios | Revisor (sección 9); aplicada a petición del propietario |
+| 6 nov 2026 | **Decisión del propietario: D18 aprobada** (backtests en su PC con WSL2; el resto de su trabajo, en Windows). Actualizados la cabecera y la sección 2 | Propietario |

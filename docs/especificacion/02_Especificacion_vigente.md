@@ -1,6 +1,6 @@
 # ESPECIFICACIÓN VIGENTE: FASE 0 (CONSOLIDADA)
 
-**Proyecto:** `kucoin-trading-bot` · **Consolidada el:** 5 de noviembre de 2026 · **Fuente de verdad:** `01_Documento_Maestro.md` (DM v1.0) · **Versión 1.1** (6 de noviembre de 2026: revisión de la sección 9 antes de la Fase 1) · Versión 1.0 congelada el 6 de noviembre de 2026 (cierre de la Fase 0)
+**Proyecto:** `kucoin-trading-bot` · **Consolidada el:** 5 de noviembre de 2026 · **Fuente de verdad:** `01_Documento_Maestro.md` (DM v1.0) · **Versión 1.2** (6 de noviembre de 2026: ronda 4 de revisión, antes de la Fase 2) · Versión 1.1 (revisión de la sección 9, antes de la Fase 1) · Versión 1.0 congelada el 6 de noviembre de 2026 (cierre de la Fase 0)
 
 **Regla de congelación:** desde la versión 1.0, cualquier cambio en este documento necesita una entrada en la sección 18 y la aprobación del propietario. Las rondas 4-7 se hacen justo antes de cada módulo (D35) y sus correcciones siguen esta misma regla.
 
@@ -17,7 +17,7 @@ Este documento **sustituye, para leer y auditar**, al Informe V4 y a los anexos 
 | Verificado documentalmente | Parcial |
 | Validado mediante pruebas | **Fase 1** (6 de noviembre de 2026): H07, B18, B20, B25, B26, RC14, RC15 y la parte de PostgreSQL y roles de la sección 9. Informe en `docs/informes/Informe_Fase1.md` del repositorio |
 | Implementado | **Fase 1**: una primera versión integrada en `main` (pull request #1, 6 de noviembre de 2026); las correcciones de la auditoría del revisor, en la rama `fase-1`, **pendientes de integrar** (pull request #2) |
-| Decisiones D01-D35 aprobadas | **4**: D17, D33 y D35, el 5 de noviembre de 2026, y D18, el 6 de noviembre (ver `03_Decisiones.md`) |
+| Decisiones D01-D35 aprobadas | **5**: D17, D33 y D35, el 5 de noviembre de 2026, y D18 y D03, el 6 de noviembre (ver `03_Decisiones.md`) |
 
 **Etiquetas:** [H] hecho oficial verificado (fuente en la sección 16) · [I] inferencia técnica · [R] recomendación · [P] pendiente · [Cxx] corrección de origen · [Dxx] decisión del propietario (pendiente salvo que se indique «aprobada») · [Hxx] hallazgo abierto.
 
@@ -98,7 +98,7 @@ Este documento **sustituye, para leer y auditar**, al Informe V4 y a los anexos 
 | Histórico | Parquet (zstd), inmutable, consultado con Polars o DuckDB |
 | Lenguaje | Python 3.12, `uv`, `httpx`, `websockets`, `orjson`, `pydantic` v2, `psycopg 3`, `SQLAlchemy 2`, `Alembic`, `numpy`, `polars`, `structlog`, `anthropic`, `python-telegram-bot`, `fastapi`, `argon2-cffi`, `pyotp`, `feedparser`, `trafilatura`, `rapidfuzz` |
 | Indicadores | Implementación propia, validada contra TA-Lib en las pruebas [P: paquetes para aarch64] |
-| Cliente de KuCoin | Propio, **solo GET** y con lista blanca de rutas. **Sin el SDK oficial**, que incluye órdenes |
+| Cliente de KuCoin | Propio y **sin el SDK oficial**, que incluye órdenes. **REST: solo GET** y con lista blanca de rutas. **WebSocket: su propia lista blanca de mensajes** (3.1) |
 | Procesos | systemd (`User=`, `IPAddressDeny=`, `ProtectSystem=strict`, `LoadCredential=`, `MemoryMax=`) |
 | Backtests | En el PC del propietario, con WSL2 [D18, aprobada el 6 de noviembre de 2026]. El resto del trabajo del propietario es en Windows |
 
@@ -106,17 +106,31 @@ Este documento **sustituye, para leer y auditar**, al Informe V4 y a los anexos 
 
 ### 3.1 Acceso y límites
 
-- **Pool público:** 2.000 de peso cada 30 s por IP [H]. Se usa como máximo el 50 %, con token bucket y lectura de las cabeceras `gw-ratelimit-*` [H]. El error de límite es 429000 [H].
+- **Pool público:** 2.000 de peso cada 30 s por IP [H]. Se usa como máximo el 50 %, con token bucket y lectura de las cabeceras `gw-ratelimit-*` [H].
+- **Error 429000 [H], con dos causas que se tratan por separado:**
+  - **cuota agotada:** las cabeceras indican cuándo se puede volver a pedir; se paran todas las peticiones hasta `gw-ratelimit-reset`;
+  - **sobrecarga temporal del servidor:** la respuesta llega sin la información de límite en las cabeceras y KuCoin recomienda reintentar más tarde; se paran todas las peticiones y se espera con backoff exponencial y aleatorio, de 5 s a 5 min [R].
+  - En ningún caso hay reintentos rápidos. El 429001 (límite del sistema, en la tabla de errores de UTA V2 [H]) se trata como la sobrecarga.
 - **WebSocket UTA público:**
-  - sin token [H];
-  - ping según `pingInterval` [H];
+  - sin token [H], en `wss://x-push-spot.kucoin.com` y `wss://x-push-futures.kucoin.com` [H];
+  - ping según `pingInterval` [H]. La documentación da dos formatos de ping (`"type": "ping"` y `"op": "ping"`) [P: se resuelve con las pruebas de contrato];
   - la conexión se corta a las 24 h [H];
-  - sin pong en unos 3 s, la conexión se da por rota [H].
+  - sin pong en unos 3 s, la conexión se da por rota [H];
+  - como máximo 300 mensajes del cliente cada 10 s, contando suscripciones, cancelaciones y pings [H].
+- **Lista blanca de mensajes del WebSocket:** solo la conexión a los dos endpoints públicos, la suscripción y la cancelación de los canales públicos de mercado de la lista (fijada con la matriz V1/V2 de 3.2) y el ping. Se rechazan, antes de enviarlos, los mensajes de autenticación (`op: auth`), los canales privados, los de órdenes y cualquier canal fuera de la lista.
 - **Diseño del WebSocket:**
   - ≤ 100 topics por conexión (la documentación da cifras contradictorias: 200, 400 o 600 [H]);
   - ≤ 5 conexiones;
   - ≤ 1 conexión nueva cada 5 s ([H] límite: 300 cada 5 min por IP en Spot público).
 - **Profundidad:** nivel 5 para todo el universo; nivel 50 solo para los candidatos de scalping [D03].
+  - **Fuente:** canal `obu` de UTA con profundidad 5 o 50. Cada mensaje es un **snapshot completo** que se puede usar directamente, sin mantener un libro local. Se publica como mucho cada 100 ms, y **no se publica nada si el libro no cambia** [H]. No se usa el canal incremental.
+  - **No se guardan los mensajes originales.** Se trabaja con una rejilla de intervalos de muestreo de **Δ = 10 s** [R].
+  - **En cada intervalo y canal:** un estado terminal (3.5) y una fila de métricas calculadas con el último snapshot válido, con la antigüedad de ese snapshot. De nivel 5 para todo el universo y de nivel 50 para los candidatos.
+  - **Snapshot completo guardado:** el último libro válido al final de cada minuto, de nivel 5 para todo el universo y de nivel 50 para los candidatos [R].
+  - **Candidatos de nivel 50:** 10 pares de Spot y 10 de Futures, los más líquidos del universo [aprobado por el propietario con el alcance de la F2, P3].
+  - **Estimación** [I], con los supuestos del Informe V4 (180 B por métrica, 32·N + 60 B por snapshot de N niveles en total y 150 B por vela de last, mark o index), 40 B por estado de intervalo, un universo de 20 + 20 pares y 20 candidatos: unos **259 MB al día** (cada candidato añade ≈ 6,6 MB). Base de datos con 90 días calientes: **≈ 28 GB**, con un 20 % de margen. Parquet: **≈ 95 GB al año sin comprimir** y ≈ 12-32 GB comprimido (÷3 a ÷8, compresión sin medir). Con la compresión más baja supuesta cabe en el volumen de datos de 110 GB (10.3): ≈ 60 GB el primer año y ≈ 92 GB el segundo. **Sin compresión no cabría** (≈ 123 GB el primer año), así que la medición de la F2 es obligatoria.
+  - Guardar el nivel 50 cada 10 s en lugar de cada minuto llevaría el volumen a ≈ 730 MB al día: **no cabe en el disco gratuito y no se adopta**.
+  - **Se mide en la F2:** bytes por instrumento y día de cada canal, proyectados a un año. Si la proyección no cabe en el volumen aprobado, se reducen las frecuencias o el universo, con decisión del propietario. **Nunca se superan los 200 GB ni se contrata nada.**
 
 ### 3.2 Endpoints
 
@@ -145,7 +159,7 @@ Este documento **sustituye, para leer y auditar**, al Informe V4 y a los anexos 
 - **Universo dinámico:** liquidez, volumen, spread, volatilidad y disponibilidad de datos. Objetivo inicial de 20 pares Spot y 20 de Futures [D12].
 - **Libro de órdenes VÁLIDO:**
   - en los canales incrementales, sincronizado desde un snapshot y con la secuencia continua; si se pierde algo, pasa a **INVÁLIDO** hasta resincronizar;
-  - en los canales de snapshot, debe ser reciente y con marcas de tiempo que avanzan.
+  - en los canales de snapshot, debe ser reciente y con marcas de tiempo que avanzan. Como KuCoin no publica nada si el libro no cambia [H], **el silencio con la conexión sana** (pings respondidos a tiempo) **no invalida el libro**: el último snapshot sigue vigente y se registra su antigüedad. Es inconsistente un snapshot cuya secuencia (`C`) retrocede respecto al anterior, con el libro cruzado (mejor compra ≥ mejor venta) o con tamaños no positivos. Si la secuencia es igual a la anterior, es un duplicado y se ignora. En los snapshots, los campos `O` y `C` son las secuencias inicial y final [H]; el significado del campo de tiempo `M` no está documentado [P: B1].
 - **Las métricas de profundidad solo se calculan con un libro válido.**
 - **Anomalías** (bloquean las señales del instrumento):
   - high < low;
@@ -225,7 +239,12 @@ Este documento **sustituye, para leer y auditar**, al Informe V4 y a los anexos 
 | `ausencia_sin_trades_probable` | **S1 todo el minuto** y sin vela oficial | `sin_operaciones_probable` |
 | `ausencia_no_verificable` | S2 o S3 | `hueco` si consta en `data_gaps`; si no, `sin_explicar` |
 | `abierta` o `pendiente_estabilizacion` | — | Todavía no es terminal; si sigue así al cerrar el día, `sin_explicar` |
-- **Profundidad por intervalo de muestreo:** `valida`, `libro_inconsistente`, `no_recibida`, `desconectado` o `fuera_de_plazo`. Los duplicados no crean intervalos. **Una desconexión nunca sale del denominador.**
+- **Profundidad por intervalo de muestreo** (Δ = 10 s, 3.1): `valida`, `libro_inconsistente`, `no_recibida`, `desconectado` o `fuera_de_plazo`. Los duplicados no crean intervalos. **Una desconexión nunca sale del denominador.**
+  - `valida`: la conexión estuvo sana todo el intervalo y hay un snapshot vigente y consistente, recibido en el intervalo o antes (sin cambios no hay mensajes, 3.3);
+  - `no_recibida`: conexión sana, pero ningún snapshot desde la última suscripción;
+  - `desconectado`: hubo una desconexión durante el intervalo;
+  - `libro_inconsistente`: el snapshot vigente es inconsistente (3.3);
+  - `fuera_de_plazo`: el snapshot del intervalo llegó después del cierre del intervalo.
 
 ### 3.6 Orden temporal (C43)
 
@@ -967,6 +986,10 @@ Los límites y tiempos son provisionales: se ajustan con el consumo medido en la
 - **Roles:** `roles.sql` y una exportación real de los objetos globales **cifrada**, nunca en Git.
 - **Cifrado:** `age` para dos destinatarios (clave principal y clave de recuperación, guardadas fuera del servidor). Si se pierden ambas, las copias son irrecuperables.
 - **RPO:** 1 h. **RTO:** 2-4 h. **Restaurar el software nunca restaura la base de datos** (precisión D).
+- **Mientras las copias no vayan a Object Storage, su retención no se da por cumplida** (D25). Las copias horarias cifradas se guardan en el servidor y se llevan también al PC del propietario.
+  - Frente a fallos de la base de datos o borrados, el RPO es de 1 h.
+  - **Frente a la pérdida del servidor, el RPO es el tiempo transcurrido desde la última copia fuera del servidor.**
+  - Cómo se cumple en la F2 lo decide el propietario (pregunta P6 del alcance de la F2).
 - **Prueba de restauración en 10 pasos** sobre un cluster vacío:
   1. roles;
   2. `pg_restore --exit-on-error --single-transaction`;
@@ -1079,6 +1102,11 @@ Los límites y tiempos son provisionales: se ajustan con el consumo medido en la
 | **Total** | **≈ 5,5 GB de 12** | [I] |
 
 [H] Oracle A1: 2 OCPU y 12 GB.
+
+**Recuperación de instancias inactivas** [H, verificado el 6 de noviembre de 2026; B30]: Oracle puede recuperar una instancia Always Free si, durante 7 días, el percentil 95 de la CPU, la red y la memoria (esta última en A1) están por debajo del 20 %. La documentación no dice si la detiene o la borra, ni si avisa antes, ni cómo calcula el porcentaje de red [P].
+- **Se mide con las métricas de Oracle** del espacio `oci_computeagent`: `CpuUtilization` y `MemoryUtilization`, que es el porcentaje de páginas de memoria usadas [H]. Requieren el plugin Compute Instance Monitoring activo, que se selecciona al crear la instancia [H]. La red se mide con `NetworksBytesIn` y `NetworksBytesOut`, en bytes [H].
+- **Regla:** el uso real de memoria, según la métrica de Oracle, se mantiene al menos en el 25 %. **Nunca se genera carga artificial.** Si el uso real no basta, se aplica D01: detenerse y presentar alternativas.
+- **Hasta la F7 no hay avisos automáticos por Telegram.** El propietario revisa las métricas en la consola de Oracle con un procedimiento guiado [R]. Si una alarma de Oracle con aviso por correo está dentro de lo gratuito [P], se usa además.
 
 **Supervisión:**
 - antigüedad de los mensajes;
@@ -1278,9 +1306,14 @@ $$\Delta Cap=\underbrace{8}_{\text{distancia mark-stop de lo cerrado}}+\underbra
   - Actualización de la fórmula de margen aislado: https://www.kucoin.com/announcement/update-to-the-isolated-margin-calculation-formula
   - Límites de riesgo (ayuda): https://www.kucoin.com/support/26693511734809
   - KuCoin EU: https://www.kucoin.com/en-eu/support/48142946141092
+  - Libro de órdenes de UTA, canal `obu` (consultado el 6 de noviembre de 2026): https://www.kucoin.com/docs-new/3470221w0
+  - Códigos de error de UTA V2 (6 de noviembre): https://www.kucoin.com/docs-new/v2/error-code/uta-api
 - **Oracle:**
   - Always Free: https://docs.oracle.com/en-us/iaas/Content/FreeTier/freetier_topic-Always_Free_Resources.htm
   - Regiones: https://docs.oracle.com/en-us/iaas/Content/General/Concepts/regions.htm
+  - La región principal no se puede cambiar (consultado el 6 de noviembre de 2026): https://docs.oracle.com/en-us/iaas/Content/Identity/regions/managingregions.htm
+  - Métricas de las instancias (6 de noviembre): https://docs.oracle.com/en-us/iaas/Content/Compute/References/computemetrics.htm
+  - Activar la monitorización de las instancias (6 de noviembre): https://docs.oracle.com/en-us/iaas/Content/Compute/Tasks/enablingmonitoring.htm
 - **PostgreSQL 18:**
   - NOTIFY: https://www.postgresql.org/docs/current/sql-notify.html
   - SELECT (cláusulas de bloqueo): https://www.postgresql.org/docs/current/sql-select.html
@@ -1342,3 +1375,6 @@ $$\Delta Cap=\underbrace{8}_{\text{distancia mark-stop de lo cerrado}}+\underbra
 | 6 nov 2026 | **Versión 1.1: revisión de la sección 9 antes de la Fase 1 (D35).** `pg_hba.conf` solo con `local ... peer`; tabla de atributos de los roles (login, límite de conexiones y `statement_timeout`, estos dos provisionales); la CI usa PostgreSQL instalado en el runner, no un contenedor, y deja de afirmar que un intento por TCP demuestra que la contraseña falla. Fuentes de PostgreSQL y GitHub añadidas en la sección 16. El resto de la sección 9 se confirmó sin cambios | Revisor (sección 9); aplicada a petición del propietario |
 | 6 nov 2026 | **Decisión del propietario: D18 aprobada** (backtests en su PC con WSL2; el resto de su trabajo, en Windows). Actualizados la cabecera y la sección 2 | Propietario |
 | 6 nov 2026 | **Fase 1 implementada y probada** en la rama `fase-1` (A1-A10 superadas; CI en verde con 355 pruebas). Estados actualizados solo con lo probado: cabecera, `pglast` en la sección 9 y RC14 en la sección 15. Sin cambios de reglas | Claude (alcance aprobado) |
+| 6 nov 2026 | **Decisión del propietario: D03 aprobada** (la profundidad se graba desde la Fase 2, con el grabador en Oracle). Actualizada la cabecera | Propietario |
+| 6 nov 2026 | **Versión 1.2: ronda 4 de revisión, antes de la Fase 2.** (1) Persistencia de la profundidad: canal `obu` con snapshots completos, sin guardar los mensajes originales, intervalos de 10 s con métricas, snapshot completo cada minuto y estimación de almacenamiento ligada a esa elección (3.1, 3.3 y 3.5). (2) Riesgo de recuperación de instancias inactivas de Oracle, medido con las métricas de Oracle y revisión manual hasta la F7 (13). (3) Copias: la retención en Object Storage no se da por cumplida mientras no se use, y el RPO frente a la pérdida del servidor depende de la copia externa (10.1). (4) «Solo GET» se limita a REST; el WebSocket tiene su propia lista blanca (2 y 3.1). (5) El error 429000 distingue cuota agotada y sobrecarga (3.1). Fuentes añadidas en la sección 16 | Revisor (ronda 4); aplicada a petición del propietario |
+| 6 nov 2026 | **Alcance de la Fase 2 aprobado por el propietario**, con 10 + 10 candidatos de nivel 50 (en lugar de los 5 + 5 propuestos). Actualizados los candidatos y la estimación de almacenamiento de 3.1 | Propietario |

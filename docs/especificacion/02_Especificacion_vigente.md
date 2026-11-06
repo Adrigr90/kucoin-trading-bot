@@ -16,7 +16,7 @@ Este documento **sustituye, para leer y auditar**, al Informe V4 y a los anexos 
 | Especificado | Sí, con pendientes |
 | Verificado documentalmente | Parcial |
 | Validado mediante pruebas | **Fase 1** (6 de noviembre de 2026): H07, B18, B20, B25, B26, RC14, RC15 y la parte de PostgreSQL y roles de la sección 9. Informe en `docs/informes/Informe_Fase1.md` del repositorio |
-| Implementado | **Fase 1**, en la rama `fase-1`, **pendiente de integrar en `main`** |
+| Implementado | **Fase 1**: una primera versión integrada en `main` (pull request #1, 6 de noviembre de 2026); las correcciones de la auditoría del revisor, en la rama `fase-1`, **pendientes de integrar** (pull request #2) |
 | Decisiones D01-D35 aprobadas | **4**: D17, D33 y D35, el 5 de noviembre de 2026, y D18, el 6 de noviembre (ver `03_Decisiones.md`) |
 
 **Etiquetas:** [H] hecho oficial verificado (fuente en la sección 16) · [I] inferencia técnica · [R] recomendación · [P] pendiente · [Cxx] corrección de origen · [Dxx] decisión del propietario (pendiente salvo que se indique «aprobada») · [Hxx] hallazgo abierto.

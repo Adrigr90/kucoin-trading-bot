@@ -15,7 +15,7 @@
 - **Tras la primera revisión del revisor** se añadieron 38 pruebas sobre privilegios heredados, pertenencias entre roles, propietarios, privilegios por defecto y cambios de esquema (secciones 3 y 4).
 - **Revisión del código de PostgreSQL por el revisor (6 de noviembre de 2026): OK** en concesiones y revocaciones, privilegios heredados, propietarios, autenticación, A6, A7 y A9, sin cambios. Queda pendiente su revisión del núcleo de cálculo y del analizador de SQL.
 - **Revisión propia del analizador de SQL:** se cerró un hueco. Un módulo de migración podía ejecutar un archivo `.sql` situado fuera de `migrations/versions/`, que el analizador no revisaba. Ahora cada módulo debe tener exactamente la forma de la plantilla, con 9 casos de prueba de manipulación (sección 6, punto 5).
-- **Nada está integrado en `main`.** La integración espera la aprobación del propietario (DM §11).
+- **Integración en `main`:** el propietario integró la versión `efacd49` el 6 de noviembre de 2026 a las 17:19 (pull request #1), antes de la auditoría del revisor; la CI de `main` pasó. Las mejoras y correcciones posteriores (sección 10 y anteriores, 7 commits) llegan con la pull request #2, que también aprueba el propietario (DM §11).
 - La Fase 1 **no se conecta a KuCoin, no usa Oracle y no maneja ninguna clave**.
 
 ## 2. Qué se ha construido
@@ -102,11 +102,11 @@ PostgreSQL 18.6 del repositorio oficial PGDG, **instalado en el propio runner de
 | Estado | Antes | Después |
 |---|---|---|
 | Validado mediante pruebas | 0 | H07, B18, B20, B25, B26, RC14, RC15 y la parte de PostgreSQL y roles de `02` §9 |
-| Implementado | 0 | Lo anterior, en la rama `fase-1`, **pendiente de integrar en `main`** |
+| Implementado | 0 | Lo anterior: una primera versión en `main` (pull request #1) y las correcciones de la auditoría con la pull request #2 |
 
 ## 9. Siguiente paso (ver también la sección 10)
 
-1. **El propietario revisa este informe** (y, si quiere, el revisor) y **aprueba la integración de `fase-1` en `main`** mediante la pull request.
+1. **El propietario aprueba la integración de las correcciones de la auditoría en `main`** mediante la pull request #2. La primera versión ya se integró con la pull request #1.
 2. Después, el alcance de la Fase 2 (datos de KuCoin). Según D35, antes de implementarla toca la **ronda 4 de revisión** (secciones 3 y 7 de `02`) y decidir D03, D04, D26 y D29.
 
 ## 10. Correcciones de la revisión final del revisor (6 de noviembre de 2026)

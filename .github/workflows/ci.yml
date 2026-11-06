@@ -60,7 +60,7 @@ jobs:
       - name: Aplicar las migraciones como kbot_owner (Alembic)
         env:
           KBOT_DB_ADMIN_URL: postgresql+psycopg://postgres@/kbot?host=/var/run/postgresql
-        run: bash ci/step.sh "alembic" uv run alembic upgrade head
+        run: bash ci/step.sh "alembic" bash -c "uv run alembic upgrade head && uv run alembic current"
 
       - name: Pruebas unitarias, de propiedades, de la CI y de PostgreSQL
         env:

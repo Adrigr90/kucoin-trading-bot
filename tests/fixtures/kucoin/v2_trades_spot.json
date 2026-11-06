@@ -1,0 +1,49 @@
+{
+  "recorded_at": "2026-11-06T23:30:42.637206Z",
+  "route": "uta.v2.trades",
+  "request": "https://api.kucoin.com/api/ua/v2/market/trade?tradeType=SPOT&symbol=BTC-USDT",
+  "status": 200,
+  "weight": 3,
+  "ratelimit": {
+    "limit": 2000,
+    "remaining": 1867,
+    "reset_ms": 23618
+  },
+  "truncated": {
+    "path": "data.list",
+    "kept": 3,
+    "total": 100
+  },
+  "body": {
+    "code": "200000",
+    "data": {
+      "tradeType": "SPOT",
+      "list": [
+        {
+          "sequence": 25143559105167361,
+          "tradeId": "25143559105167361",
+          "price": "75938.7",
+          "size": "0.00034902",
+          "side": "SELL",
+          "ts": 1794007734533000000
+        },
+        {
+          "sequence": 25143559131119616,
+          "tradeId": "25143559131119616",
+          "price": "75938.7",
+          "size": "0.00019109",
+          "side": "SELL",
+          "ts": 1794007734953000000
+        },
+        {
+          "sequence": 25143559507689472,
+          "tradeId": "25143559507689472",
+          "price": "75938.7",
+          "size": "0.00013916",
+          "side": "SELL",
+          "ts": 1794007738867000000
+        }
+      ]
+    }
+  }
+}

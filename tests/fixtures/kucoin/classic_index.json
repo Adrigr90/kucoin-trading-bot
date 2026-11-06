@@ -1,0 +1,135 @@
+{
+  "recorded_at": "2026-11-06T23:30:55.192077Z",
+  "route": "futures.index",
+  "request": "https://api-futures.kucoin.com/api/v1/index/query?symbol=.KXBTUSDT&maxCount=3",
+  "status": 200,
+  "weight": 2,
+  "ratelimit": {
+    "limit": 2000,
+    "remaining": 1748,
+    "reset_ms": 11066
+  },
+  "truncated": null,
+  "body": {
+    "code": "200000",
+    "data": {
+      "dataList": [
+        {
+          "symbol": ".KXBTUSDT",
+          "granularity": 1000,
+          "timePoint": 1794007855000,
+          "value": 75933.59,
+          "decomposionList": [
+            {
+              "exchange": "okex",
+              "exchangeName": "OKX",
+              "price": 75936.0,
+              "weight": 0.3293
+            },
+            {
+              "exchange": "binance",
+              "exchangeName": "Binance",
+              "price": 75931.19,
+              "weight": 0.4115
+            },
+            {
+              "exchange": "kucoin",
+              "exchangeName": "KuCoin",
+              "price": 75935.7,
+              "weight": 0.0864
+            },
+            {
+              "exchange": "bybit",
+              "exchangeName": "Bybit",
+              "price": 75931.8,
+              "weight": 0.0864
+            },
+            {
+              "exchange": "gateio",
+              "exchangeName": "GateIO",
+              "price": 75935.5,
+              "weight": 0.0864
+            }
+          ]
+        },
+        {
+          "symbol": ".KXBTUSDT",
+          "granularity": 1000,
+          "timePoint": 1794007854000,
+          "value": 75933.59,
+          "decomposionList": [
+            {
+              "exchange": "okex",
+              "exchangeName": "OKX",
+              "price": 75936.0,
+              "weight": 0.3293
+            },
+            {
+              "exchange": "binance",
+              "exchangeName": "Binance",
+              "price": 75931.19,
+              "weight": 0.4115
+            },
+            {
+              "exchange": "kucoin",
+              "exchangeName": "KuCoin",
+              "price": 75935.7,
+              "weight": 0.0864
+            },
+            {
+              "exchange": "bybit",
+              "exchangeName": "Bybit",
+              "price": 75931.8,
+              "weight": 0.0864
+            },
+            {
+              "exchange": "gateio",
+              "exchangeName": "GateIO",
+              "price": 75935.5,
+              "weight": 0.0864
+            }
+          ]
+        },
+        {
+          "symbol": ".KXBTUSDT",
+          "granularity": 1000,
+          "timePoint": 1794007853000,
+          "value": 75933.58,
+          "decomposionList": [
+            {
+              "exchange": "okex",
+              "exchangeName": "OKX",
+              "price": 75936.0,
+              "weight": 0.3293
+            },
+            {
+              "exchange": "binance",
+              "exchangeName": "Binance",
+              "price": 75931.18,
+              "weight": 0.4115
+            },
+            {
+              "exchange": "kucoin",
+              "exchangeName": "KuCoin",
+              "price": 75935.7,
+              "weight": 0.0864
+            },
+            {
+              "exchange": "bybit",
+              "exchangeName": "Bybit",
+              "price": 75931.8,
+              "weight": 0.0864
+            },
+            {
+              "exchange": "gateio",
+              "exchangeName": "GateIO",
+              "price": 75935.5,
+              "weight": 0.0864
+            }
+          ]
+        }
+      ],
+      "hasMore": true
+    }
+  }
+}

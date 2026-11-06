@@ -1,0 +1,39 @@
+{
+  "recorded_at": "2026-11-06T23:30:42.032005Z",
+  "route": "uta.v2.ticker",
+  "request": "https://api.kucoin.com/api/ua/v2/market/ticker?tradeType=SPOT&symbol=BTC-USDT",
+  "status": 200,
+  "weight": 15,
+  "ratelimit": {
+    "limit": 2000,
+    "remaining": 1885,
+    "reset_ms": 24218
+  },
+  "truncated": null,
+  "body": {
+    "code": "200000",
+    "data": {
+      "tradeType": "SPOT",
+      "ts": 1794007842546000000,
+      "list": [
+        {
+          "symbol": "BTC-USDT",
+          "name": "BTC-USDT",
+          "bestBidSize": "1.00566059",
+          "bestBidPrice": "75935.7",
+          "bestAskSize": "0.11934958",
+          "bestAskPrice": "75935.8",
+          "lastPrice": "75935.7",
+          "size": "0.000013",
+          "open": "75879",
+          "high": "76408.1",
+          "low": "74893.7",
+          "baseVolume": "4095.8782583",
+          "quoteVolume": "310552533.267865584",
+          "priceChange": "56.7",
+          "priceChangePercent": "0.0007"
+        }
+      ]
+    }
+  }
+}

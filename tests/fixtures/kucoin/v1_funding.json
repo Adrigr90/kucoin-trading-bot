@@ -1,0 +1,26 @@
+{
+  "recorded_at": "2026-11-06T23:30:40.892469Z",
+  "route": "uta.v1.funding",
+  "request": "https://api.kucoin.com/api/ua/v1/market/funding-rate?symbol=XBTUSDTM",
+  "status": 200,
+  "weight": 2,
+  "ratelimit": {
+    "limit": 2000,
+    "remaining": 1910,
+    "reset_ms": 25370
+  },
+  "truncated": null,
+  "body": {
+    "code": "200000",
+    "data": {
+      "symbol": ".XBTUSDTMFPI8H",
+      "nextFundingRate": 1.0E-4,
+      "fundingTime": 1794009600000,
+      "fundingRateCap": 0.003,
+      "fundingRateFloor": -0.003,
+      "currentGranularity": 28800000,
+      "newGranularity": 28800000,
+      "newGranularityStartTime": 1750147200000
+    }
+  }
+}

@@ -1,0 +1,44 @@
+{
+  "recorded_at": "2026-11-06T23:30:44.581980Z",
+  "route": "uta.v2.ticker",
+  "request": "https://api.kucoin.com/api/ua/v2/market/ticker?tradeType=FUTURES&symbol=XBTUSDTM",
+  "status": 200,
+  "weight": 15,
+  "ratelimit": {
+    "limit": 2000,
+    "remaining": 1841,
+    "reset_ms": 21897
+  },
+  "truncated": null,
+  "body": {
+    "code": "200000",
+    "data": {
+      "tradeType": "FUTURES",
+      "ts": 1794007844867000000,
+      "list": [
+        {
+          "sequence": 1749203661116,
+          "symbol": "XBTUSDTM",
+          "side": "buy",
+          "size": "4",
+          "tradeId": "1952396791330",
+          "lastPrice": "75894.3",
+          "bestBidPrice": "75900.4",
+          "bestBidSize": "2359",
+          "bestAskPrice": "75900.5",
+          "bestAskSize": "23",
+          "ts": 1794007795048000000,
+          "low": "74840.8",
+          "high": "76383.2",
+          "open": "75844.6",
+          "baseVolume": "4036.416",
+          "quoteVolume": "305805818.7872",
+          "priceChange": "49.7",
+          "priceChangePercent": "0.0655",
+          "indexPrice": "75933.6",
+          "markPrice": "75902.05"
+        }
+      ]
+    }
+  }
+}

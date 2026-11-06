@@ -1,0 +1,37 @@
+{
+  "recorded_at": "2026-11-06T23:30:56.343985Z",
+  "route": "uta.v2.funding_history",
+  "request": "https://api.kucoin.com/api/ua/v2/market/funding-rate-history?symbol=XBTUSDTM&startAt=1793835035475&endAt=1794007835475",
+  "status": 200,
+  "weight": 5,
+  "ratelimit": {
+    "limit": 2000,
+    "remaining": 1731,
+    "reset_ms": 9904
+  },
+  "truncated": {
+    "path": "data.list",
+    "kept": 3,
+    "total": 6
+  },
+  "body": {
+    "code": "200000",
+    "data": {
+      "symbol": "XBTUSDTM",
+      "list": [
+        {
+          "fundingRate": "0.0001",
+          "ts": 1793980800000
+        },
+        {
+          "fundingRate": "0.000076",
+          "ts": 1793952000000
+        },
+        {
+          "fundingRate": "0.0001",
+          "ts": 1793923200000
+        }
+      ]
+    }
+  }
+}

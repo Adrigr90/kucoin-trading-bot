@@ -1,0 +1,30 @@
+{
+  "recorded_at": "2026-11-06T23:30:47.056266Z",
+  "route": "uta.v1.kline",
+  "request": "https://api.kucoin.com/api/ua/v1/market/kline?tradeType=FUTURES&symbol=XBTUSDTM&interval=1min",
+  "status": 200,
+  "weight": 3,
+  "ratelimit": {
+    "limit": 2000,
+    "remaining": 1807,
+    "reset_ms": 19201
+  },
+  "truncated": {
+    "path": "data.list",
+    "kept": 3,
+    "total": 200
+  },
+  "body": {
+    "code": "200000",
+    "data": {
+      "tradeType": "FUTURES",
+      "klineType": "TRADE",
+      "symbol": "XBTUSDTM",
+      "list": [
+        [1794007740, "75899.3", "75899.3", "75894.3", "75894.3", "140", "10625.222"],
+        [1794007680, "75898.1", "75905.2", "75898.1", "75904.5", "948", "71958.097"],
+        [1794007620, "75898", "75898", "75898", "75898", "10", "758.98"]
+      ]
+    }
+  }
+}

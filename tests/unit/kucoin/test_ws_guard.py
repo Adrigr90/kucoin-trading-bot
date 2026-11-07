@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from websockets.asyncio.client import connect as websocket_connect
 
+from kbot.kucoin import ws as ws_module
 from kbot.kucoin.ws import (
     CHANNELS,
     MAX_TOPICS_PER_CONNECTION,
@@ -184,26 +186,35 @@ def test_stream_construction_checks_everything() -> None:
     assert stream._url == PUBLIC_ENDPOINTS["SPOT"]
 
 
-@pytest.mark.parametrize("url", ["ws://127.0.0.1:8765", "wss://ws-api-spot.kucoin.com"])
-def test_a_stream_cannot_be_pointed_elsewhere(url: str) -> None:
-    """A3-01: the endpoint is not configurable, so a loopback or private URL is refused
-    before any connection is opened."""
-    opened: list[str] = []
+def _alternate_connector(url: str, **options: object) -> object:
+    return websocket_connect("ws://127.0.0.1:8765", **options)  # type: ignore[arg-type]
 
-    def connector(target: str, **_options: object) -> object:
-        opened.append(target)
-        raise AssertionError("must not connect")
 
-    with pytest.raises(TypeError, match="url"):
+@pytest.mark.parametrize(
+    ("option", "value"),
+    [
+        ("url", "ws://127.0.0.1:8765"),
+        ("url", "wss://ws-api-spot.kucoin.com"),
+        ("connector", _alternate_connector),
+        ("transport", _alternate_connector),
+    ],
+)
+def test_a_stream_cannot_be_pointed_elsewhere(option: str, value: object) -> None:
+    """A3-01 and R-E1-02: neither the endpoint nor the transport is a parameter, so
+    nothing that builds a stream can send it to another destination."""
+    with pytest.raises(TypeError, match=option):
         PublicStream(  # type: ignore[call-arg]
             "SPOT",
             [Subscription("trade", "SPOT", "BTC-USDT")],
             on_message=lambda *_: None,
             pacer=ConnectionPacer(),
-            connector=connector,
-            url=url,
+            **{option: value},
         )
-    assert opened == []
+
+
+def test_production_opens_connections_with_the_official_client() -> None:
+    """R-E1-02: unless a test patches it, the transport is websockets' own client."""
+    assert ws_module._open_connection is websocket_connect
 
 
 class FakeTime:

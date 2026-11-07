@@ -15,11 +15,14 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import os
 import random
+import tempfile
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from pathlib import Path
 
 POOL_WEIGHT = 2000
 WINDOW_SECONDS = 30.0
@@ -116,12 +119,63 @@ class RestRateLimiter:
         self._blocked_until = max(self._blocked_until, self._clock() + seconds)
 
 
+LOCK_ENV = "KBOT_REST_LOCK"
+LOCK_FILE_NAME = "kbot-kucoin-rest.lock"
+_held_locks: list[int] = []
+
+
+class RestBudgetInUse(RuntimeError):
+    """Another process of this machine already owns the REST budget."""
+
+
+def lock_path() -> Path:
+    """Where the machine-wide lock lives. On the server it must be a path shared by every
+    service (not a private /tmp), set with KBOT_REST_LOCK when deploying (E4)."""
+    return Path(os.environ.get(LOCK_ENV) or Path(tempfile.gettempdir()) / LOCK_FILE_NAME)
+
+
+def acquire_machine_lock(path: Path) -> int:
+    """Take an exclusive, non-blocking OS lock; raise RestBudgetInUse if it is held.
+
+    The operating system releases the lock when the process ends, even if it crashes.
+    """
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        os.close(fd)
+        raise RestBudgetInUse(
+            f"another process already uses the KuCoin REST budget ({path})"
+        ) from exc
+    return fd
+
+
+def release_machine_lock(fd: int) -> None:
+    if os.name == "nt":
+        import msvcrt
+
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    os.close(fd)
+
+
 @functools.cache
 def shared_limiter() -> RestRateLimiter:
-    """The one budget of this process. Every REST client uses it unless a test injects
+    """The one budget of this machine. Every REST client uses it unless a test injects
     its own, so several clients can never add up more than the share of the IP.
 
-    Between processes on the same IP, the server headers are the shared source of truth:
-    ``observe`` stops every client as soon as the IP as a whole has used the share.
+    Only one process per machine may spend it: the first call takes an OS lock that it
+    keeps until the process ends, and any other process gets RestBudgetInUse instead of
+    a second budget. A single budget accounts for every request before it is sent, so
+    requests in flight are always counted. The server headers stay as a second barrier
+    for traffic from other machines behind the same IP.
     """
+    _held_locks.append(acquire_machine_lock(lock_path()))
     return RestRateLimiter()

@@ -10,15 +10,18 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Callable
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 from websockets.asyncio.client import connect as websocket_connect
 from websockets.asyncio.server import ServerConnection, serve
 
+from kbot.kucoin import ws as ws_module
 from kbot.kucoin.ws import (
     PUBLIC_ENDPOINTS,
     ConnectionPacer,
@@ -99,15 +102,16 @@ SUBSCRIPTIONS = (
 )
 
 
-def local_connector(port: int, targets: list[str]) -> Callable[..., Any]:
-    """Test transport: records the URL the stream asks for and connects to the local
-    server instead. The stream itself never accepts any URL but KuCoin's (A3-01)."""
+def local_transport(port: int, targets: list[str]) -> Any:
+    """Controlled substitution, only in tests (R-E1-02): the module function that opens
+    connections is patched to record the URL the stream asks for and to reach the local
+    server. PublicStream has no parameter for this, so production code cannot do it."""
 
     def connect(url: str, **options: Any) -> Any:
         targets.append(url)
         return websocket_connect(f"ws://127.0.0.1:{port}", **options)
 
-    return connect
+    return patch.object(ws_module, "_open_connection", connect)
 
 
 def run_stream(
@@ -121,26 +125,27 @@ def run_stream(
     observed = Observed()
 
     async def go() -> None:
-        async with serve(server.handler, "127.0.0.1", 0) as ws_server:
-            port = ws_server.sockets[0].getsockname()[1]
-            stop = asyncio.Event()
-            stream = PublicStream(
-                "SPOT",
-                SUBSCRIPTIONS,
-                on_message=observed.on_message,
-                on_state=observed.on_state,
-                on_control=observed.on_control,
-                pacer=ConnectionPacer(min_interval=0.0),
-                connector=local_connector(port, observed.targets),
-                pong_timeout=pong_timeout,
-                ack_timeout=1.0,
-                reconnect_delay=0.1,
-                max_session_seconds=max_session,
-            )
-            task = asyncio.create_task(stream.run(stop))
-            await wait_for(lambda: until(observed), deadline)
-            stop.set()
-            await asyncio.wait_for(task, timeout=3.0)
+        with ExitStack() as stack:
+            async with serve(server.handler, "127.0.0.1", 0) as ws_server:
+                port = ws_server.sockets[0].getsockname()[1]
+                stop = asyncio.Event()
+                stack.enter_context(local_transport(port, observed.targets))
+                stream = PublicStream(
+                    "SPOT",
+                    SUBSCRIPTIONS,
+                    on_message=observed.on_message,
+                    on_state=observed.on_state,
+                    on_control=observed.on_control,
+                    pacer=ConnectionPacer(min_interval=0.0),
+                    pong_timeout=pong_timeout,
+                    ack_timeout=1.0,
+                    reconnect_delay=0.1,
+                    max_session_seconds=max_session,
+                )
+                task = asyncio.create_task(stream.run(stop))
+                await wait_for(lambda: until(observed), deadline)
+                stop.set()
+                await asyncio.wait_for(task, timeout=3.0)
 
     asyncio.run(go())
     return observed
@@ -223,20 +228,21 @@ def test_decimals_in_pushed_numbers_are_exact() -> None:
             await connection.send('{"T":"mark-price","d":{"mp":0.1000000000000000055511}}')
 
     async def go() -> None:
-        async with serve(handler, "127.0.0.1", 0) as ws_server:
-            port = ws_server.sockets[0].getsockname()[1]
-            stop = asyncio.Event()
-            stream = PublicStream(
-                "FUTURES",
-                [Subscription("mark-price", "FUTURES", "XBTUSDTM")],
-                on_message=lambda m, _at: received.append(m),
-                pacer=ConnectionPacer(min_interval=0.0),
-                connector=local_connector(port, []),
-            )
-            task = asyncio.create_task(stream.run(stop))
-            await wait_for(lambda: bool(received), 5.0)
-            stop.set()
-            await asyncio.wait_for(task, timeout=3.0)
+        with ExitStack() as stack:
+            async with serve(handler, "127.0.0.1", 0) as ws_server:
+                port = ws_server.sockets[0].getsockname()[1]
+                stop = asyncio.Event()
+                stack.enter_context(local_transport(port, []))
+                stream = PublicStream(
+                    "FUTURES",
+                    [Subscription("mark-price", "FUTURES", "XBTUSDTM")],
+                    on_message=lambda m, _at: received.append(m),
+                    pacer=ConnectionPacer(min_interval=0.0),
+                )
+                task = asyncio.create_task(stream.run(stop))
+                await wait_for(lambda: bool(received), 5.0)
+                stop.set()
+                await asyncio.wait_for(task, timeout=3.0)
 
     asyncio.run(go())
     assert received[0]["d"]["mp"] == Decimal("0.1000000000000000055511")

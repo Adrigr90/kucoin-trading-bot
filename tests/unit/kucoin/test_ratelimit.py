@@ -5,17 +5,25 @@ from __future__ import annotations
 import asyncio
 import bisect
 import itertools
+import os
 import random
+import subprocess
+import sys
+from pathlib import Path
 
 import httpx
 import pytest
 
 from kbot.kucoin.ratelimit import (
+    LOCK_ENV,
     MAX_BACKOFF_SECONDS,
     MIN_BACKOFF_SECONDS,
     POOL_WEIGHT,
     RateLimitHeaders,
+    RestBudgetInUse,
     RestRateLimiter,
+    acquire_machine_lock,
+    release_machine_lock,
     shared_limiter,
 )
 from kbot.kucoin.rest import KucoinApiError, KucoinRestClient
@@ -279,3 +287,41 @@ def test_a2_01_clients_use_the_shared_budget_by_default() -> None:
             assert first.limiter is second.limiter is shared_limiter()
 
     asyncio.run(go())
+
+
+SECOND_PROCESS = """
+import sys
+from kbot.kucoin.ratelimit import RestBudgetInUse, shared_limiter
+try:
+    shared_limiter()
+except RestBudgetInUse:
+    sys.exit(3)
+"""
+
+
+def run_second_process(lock: Path) -> subprocess.CompletedProcess[str]:
+    env = {**os.environ, LOCK_ENV: str(lock)}
+    return subprocess.run(
+        [sys.executable, "-c", SECOND_PROCESS],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+
+def test_r_e1_01_only_one_process_per_machine_gets_the_budget(tmp_path: Path) -> None:
+    """R-E1-01: a second process cannot get its own budget while the first one holds it,
+    so there is never more than one budget (and its requests in flight) per machine."""
+    lock = tmp_path / "rest.lock"
+    held = acquire_machine_lock(lock)
+    try:
+        refused = run_second_process(lock)
+        assert refused.returncode == 3, refused.stderr
+        with pytest.raises(RestBudgetInUse):
+            acquire_machine_lock(lock)
+    finally:
+        release_machine_lock(held)
+    accepted = run_second_process(lock)
+    assert accepted.returncode == 0, accepted.stderr

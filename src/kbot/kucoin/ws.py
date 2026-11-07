@@ -198,7 +198,9 @@ class ConnectionPacer:
 
 MessageHandler = Callable[[dict[str, Any], datetime], None]
 StateHandler = Callable[[str, datetime, str], None]
-Connector = Callable[..., Any]
+# The only way to open a connection. It is not a parameter of PublicStream; the protocol
+# tests replace it with pytest.monkeypatch, which production code never does.
+_open_connection = websocket_connect
 
 
 class SessionRotation(Exception):
@@ -223,7 +225,6 @@ class PublicStream:
         on_state: StateHandler | None = None,
         on_control: MessageHandler | None = None,
         pacer: ConnectionPacer,
-        connector: Connector = websocket_connect,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         wall_clock: Clock | None = None,
@@ -243,8 +244,8 @@ class PublicStream:
             subscription.message("SUBSCRIBE", "check")
         if trade_type not in PUBLIC_ENDPOINTS:
             raise ValueError(f"unknown trade type: {trade_type!r}")
-        # The URL is fixed: there is no way to point a stream elsewhere. Tests replace the
-        # connector in code instead, which still receives this public URL.
+        # The URL is fixed and the transport is not a parameter: nothing that builds a
+        # stream can point it elsewhere.
         self._url = PUBLIC_ENDPOINTS[trade_type]
         check_endpoint(self._url, trade_type)
         self._trade_type = trade_type
@@ -252,7 +253,6 @@ class PublicStream:
         self._on_state = on_state or (lambda _state, _at, _detail: None)
         self._on_control = on_control or (lambda _message, _at: None)
         self._pacer = pacer
-        self._connector = connector
         self._clock = clock
         self._sleep = sleep
         self._wall = wall_clock or SystemClock()
@@ -282,7 +282,7 @@ class PublicStream:
     async def _session(self, stop: asyncio.Event) -> None:
         async with (
             self._pacer.slot(),
-            self._connector(
+            _open_connection(
                 self._url,
                 open_timeout=15,
                 close_timeout=5,

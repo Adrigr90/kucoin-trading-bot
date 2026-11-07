@@ -2,7 +2,8 @@
 
 Rule: USDT pairs that are trading (in Futures, linear contracts settled in USDT, 02 §0),
 ordered by their 24-hour volume in the quote currency; the first 20 of each market form
-the universe and the first 10 are the depth-50 candidates (P3). Ties go to the symbol in
+the universe and the first 10 are the depth-50 candidates (P3). Stablecoins as base
+currency are left out (owner decision of 7 November 2026). Ties go to the symbol in
 alphabetical order, so the result does not depend on the order of the answer. A pair
 without a usable book (no bid or ask, or a crossed one) is left out: its spread is unknown.
 Every evaluation is stored in ``universe_snapshots`` with the version of the criteria.
@@ -26,6 +27,8 @@ UNIVERSE_SIZE = 20
 L50_SIZE = 10
 TRADING = {"SPOT": "TradingEnabled", "FUTURES": "Open"}
 CRITERIA_VERSION = "provisional-1"
+# Owner decision of 7 November 2026: stablecoins are not traded against USDT.
+STABLECOINS = frozenset({"USDC", "USDE", "FDUSD", "DAI", "TUSD", "PYUSD"})
 
 
 @dataclass(frozen=True)
@@ -62,7 +65,7 @@ def evaluate(
     tickers: Iterable[Mapping[str, Any]],
     *,
     evaluated_at: datetime,
-    excluded_bases: frozenset[str] = frozenset(),
+    excluded_bases: frozenset[str] = STABLECOINS,
 ) -> list[UniverseEntry]:
     """Rank the eligible instruments of one market. Returns every ranked instrument; only the
     first ``UNIVERSE_SIZE`` are in the universe."""

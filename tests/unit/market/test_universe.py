@@ -51,7 +51,7 @@ def test_the_first_twenty_by_quote_volume_and_ten_candidates() -> None:
     assert sum(e.l50_candidate for e in entries) == L50_SIZE
     assert all(e.in_universe for e in entries if e.l50_candidate)
     assert entries[0].quote_volume_24h == Decimal(1029)
-    assert entries[0].criteria_version == "provisional-1"
+    assert entries[0].criteria_version == "provisional-1+excluded:DAI,FDUSD,PYUSD,TUSD,USDC,USDE"
 
 
 def test_ties_go_to_the_symbol_in_alphabetical_order() -> None:
@@ -119,3 +119,23 @@ def test_unknown_markets_and_naive_times_are_refused() -> None:
         evaluate("MARGIN", [], [], evaluated_at=NOW)
     with pytest.raises(ValueError, match="time zone"):
         evaluate("SPOT", [], [], evaluated_at=datetime(2026, 11, 7))
+
+
+def test_stablecoins_are_left_out_by_default() -> None:
+    names = ["USDC-USDT", "FDUSD-USDT", "BTC-USDT"]
+    entries = evaluate(
+        "SPOT",
+        [spot(s) for s in names],
+        [ticker("USDC-USDT", "90"), ticker("FDUSD-USDT", "80"), ticker("BTC-USDT", "40")],
+        evaluated_at=NOW,
+    )
+    assert [e.symbol for e in entries] == ["BTC-USDT"]
+    nothing = evaluate(
+        "SPOT",
+        [spot(s) for s in names],
+        [ticker("USDC-USDT", "90"), ticker("BTC-USDT", "40")],
+        evaluated_at=NOW,
+        excluded_bases=frozenset(),
+    )
+    assert [e.symbol for e in nothing] == ["USDC-USDT", "BTC-USDT"]
+    assert nothing[0].criteria_version == "provisional-1"

@@ -17,7 +17,7 @@ Este documento **sustituye, para leer y auditar**, al Informe V4 y a los anexos 
 | Verificado documentalmente | Parcial |
 | Validado mediante pruebas | **Fase 1** (6 de noviembre de 2026): H07, B18, B20, B25, B26, RC14, RC15 y la parte de PostgreSQL y roles de la sección 9. Informe en `docs/informes/Informe_Fase1.md` del repositorio |
 | Implementado | **Fase 1**: una primera versión integrada en `main` (pull request #1, 6 de noviembre de 2026); las correcciones de la auditoría del revisor, en la rama `fase-1`, **pendientes de integrar** (pull request #2) |
-| Decisiones D01-D35 aprobadas | **5**: D17, D33 y D35, el 5 de noviembre de 2026, y D18 y D03, el 6 de noviembre (ver `03_Decisiones.md`) |
+| Decisiones D01-D35 aprobadas | **10**: D17, D33 y D35, el 5 de noviembre de 2026; D18 y D03, el 6 de noviembre; D04, D01, D02, D11 y D25, el 7 de noviembre (ver `03_Decisiones.md`) |
 
 **Etiquetas:** [H] hecho oficial verificado (fuente en la sección 16) · [I] inferencia técnica · [R] recomendación · [P] pendiente · [Cxx] corrección de origen · [Dxx] decisión del propietario (pendiente salvo que se indique «aprobada») · [Hxx] hallazgo abierto.
 
@@ -306,7 +306,7 @@ Este documento **sustituye, para leer y auditar**, al Informe V4 y a los anexos 
 
 **Huecos:** una desconexión abre un hueco en memoria y se inserta en `data_gaps` al cerrarse. Si el proceso se detiene, al arrancar se inserta el hueco desde el último intervalo registrado (`proceso_detenido`). Todos los intervalos de profundidad afectados quedan `desconectado` (A5).
 
-**Universo provisional** (D12 sin aprobar): pares en USDT que cotizan, ordenados por volumen de 24 h en la moneda de cotización, los 20 primeros de Spot y de Futures; los 10 primeros de cada mercado son candidatos de nivel 50 (P3). Se reevalúa una vez al día y cada cambio queda en `universe_snapshots`.
+**Universo provisional** (D12 sin aprobar): pares en USDT que cotizan, **sin monedas estables como moneda base** (USDC, USDE, FDUSD, DAI, TUSD, PYUSD) [decisión del propietario, 7 nov 2026], ordenados por volumen de 24 h en la moneda de cotización, los 20 primeros de Spot y de Futures; los 10 primeros de cada mercado son candidatos de nivel 50 (P3). Se reevalúa una vez al día y cada cambio queda en `universe_snapshots`.
 
 ## 4. Eventos y recuperación
 
@@ -1013,7 +1013,7 @@ Los límites y tiempos son provisionales: se ajustan con el consumo medido en la
 - **Artefacto:** cada hora, `pg_dump -Fc` de **toda la base de datos**, excluyendo solo los datos de las particiones ya archivadas en Parquet.
   - [H] `pg_dump` es consistente con uso concurrente e incluye las secuencias, pero no los roles.
   - [H] La documentación avisa de que no suele ser lo adecuado para producción "salvo en casos simples"; [I] este es un caso simple.
-- **Retención** [D25]: 3 horarias, 7 diarias, 2 semanales y 2 previas a una actualización. Unos 13,7 GB de los 20 GB de Object Storage [H] en el escenario medio, año 1, peor caso.
+- **Retención** [D25, aprobada el 7 de noviembre de 2026]: 3 horarias, 7 diarias, 2 semanales y 2 previas a una actualización. Unos 13,7 GB de los 20 GB de Object Storage [H] en el escenario medio, año 1, peor caso.
 - **Manifiesto:**
   - modo por tabla: `incluido` (filas y hash) o `excluido_parquet` (ruta, sha256 y filas);
   - huella del catálogo;
@@ -1061,7 +1061,7 @@ Los límites y tiempos son provisionales: se ajustan con el consumo medido en la
 ### 10.3 Almacenamiento de Oracle (C36)
 
 - [H] 200 GB entre todos los volúmenes. El mínimo del volumen de arranque es de 47 o 50 GB (la documentación se contradice).
-- **Opción B, sin centinela [R]:** 50 + 110, con 40 GB libres. Con centinela, solo es viable reduciendo los datos a 90 GB [D11].
+- **Opción B, sin centinela [D11, aprobada el 7 de noviembre de 2026]:** 50 + 110, con 40 GB libres; copia cifrada al PC. Región principal: **Frankfurt** [D02, aprobada el 7 de noviembre de 2026]. Con centinela, solo es viable reduciendo los datos a 90 GB [D11].
 - **Escenario medio, año 1:** base de datos de unos 22 GB y Parquet de hasta 36 GB sin comprimir. Cabe. **El escenario exigente no cabe**: habría que reducir el alcance o pedir autorización.
 
 ## 11. Noticias e IA
@@ -1418,3 +1418,4 @@ $$\Delta Cap=\underbrace{8}_{\text{distancia mark-stop de lo cerrado}}+\underbra
 | 7 nov 2026 | **Decisión del propietario: fuente de las velas de mark e index.** Velas propias de 1 minuto desde el canal `mark-price`; huecos del index reconstruidos con el histórico de Classic; huecos del mark registrados como hueco. Actualizados 3.7 y 7 | Propietario |
 | 7 nov 2026 | **Propuesta del esquema `market` de la etapa E2** (3.8): tablas solo de inserción, columnas y claves, métricas de profundidad, velas propias de mark e index, huecos y universo provisional. Sin `funding_symbol_map` (D04) | Claude (alcance aprobado de la F2); **pendiente de revisión** |
 | 7 nov 2026 | **Revisión del esquema y de los módulos de E2: APROBABLE CON CORRECCIONES** (7 hallazgos, ninguno crítico). Aplicadas en 3.8 y en el código: velas propias solo con los 60 segundos y precios válidos (ALTO); `risk_tiers` con mercado en la clave; coherencia entre intervalos, métricas, velas, flujo y minutos impuesta por PostgreSQL; orden de cierre idempotente; `M` ausente como nulo; horas con zona obligatoria | Revisor; **confirmada el 7 nov 2026: los siete hallazgos cerrados** (el 3 tras restringir `ausencia_no_verificable` a S2 y S3) |
+| 7 nov 2026 | **Decisiones del propietario:** D01, D02 (Frankfurt), D11 (opción B) y D25 aprobadas, y exclusión de las monedas estables del universo provisional. Actualizados la cabecera, 3.8, 10.1 y 10.3 | Propietario |

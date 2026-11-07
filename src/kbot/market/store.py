@@ -15,6 +15,7 @@ from psycopg.types.json import Jsonb
 
 from kbot.market.depth import SLOT_SECONDS, MinuteSnapshot, SlotResult
 from kbot.market.gaps import DataGap
+from kbot.market.universe import UniverseEntry
 
 
 def depth_channel_name(depth: int) -> str:
@@ -126,3 +127,26 @@ def write_gap(conn: psycopg.Connection, gap: DataGap) -> None:
             gap.detail,
         ),
     )
+
+
+def write_universe(conn: psycopg.Connection, entries: Iterable[UniverseEntry]) -> None:
+    with conn.transaction():
+        for entry in entries:
+            conn.execute(
+                "INSERT INTO market.universe_snapshots (evaluated_at, market, symbol, rank,"
+                " in_universe, l50_candidate, quote_volume_24h, best_bid, best_ask,"
+                " criteria_version) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+                " ON CONFLICT DO NOTHING",
+                (
+                    entry.evaluated_at,
+                    entry.market,
+                    entry.symbol,
+                    entry.rank,
+                    entry.in_universe,
+                    entry.l50_candidate,
+                    entry.quote_volume_24h,
+                    entry.best_bid,
+                    entry.best_ask,
+                    entry.criteria_version,
+                ),
+            )

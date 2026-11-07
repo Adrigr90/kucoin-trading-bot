@@ -481,3 +481,36 @@ def test_an_unexplained_minute_matches_its_flow(
     else:
         with pytest.raises(errors.CheckViolation):
             ingest.execute(insert, (symbol, T0, candle_state, flow))
+
+
+def test_universe_evaluations_are_written_once(ingest: psycopg.Connection, symbol: str) -> None:
+    from kbot.market.store import write_universe
+    from kbot.market.universe import evaluate
+
+    moment = T0 + timedelta(microseconds=int(secrets.randbelow(10**6)))
+    names = [f"{symbol}{i}-USDT" for i in range(12)]
+    instruments = [
+        {"symbol": n, "baseCurrency": n, "quoteCurrency": "USDT", "tradingStatus": "TradingEnabled"}
+        for n in names
+    ]
+    tickers = [
+        {"symbol": n, "quoteVolume": str(100 + i), "bestBidPrice": "1", "bestAskPrice": "1.01"}
+        for i, n in enumerate(names)
+    ]
+    entries = evaluate("SPOT", instruments, tickers, evaluated_at=moment)
+    write_universe(ingest, entries)
+    write_universe(ingest, entries)  # a rerun changes nothing
+    rows = ingest.execute(
+        "SELECT symbol, rank, in_universe, l50_candidate FROM market.universe_snapshots"
+        " WHERE evaluated_at = %s ORDER BY rank",
+        (moment,),
+    ).fetchall()
+    assert [r[0] for r in rows] == list(reversed(names))
+    assert [r[3] for r in rows] == [True] * 10 + [False] * 2
+    with pytest.raises(errors.CheckViolation):
+        ingest.execute(
+            "INSERT INTO market.universe_snapshots (evaluated_at, market, symbol, rank,"
+            " in_universe, l50_candidate, quote_volume_24h, criteria_version)"
+            " VALUES (%s, 'SPOT', 'Z-USDT', 99, false, true, 1, 'x')",
+            (moment,),
+        )

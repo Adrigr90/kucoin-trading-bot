@@ -1,0 +1,282 @@
+"""Depth slots and metrics (spec 02 §3.3, §3.5 and §3.8; acceptance A5 and A8 of phase 2)."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from pathlib import Path
+from typing import Any
+
+import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
+
+from kbot.kucoin.jsonparse import loads
+from kbot.market.depth import (
+    DepthChannel,
+    SlotState,
+    compute_metrics,
+    parse_snapshot,
+    slot_start,
+)
+
+T0 = datetime(2026, 11, 7, 12, 0, 0, tzinfo=UTC)
+NO_LATENESS = timedelta(0)
+FIXTURES = Path(__file__).resolve().parents[2] / "fixtures" / "kucoin"
+
+
+def at(seconds: float) -> datetime:
+    return T0 + timedelta(seconds=seconds)
+
+
+def book(
+    sequence: int,
+    published: datetime,
+    bids: list[list[str]] | None = None,
+    asks: list[list[str]] | None = None,
+) -> dict[str, Any]:
+    ns = (published - datetime(1970, 1, 1, tzinfo=UTC)) // timedelta(microseconds=1) * 1000
+    return {
+        "T": "obu.SPOT",
+        "dp": "5",
+        "t": "snapshot",
+        "P": ns,
+        "d": {
+            "s": "BTC-USDT",
+            "C": sequence,
+            "O": sequence,
+            "M": ns,
+            "b": bids if bids is not None else [["100.0", "2"], ["99.9", "1"]],
+            "a": asks if asks is not None else [["100.2", "1"], ["100.3", "3"]],
+        },
+    }
+
+
+def channel(started: float = 0) -> DepthChannel:
+    return DepthChannel("SPOT", "BTC-USDT", 5, multiplier=Decimal(1), started_at=at(started))
+
+
+def states(results: list[Any]) -> list[str]:
+    return [r.state.value for r in results]
+
+
+def test_valid_book_and_silence_keep_the_slot_valid() -> None:
+    ch = channel()
+    ch.connection_up(at(0.5))
+    ch.on_message(book(1, at(1)), at(1.1))
+    slots, _ = ch.close_until(at(40), NO_LATENESS)
+    # First slot [0, 10) had no healthy connection at 0..0.5: desconectado.
+    assert states(slots) == ["desconectado", "valida", "valida", "valida"]
+    # The book did not change for 30 s: still valid, with its age (02 §3.3).
+    assert [r.age_ms for r in slots[1:]] == [18_900, 28_900, 38_900]
+    assert all(r.sequence == 1 for r in slots[1:])
+
+
+def test_no_snapshot_since_the_subscription_is_no_recibida() -> None:
+    ch = channel()
+    ch.connection_up(at(0))
+    slots, _ = ch.close_until(at(20), NO_LATENESS)
+    assert states(slots) == ["no_recibida", "no_recibida"]
+
+
+def test_a_disconnection_marks_every_slot_it_touches() -> None:
+    ch = channel()
+    ch.connection_up(at(0))
+    ch.on_message(book(1, at(1)), at(1))
+    ch.connection_down(at(12))
+    ch.connection_up(at(31))
+    slots, _ = ch.close_until(at(50), NO_LATENESS)
+    assert states(slots) == [
+        "valida",
+        "desconectado",
+        "desconectado",
+        "desconectado",
+        "no_recibida",
+    ]
+
+
+def test_the_old_book_does_not_survive_a_reconnection() -> None:
+    ch = channel()
+    ch.connection_up(at(0))
+    ch.on_message(book(5, at(1)), at(1))
+    ch.connection_down(at(10))
+    ch.connection_up(at(10.5))
+    ch.on_message(book(9, at(25)), at(25))
+    slots, _ = ch.close_until(at(30), NO_LATENESS)
+    assert states(slots) == ["valida", "desconectado", "valida"]
+    assert slots[2].sequence == 9
+
+
+@pytest.mark.parametrize(
+    ("bids", "asks", "problem"),
+    [
+        ([["100.3", "1"]], [["100.2", "1"]], "crossed"),
+        ([["100.0", "1"]], [["100.0", "1"]], "crossed"),
+        ([["99.9", "1"], ["100.0", "1"]], [["100.2", "1"]], "descending"),
+        ([["100.0", "1"]], [["100.3", "1"], ["100.2", "1"]], "ascending"),
+        ([["100.0", "0"]], [["100.2", "1"]], "non-positive"),
+        ([["100.0", "-1"]], [["100.2", "1"]], "non-positive"),
+        ([], [["100.2", "1"]], "empty"),
+        ([["abc", "1"]], [["100.2", "1"]], "numeric"),
+        ([[100.0, "1"]], [["100.2", "1"]], "as text"),
+    ],
+)
+def test_inconsistent_books(bids: list[Any], asks: list[Any], problem: str) -> None:
+    ch = channel()
+    ch.connection_up(at(0))
+    ch.on_message(book(1, at(1), bids, asks), at(1))
+    slots, _ = ch.close_until(at(10), NO_LATENESS)
+    assert states(slots) == ["libro_inconsistente"]
+    assert slots[0].metrics is None
+    snapshot = parse_snapshot(book(1, at(1), bids, asks), at(1), None)
+    assert problem in str(snapshot.problem)
+
+
+def test_a_sequence_that_goes_back_is_inconsistent_and_a_duplicate_is_ignored() -> None:
+    ch = channel()
+    ch.connection_up(at(0))
+    ch.on_message(book(7, at(1)), at(1))
+    ch.on_message(book(7, at(2), bids=[["50", "1"]]), at(2))  # same C: duplicate, ignored
+    first, _ = ch.close_until(at(10), NO_LATENESS)
+    assert states(first) == ["valida"] and first[0].metrics.best_bid == Decimal("100.0")  # type: ignore[union-attr]
+    ch.on_message(book(6, at(11)), at(11))  # C went back
+    second, _ = ch.close_until(at(20), NO_LATENESS)
+    assert states(second) == ["libro_inconsistente"]
+    ch.on_message(book(8, at(21)), at(21))
+    third, _ = ch.close_until(at(30), NO_LATENESS)
+    assert states(third) == ["valida"]
+
+
+def test_a_snapshot_that_arrives_after_its_slot_makes_it_late() -> None:
+    ch = channel()
+    ch.connection_up(at(0))
+    ch.on_message(book(1, at(1)), at(1))
+    ch.on_message(book(2, at(9.5)), at(10.4))  # published in [0, 10), received after 10
+    slots, _ = ch.close_until(at(11), timedelta(seconds=1))
+    assert states(slots) == ["fuera_de_plazo"]
+    assert slots[0].sequence == 1, "the book in force at the end of the slot was older"
+
+
+def test_slots_close_only_after_the_lateness_margin() -> None:
+    ch = channel()
+    ch.connection_up(at(0))
+    assert ch.close_until(at(10.9), timedelta(seconds=1)) == ([], [])
+    slots, _ = ch.close_until(at(11), timedelta(seconds=1))
+    assert len(slots) == 1
+
+
+def test_the_last_valid_book_of_each_minute_is_kept() -> None:
+    ch = channel(started=-0.001)
+    ch.connection_up(at(0))
+    ch.on_message(book(1, at(5)), at(5))
+    ch.on_message(book(2, at(45)), at(45))
+    ch.connection_down(at(55))
+    slots, minutes = ch.close_until(at(60), NO_LATENESS)
+    assert states(slots)[-1] == "desconectado"
+    (minute,) = minutes
+    assert minute.minute_start == T0 and minute.snapshot.sequence == 2
+
+
+def test_no_minute_snapshot_without_a_valid_slot() -> None:
+    ch = channel()
+    ch.connection_up(at(0))
+    _, minutes = ch.close_until(at(60), NO_LATENESS)
+    assert minutes == []
+
+
+def test_messages_before_the_subscription_do_not_count() -> None:
+    ch = channel()
+    ch.on_message(book(1, at(1)), at(1))
+    ch.connection_up(at(2))
+    slots, _ = ch.close_until(at(20), NO_LATENESS)
+    assert states(slots) == ["desconectado", "no_recibida"]
+
+
+def test_metrics_are_exact() -> None:
+    snapshot = parse_snapshot(
+        book(
+            1,
+            at(1),
+            bids=[["100.0", "2"], ["99.95", "1"], ["99.4", "5"]],
+            asks=[["100.2", "1.5"], ["100.25", "3"], ["101", "1"]],
+        ),
+        at(1),
+        None,
+    )
+    metrics = compute_metrics(snapshot, Decimal("0.001"))
+    assert metrics.mid == Decimal("100.1")
+    assert metrics.spread == Decimal("0.2")
+    assert (metrics.bid_levels, metrics.ask_levels) == (3, 3)
+    assert metrics.bid_quantity == Decimal(8) and metrics.ask_quantity == Decimal("5.5")
+    # Notional with the Futures multiplier: 100*2 + 99.95*1 + 99.4*5, times 0.001.
+    assert metrics.bid_notional == Decimal("0.79695")
+    # Band ±0.1 % of 100.1 is [99.9999, 100.2001]: bids 100.0 only, asks 100.2 only.
+    assert metrics.bid_notional_in_band[0] == Decimal("0.2")
+    assert metrics.ask_notional_in_band[0] == Decimal("0.1503")
+    # Band ±0.5 % is [99.5995, 100.6005]: bids 100.0 and 99.95; asks 100.2 and 100.25.
+    assert metrics.bid_notional_in_band[1] == Decimal("0.29995")
+    assert metrics.ask_notional_in_band[1] == Decimal("0.45105")
+    assert (metrics.bid_deepest_price, metrics.ask_deepest_price) == (Decimal("99.4"), Decimal(101))
+
+
+def test_metrics_of_a_real_recorded_book() -> None:
+    fixture = loads((FIXTURES / "ws_futures.json").read_bytes())
+    message = fixture["samples"]["obu_50"][0]["message"]
+    snapshot = parse_snapshot(message, at(0), None)
+    assert snapshot.consistent
+    metrics = compute_metrics(snapshot, Decimal("0.001"))
+    assert metrics.bid_levels == metrics.ask_levels == 50
+    assert metrics.best_bid < metrics.mid < metrics.best_ask
+    assert (
+        metrics.bid_notional_in_band[0] <= metrics.bid_notional_in_band[1] <= metrics.bid_notional
+    )
+
+
+def test_slot_start_is_exact() -> None:
+    assert slot_start(at(19.999999)) == at(10)
+    assert slot_start(at(20)) == at(20)
+    assert slot_start(datetime(2026, 11, 7, 23, 59, 59, 999999, tzinfo=UTC)).second == 50
+
+
+EVENTS = st.lists(
+    st.tuples(
+        st.sampled_from(["up", "down", "book", "bad", "dup", "back", "late"]),
+        st.integers(min_value=0, max_value=60_000),
+    ),
+    max_size=40,
+)
+
+
+@settings(max_examples=200, deadline=None)
+@given(EVENTS)
+def test_every_slot_gets_exactly_one_terminal_state(events: list[tuple[str, int]]) -> None:
+    """A8: whatever happens, slots are contiguous and each has exactly one state."""
+    ch = channel()
+    sequence = 0
+    results = []
+    for kind, ms in sorted(events, key=lambda e: e[1]):
+        moment = at(ms / 1000)
+        part, _ = ch.close_until(moment, NO_LATENESS)
+        results += part
+        if kind == "up":
+            ch.connection_up(moment)
+        elif kind == "down":
+            ch.connection_down(moment)
+        elif kind in {"book", "late"}:
+            sequence += 1
+            published = moment - timedelta(seconds=12) if kind == "late" else moment
+            ch.on_message(book(sequence, published), moment)
+        elif kind == "bad":
+            sequence += 1
+            ch.on_message(book(sequence, moment, bids=[["101", "1"]]), moment)
+        elif kind == "dup":
+            ch.on_message(book(sequence, moment), moment)
+        else:
+            ch.on_message(book(max(sequence - 3, 0), moment), moment)
+    part, _ = ch.close_until(at(70), NO_LATENESS)
+    results += part
+    starts = [r.slot_start for r in results]
+    assert starts == [at(10 * i) for i in range(7)]
+    for result in results:
+        assert isinstance(result.state, SlotState)
+        assert (result.metrics is not None) == (result.state is SlotState.VALIDA)

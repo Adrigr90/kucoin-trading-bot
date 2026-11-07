@@ -269,11 +269,41 @@ Este documento **sustituye, para leer y auditar**, al Informe V4 y a los anexos 
 |---|---|
 | Mensajes WebSocket pasados | **No** (no hay reenvío documentado) |
 | Velas de 1m de last | Sí, con los límites de 3.2 |
-| Velas de 1m de mark | El endpoint existe [H]; el histórico está sin confirmar [P] |
+| Velas de 1m de mark | **No:** la API UTA no da velas de mark [H, E1]. Se construyen con el canal `mark-price` (un valor por segundo); los minutos perdidos quedan como hueco y **nunca se inventan** [decisión del propietario, 7 nov 2026] |
+| Velas de 1m de index | **En parte:** se construyen con el mismo canal; los minutos perdidos se reconstruyen con el histórico del índice de Classic (`/api/v1/index/query`, un valor por segundo [H, E1]; profundidad del histórico sin medir [P: B3]) [decisión del propietario, 7 nov 2026] |
 | Operaciones recientes | Solo las 100 últimas |
 | Mark a resolución de segundos | **No** |
 | Funding histórico | Sí |
 | Libro de órdenes histórico | **No** [H] |
+
+### 3.8 Esquema `market` de la Fase 2 (etapa E2) [R, pendiente de revisión]
+
+**Reglas comunes:**
+- **Solo inserciones.** `kbot_ingest` tiene `SELECT` e `INSERT` en estas tablas y nada más (§8 y §9). Un estado que cambia se guarda como una fila nueva o se escribe una sola vez cuando ya es terminal; lo provisional (vela `abierta` o `pendiente_estabilizacion`, intervalo en curso) vive en memoria. Las reinserciones usan `ON CONFLICT DO NOTHING`, que solo necesita `INSERT`.
+- **Decimales exactos** (`numeric`) con el texto que envió KuCoin; las cantidades en su unidad original (contratos en Futures) y el multiplicador al lado (3.4).
+- **Tiempos en UTC** (`timestamptz`, µs). Cada fila guarda la hora del exchange cuando existe y la hora de recepción.
+- **Sin índices adicionales ni particionado** en E2: bastan las claves primarias. El particionado llega con E3, en una revisión explícita de la lista blanca de SQL.
+- **`funding_symbol_map` no se crea:** con D04 (V2) el funding usa el símbolo del contrato y la correspondencia de V1 (B6) ya no hace falta.
+
+| Tabla | Una fila por | Columnas principales (además de las horas) | Clave primaria |
+|---|---|---|---|
+| `instruments` | Instrumento y cambio observado (se inserta solo si cambia) | mercado, símbolo, base, cotización, liquidación, `tick_size`, paso de cantidad, multiplicador (1 en Spot), mínimos, estado de cotización y si cotiza, respuesta original | (mercado, símbolo, observado) |
+| `risk_tiers` | Tramo y observación con cambios | símbolo, nivel, límites mínimo y máximo, apalancamiento máximo, margen inicial y de mantenimiento | (símbolo, observado, nivel) |
+| `candles` | Serie, instrumento y minuto **terminal** | serie (`last`, `mark`, `index`), OHLC; volumen y turnover solo en `last`; estado (3.4, solo los terminales); evidencia; número de muestras (velas propias); revisión | (serie, mercado, símbolo, apertura, revisión) |
+| `depth_slot_status` | Canal (nivel 5 o 50), instrumento e intervalo de 10 s | estado de 3.5, secuencia `C` del snapshot vigente, antigüedad del snapshot al cierre del intervalo | (mercado, símbolo, nivel, inicio del intervalo): **exactamente un estado terminal** |
+| `depth_metrics` | Intervalo con estado `valida` | mejor compra y venta, medio, spread absoluto y relativo; por lado: cantidad y nocional visibles, nocional dentro de ±0,1 % y ±0,5 % del medio, distancia del nivel más profundo visto; desequilibrio del nocional visible; secuencia y antigüedad | (mercado, símbolo, nivel, inicio del intervalo) |
+| `depth_snapshots` | Canal, instrumento y minuto | último libro válido del minuto, como listas de [precio, cantidad] en texto; secuencia y horas | (mercado, símbolo, nivel, minuto) |
+| `funding_rates` | Símbolo, hora de liquidación, tipo y observación | tipo `liquidado` (histórico) o `previsto` (`nextFundingRate`); tasa; granularidad | (símbolo, tipo, hora de liquidación, observado) |
+| `data_quality_minute` | Canal, instrumento y minuto | estado del flujo S1, S2 o S3 (3.4); mensajes; saltos o retrocesos de secuencia; reconexiones | (mercado, símbolo, canal, minuto) |
+| `minute_status` | Instrumento y minuto, al cerrar el día | estado terminal de 3.5, estado de la vela y del flujo usados | (mercado, símbolo, minuto) |
+| `data_gaps` | Hueco cerrado | mercado, canal, símbolo, inicio y fin, causa (desconexión, rotación planificada, sin pong, suscripción rechazada, proceso detenido) | (mercado, canal, símbolo, inicio) |
+| `universe_snapshots` | Evaluación del universo e instrumento | posición, si entra en el universo, si es candidato de nivel 50, volumen de 24 h en la moneda de cotización, spread relativo, versión de los criterios | (evaluado, mercado, símbolo) |
+
+**Velas propias de mark e index** (3.7): un valor por segundo del canal `mark-price`. Una vela se guarda como `cerrada_flujo` solo si la conexión estuvo sana todo el minuto; si no, el minuto de mark es un hueco y el de index se reconstruye con los valores por segundo de Classic (`reconstruida_classic`). **Nunca se completa una vela con valores supuestos.**
+
+**Huecos:** una desconexión abre un hueco en memoria y se inserta en `data_gaps` al cerrarse. Si el proceso se detiene, al arrancar se inserta el hueco desde el último intervalo registrado (`proceso_detenido`). Todos los intervalos de profundidad afectados quedan `desconectado` (A5).
+
+**Universo provisional** (D12 sin aprobar): pares en USDT que cotizan, ordenados por volumen de 24 h en la moneda de cotización, los 20 primeros de Spot y de Futures; los 10 primeros de cada mercado son candidatos de nivel 50 (P3). Se reevalúa una vez al día y cada cambio queda en `universe_snapshots`.
 
 ## 4. Eventos y recuperación
 
@@ -842,7 +872,7 @@ Una ampliación es una **intención de entrada** sobre una posición existente. 
 
 ## 7. Simulador
 
-**Series:** last, mark (canal UTA `mark-price`, que trae mark e index cada segundo; la API UTA no da velas de mark con `klineType` [H, E1]) e index. La fuente de las velas históricas de mark e index se decide en la etapa E2 [P].
+**Series:** last, mark (canal UTA `mark-price`, que trae mark e index cada segundo; la API UTA no da velas de mark con `klineType` [H, E1]) e index. **Fuente de las velas de mark e index** [decisión del propietario, 7 nov 2026]: velas propias de 1 minuto construidas con el canal `mark-price`, solo desde que el grabador está en marcha. Los huecos del index se reconstruyen con el histórico de Classic; los del mark quedan como hueco (3.7).
 
 **Liquidación:** se comprueba con el mark **antes** que el stop, según el orden de los mensajes. Supone la pérdida de todo el margen.
 
@@ -1382,3 +1412,5 @@ $$\Delta Cap=\underbrace{8}_{\text{distancia mark-stop de lo cerrado}}+\underbra
 | 6 nov 2026 | **Alcance de la Fase 2 aprobado por el propietario**, con 10 + 10 candidatos de nivel 50 (en lugar de los 5 + 5 propuestos). Actualizados los candidatos y la estimación de almacenamiento de 3.1 | Propietario |
 | 7 nov 2026 | **Versión 1.3: hechos comprobados en la etapa E1** (cliente de KuCoin de solo lectura, rama `fase-2-e1`). (1) `orjson` se sustituye por el `json` de la biblioteca estándar con `Decimal`, porque `orjson` lee los decimales como `float` (2). (2) El límite REST usa una ventana deslizante en lugar de un token bucket, que permitiría el doble del 50 % dentro de una ventana; pesos de todas las rutas medidos (3.1). (3) Formato del ping comprobado a medias (B31) y reapertura de la conexión a las 23,5 h (3.1). (4) Resultados de la matriz V1/V2: columnas de las velas, `klineType` solo `TRADE`, `productType` sin efecto con símbolo y volumen de la vela igual al doble de las operaciones del WebSocket [I] (3.2). (5) La API UTA no da velas de mark ni de index; su fuente histórica se decide en E2 (7). Sin cambios de reglas de negocio. **Tras las dos revisiones de E1 (APROBABLE CON CORRECCIONES):** un solo presupuesto REST por máquina, con un bloqueo del sistema operativo entre procesos (A2-01 y R-E1-01, 3.1) | Claude (alcance aprobado de la F2); **aprobada por el revisor** el 7 nov 2026 con E1 (cuatro revisiones) |
 | 7 nov 2026 | **Decisión del propietario: D04 aprobada** (UTA V2 más Classic). Actualizado 3.2; las rutas V1 salen de la lista blanca | Propietario |
+| 7 nov 2026 | **Decisión del propietario: fuente de las velas de mark e index.** Velas propias de 1 minuto desde el canal `mark-price`; huecos del index reconstruidos con el histórico de Classic; huecos del mark registrados como hueco. Actualizados 3.7 y 7 | Propietario |
+| 7 nov 2026 | **Propuesta del esquema `market` de la etapa E2** (3.8): tablas solo de inserción, columnas y claves, métricas de profundidad, velas propias de mark e index, huecos y universo provisional. Sin `funding_symbol_map` (D04) | Claude (alcance aprobado de la F2); **pendiente de revisión** |

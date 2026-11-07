@@ -158,9 +158,8 @@ CREATE TABLE market.minute_status (
         OR (status = 'hueco' AND candle_series IS NULL AND gap_start IS NOT NULL
             AND candle_state = 'ausencia_no_verificable' AND flow_state IN ('S2', 'S3'))
         OR (status = 'sin_explicar' AND candle_series IS NULL AND gap_start IS NULL
-            AND candle_state IN (
-                'ausencia_no_verificable', 'abierta', 'pendiente_estabilizacion'
-            ))
+            AND ((candle_state = 'ausencia_no_verificable' AND flow_state IN ('S2', 'S3'))
+                OR candle_state IN ('abierta', 'pendiente_estabilizacion')))
     )
 );
 

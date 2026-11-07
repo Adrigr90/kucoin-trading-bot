@@ -452,3 +452,32 @@ def test_settled_funding_is_stored_once(ingest: psycopg.Connection, symbol: str)
     ingest.execute(insert, (symbol, "liquidado", settled, settled))
     ingest.execute(insert, (symbol, "previsto", settled, T0))
     ingest.execute(insert, (symbol, "previsto", settled, T0 + timedelta(minutes=1)))
+
+
+@pytest.mark.parametrize(
+    ("candle_state", "flow", "accepted"),
+    [
+        ("ausencia_no_verificable", "S1", False),  # S1 without trades is sin_operaciones_probable
+        ("ausencia_no_verificable", "S2", True),
+        ("ausencia_no_verificable", "S3", True),
+        ("abierta", "S1", True),
+        ("abierta", "S2", True),
+        ("pendiente_estabilizacion", "S1", True),
+        ("pendiente_estabilizacion", "S3", True),
+    ],
+)
+def test_an_unexplained_minute_matches_its_flow(
+    ingest: psycopg.Connection, symbol: str, candle_state: str, flow: str, accepted: bool
+) -> None:
+    """Confirmation review of E2: an unverifiable absence is only possible on S2 or S3."""
+    quality(ingest, symbol, "trade", T0, flow)
+    insert = (
+        "INSERT INTO market.minute_status (market, symbol, minute_start, status, candle_state,"
+        " flow_channel, flow_state, candle_series, gap_start)"
+        " VALUES ('FUTURES', %s, %s, 'sin_explicar', %s, 'trade', %s, NULL, NULL)"
+    )
+    if accepted:
+        ingest.execute(insert, (symbol, T0, candle_state, flow))
+    else:
+        with pytest.raises(errors.CheckViolation):
+            ingest.execute(insert, (symbol, T0, candle_state, flow))

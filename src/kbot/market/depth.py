@@ -21,17 +21,17 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from typing import Any
 
 from kbot.core.decimal import accounting
+from kbot.market.timeutil import as_utc, floor_to, from_nanoseconds, is_int
 
 SLOT_SECONDS = 10
 BANDS = (Decimal("0.001"), Decimal("0.005"))  # ±0.1 % and ±0.5 % of the mid price
 DEPTHS = frozenset({5, 50})
-EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 Level = tuple[Decimal, Decimal]
 
@@ -46,9 +46,9 @@ class SlotState(StrEnum):
 
 @dataclass(frozen=True)
 class Snapshot:
-    sequence: int
-    published_at: datetime  # P, KuCoin's push time
-    exchange_ns: int  # M, meaning not documented (B1); kept as received
+    sequence: int | None  # C; None only for a malformed message
+    published_at: datetime | None  # P, KuCoin's push time; None only for a malformed message
+    exchange_ns: int | None  # M, meaning not documented (B1); None when absent, never invented
     received_at: datetime
     bids: tuple[Level, ...]
     asks: tuple[Level, ...]
@@ -98,30 +98,26 @@ class MinuteSnapshot:
     symbol: str
     depth: int
     minute_start: datetime
+    slot_start: datetime  # the valid slot whose book this is
     snapshot: Snapshot
 
 
 def slot_start(moment: datetime) -> datetime:
     """Start of the 10-second slot that contains ``moment`` (UTC), computed exactly."""
-    step = timedelta(seconds=SLOT_SECONDS)
-    return EPOCH + ((moment - EPOCH) // step) * step
-
-
-def from_nanoseconds(value: int) -> datetime:
-    """UTC time of a KuCoin nanosecond timestamp, truncated to the microsecond that
-    datetime can hold (rule: floor; the original integer is kept where it matters)."""
-    return EPOCH + timedelta(microseconds=value // 1000)
+    return floor_to(moment, timedelta(seconds=SLOT_SECONDS))
 
 
 def parse_snapshot(
     message: dict[str, Any], received_at: datetime, previous_sequence: int | None
 ) -> Snapshot:
-    """Read an ``obu`` message. Structural or market problems make it inconsistent."""
+    """Read an ``obu`` message. Market problems make it inconsistent; a message without
+    integer ``C`` and ``P`` raises ValueError (DepthChannel records it as malformed)."""
+    received_at = as_utc(received_at, "received_at")
     data = message.get("d") or {}
     sequence = data.get("C")
     published = message.get("P")
     exchange = data.get("M")
-    if not all(isinstance(v, int) and not isinstance(v, bool) for v in (sequence, published)):
+    if not (is_int(sequence) and is_int(published)):
         raise ValueError("obu message without integer C and P")
     bids, bid_problem = _levels(data.get("b"))
     asks, ask_problem = _levels(data.get("a"))
@@ -131,7 +127,7 @@ def parse_snapshot(
     return Snapshot(
         sequence=sequence,
         published_at=from_nanoseconds(published),
-        exchange_ns=exchange if isinstance(exchange, int) else 0,
+        exchange_ns=exchange if is_int(exchange) else None,
         received_at=received_at,
         bids=bids,
         asks=asks,
@@ -195,6 +191,7 @@ class DepthChannel:
             raise ValueError(f"depth must be one of {sorted(DEPTHS)}")
         if multiplier <= 0:
             raise ValueError("multiplier must be positive")
+        started_at = as_utc(started_at, "started_at")
         self.market = market
         self.symbol = symbol
         self.depth = depth
@@ -209,6 +206,7 @@ class DepthChannel:
         self._subscribed_at: list[datetime] = []
         self._next_slot = slot_start(started_at)
         self._minute_best: Snapshot | None = None
+        self._minute_best_slot: datetime | None = None
         self._minute_had_valid = False
 
     @property
@@ -217,16 +215,19 @@ class DepthChannel:
 
     def connection_up(self, at: datetime) -> None:
         """The subscription is confirmed: from now on the connection counts as healthy."""
+        at = as_utc(at, "at")
         if self._down and self._down[-1][1] is None:
             self._down[-1] = (self._down[-1][0], at)
         self._subscribed_at.append(at)
         self._max_sequence = None
 
     def connection_down(self, at: datetime) -> None:
+        at = as_utc(at, "at")
         if not self._down or self._down[-1][1] is not None:
             self._down.append((at, None))
 
     def on_message(self, message: dict[str, Any], received_at: datetime) -> None:
+        received_at = as_utc(received_at, "received_at")
         if self._down and self._down[-1][1] is None:
             return  # not subscribed: a stray message cannot make the book valid
         sequence = (message.get("d") or {}).get("C")
@@ -237,9 +238,16 @@ class DepthChannel:
             and sequence == last.sequence
         ):
             return  # duplicate: ignored, creates nothing
-        snapshot = parse_snapshot(message, received_at, self._max_sequence)
-        if snapshot.consistent and (
-            self._max_sequence is None or snapshot.sequence > self._max_sequence
+        try:
+            snapshot = parse_snapshot(message, received_at, self._max_sequence)
+        except ValueError:
+            # Without C and P the book cannot be placed: it is recorded as an inconsistent
+            # book in force, with no invented sequence or time.
+            snapshot = Snapshot(None, None, None, received_at, (), (), "malformed message")
+        if (
+            snapshot.consistent
+            and snapshot.sequence is not None
+            and (self._max_sequence is None or snapshot.sequence > self._max_sequence)
         ):
             self._max_sequence = snapshot.sequence
         self._snapshots.append(snapshot)
@@ -248,6 +256,7 @@ class DepthChannel:
         self, now: datetime, lateness: timedelta
     ) -> tuple[list[SlotResult], list[MinuteSnapshot]]:
         """Close every slot whose end plus ``lateness`` is not after ``now``."""
+        now = as_utc(now, "now")
         slots: list[SlotResult] = []
         minutes: list[MinuteSnapshot] = []
         step = timedelta(seconds=SLOT_SECONDS)
@@ -258,19 +267,26 @@ class DepthChannel:
             if result.state is SlotState.VALIDA:
                 self._minute_had_valid = True
                 self._minute_best = result.snapshot
+                self._minute_best_slot = start
             end = start + step
             if end.second == 0:
-                if self._minute_had_valid and self._minute_best is not None:
+                if (
+                    self._minute_had_valid
+                    and self._minute_best is not None
+                    and self._minute_best_slot is not None
+                ):
                     minutes.append(
                         MinuteSnapshot(
                             self.market,
                             self.symbol,
                             self.depth,
                             end - timedelta(minutes=1),
+                            self._minute_best_slot,
                             self._minute_best,
                         )
                     )
                 self._minute_best = None
+                self._minute_best_slot = None
                 self._minute_had_valid = False
             self._next_slot = end
             self._forget_before(end)
@@ -288,7 +304,10 @@ class DepthChannel:
             return self._result(start, SlotState.NO_RECIBIDA, None, end)
         if not in_force.consistent:
             return self._result(start, SlotState.LIBRO_INCONSISTENTE, in_force, end)
-        late = any(start <= s.published_at < end and s.received_at >= end for s in self._snapshots)
+        late = any(
+            s.published_at is not None and start <= s.published_at < end and s.received_at >= end
+            for s in self._snapshots
+        )
         if late:
             return self._result(start, SlotState.FUERA_DE_PLAZO, in_force, end)
         return self._result(start, SlotState.VALIDA, in_force, end)

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -280,3 +280,49 @@ def test_every_slot_gets_exactly_one_terminal_state(events: list[tuple[str, int]
     for result in results:
         assert isinstance(result.state, SlotState)
         assert (result.metrics is not None) == (result.state is SlotState.VALIDA)
+
+
+def test_m_is_kept_exactly_and_never_invented() -> None:
+    """Review of E2, problem 4: a missing or malformed M is None, never 0 (1970)."""
+    message = book(1, at(1))
+    assert parse_snapshot(message, at(1), None).exchange_ns == message["d"]["M"]
+    for value in (None, "1794052801000000000", 1.7e18, True):
+        variant = {**message, "d": {**message["d"], "M": value}}
+        if value is None:
+            del variant["d"]["M"]
+        assert parse_snapshot(variant, at(1), None).exchange_ns is None
+
+
+def test_times_must_carry_a_zone_and_are_normalized_to_utc() -> None:
+    """Review of E2, problem 5."""
+    naive = datetime(2026, 11, 7, 12, 0, 1)
+    with pytest.raises(ValueError, match="time zone"):
+        DepthChannel("SPOT", "BTC-USDT", 5, multiplier=Decimal(1), started_at=naive)
+    ch = channel()
+    for call in (
+        lambda: ch.connection_up(naive),
+        lambda: ch.connection_down(naive),
+        lambda: ch.on_message(book(1, at(1)), naive),
+        lambda: ch.close_until(naive, NO_LATENESS),
+    ):
+        with pytest.raises(ValueError, match="time zone"):
+            call()
+    madrid = timezone(timedelta(hours=1))
+    ch.connection_up(datetime(2026, 11, 7, 13, 0, 0, tzinfo=madrid))
+    ch.on_message(book(1, at(1)), datetime(2026, 11, 7, 13, 0, 1, tzinfo=madrid))
+    slots, _ = ch.close_until(datetime(2026, 11, 7, 13, 0, 10, tzinfo=madrid), NO_LATENESS)
+    assert states(slots) == ["valida"] and slots[0].slot_start == T0
+    assert slots[0].slot_start.tzinfo is UTC
+
+
+def test_a_malformed_message_makes_the_book_inconsistent_without_inventing_data() -> None:
+    ch = channel()
+    ch.connection_up(at(0))
+    ch.on_message(book(1, at(1)), at(1))
+    ch.on_message({"T": "obu.SPOT", "d": {"b": [], "a": []}}, at(2))
+    slots, _ = ch.close_until(at(10), NO_LATENESS)
+    assert states(slots) == ["libro_inconsistente"]
+    assert slots[0].sequence is None and slots[0].metrics is None
+    ch.on_message(book(2, at(11)), at(11))
+    slots, _ = ch.close_until(at(20), NO_LATENESS)
+    assert states(slots) == ["valida"]

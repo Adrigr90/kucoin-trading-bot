@@ -108,7 +108,9 @@ def test_migration_sql_rejects(sql: str) -> None:
         "GRANT SELECT ON TABLE config.risk_limits TO kbot_backup;",
         # Compatible with §9 but not in the exact matrix yet: also rejected.
         "GRANT SELECT ON TABLE config.risk_limits TO kbot_web;",
-        "GRANT USAGE ON SCHEMA market TO kbot_ingest;",
+        "GRANT USAGE ON SCHEMA market TO kbot_web;",
+        "GRANT SELECT ON TABLE market.candles TO kbot_strategy;",
+        "GRANT INSERT ON TABLE market.candles TO kbot_strategy;",
         # One allowed grant does not cover another in the same statement.
         "GRANT USAGE ON SCHEMA config TO kbot_risk, kbot_ingest;",
     ],

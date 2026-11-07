@@ -1,0 +1,61 @@
+{
+  "recorded_at": "2026-11-06T23:30:43.659942Z",
+  "route": "uta.v2.instrument",
+  "request": "https://api.kucoin.com/api/ua/v2/market/instrument?tradeType=FUTURES&symbol=XBTUSDTM",
+  "status": 200,
+  "weight": 4,
+  "ratelimit": {
+    "limit": 2000,
+    "remaining": 1860,
+    "reset_ms": 23050
+  },
+  "truncated": null,
+  "body": {
+    "code": "200000",
+    "data": {
+      "tradeType": "FUTURES",
+      "list": [
+        {
+          "baseCurrency": "XBT",
+          "buyLimit": "79697.2",
+          "displayBaseCurrency": "XBT",
+          "name": "XBTUSDTM",
+          "expiryTime": null,
+          "f": "1.3",
+          "tradingStartTime": "1585555200000",
+          "isInverse": false,
+          "quoteCurrency": "USDT",
+          "k": "490.0000000000",
+          "lotSize": "1",
+          "maxMarketOrderSize": "1000000",
+          "m": "300.0000000000",
+          "makerFeeRate": "0.00020",
+          "marketStage": "NORMAL",
+          "marketType": "CRYPTO",
+          "maxLeverage": "125",
+          "maxBaseOrderSize": "1000000",
+          "maxPrice": "1000000.0000000000",
+          "priceLimitRatio": "0.0500000000",
+          "preMarketToPerpDate": null,
+          "mmrLevConstant": "125.00",
+          "mmrLimit": "0.3",
+          "unitSize": "0.001",
+          "indexSourceExchanges": ["okex", "binance", "kucoin", "bybit", "gateio"],
+          "tradingStatus": "Open",
+          "symbol": "XBTUSDTM",
+          "takerFeeRate": "0.00060",
+          "tickSize": "0.1",
+          "settlementFeeRate": null,
+          "settlementTime": null,
+          "settlementCurrency": "USDT",
+          "sellLimit": "72107",
+          "indexPriceTickSize": "0.01",
+          "contractType": "0",
+          "assetClass": "CRYPTO",
+          "subMarketType": null,
+          "st": null
+        }
+      ]
+    }
+  }
+}

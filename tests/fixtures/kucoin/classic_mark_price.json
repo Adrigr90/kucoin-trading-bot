@@ -1,0 +1,23 @@
+{
+  "recorded_at": "2026-11-06T23:30:54.609926Z",
+  "route": "futures.mark_price",
+  "request": "https://api-futures.kucoin.com/api/v1/mark-price/XBTUSDTM/current",
+  "status": 200,
+  "weight": 3,
+  "ratelimit": {
+    "limit": 2000,
+    "remaining": 1753,
+    "reset_ms": 11643
+  },
+  "truncated": null,
+  "body": {
+    "code": "200000",
+    "data": {
+      "symbol": "XBTUSDTM",
+      "granularity": 1000,
+      "timePoint": 1794007854000,
+      "value": 75901.95,
+      "indexPrice": 75933.59
+    }
+  }
+}

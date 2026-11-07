@@ -1,0 +1,50 @@
+{
+  "recorded_at": "2026-11-06T23:30:41.468207Z",
+  "route": "uta.v2.instrument",
+  "request": "https://api.kucoin.com/api/ua/v2/market/instrument?tradeType=SPOT&symbol=BTC-USDT",
+  "status": 200,
+  "weight": 4,
+  "ratelimit": {
+    "limit": 2000,
+    "remaining": 1904,
+    "reset_ms": 24778
+  },
+  "truncated": null,
+  "body": {
+    "code": "200000",
+    "data": {
+      "tradeType": "SPOT",
+      "list": [
+        {
+          "symbol": "BTC-USDT",
+          "name": "BTC-USDT",
+          "baseCurrency": "BTC",
+          "quoteCurrency": "USDT",
+          "market": "USDS",
+          "minBaseOrderSize": "0.00001",
+          "minQuoteOrderSize": "0.1",
+          "maxBaseOrderSize": "10000000000",
+          "maxQuoteOrderSize": "99999999",
+          "baseOrderStep": "0.00000001",
+          "quoteOrderStep": "0.000001",
+          "tickSize": "0.1",
+          "feeCurrency": "USDT",
+          "tradingStatus": "TradingEnabled",
+          "priceLimitRatio": "0.01",
+          "feeCategory": "classA",
+          "makerFeeCoefficient": "1.00",
+          "takerFeeCoefficient": "1.00",
+          "st": false,
+          "minFunds": "0.1",
+          "callauctionIsEnabled": false,
+          "callauctionPriceFloor": null,
+          "callauctionPriceCeiling": null,
+          "callauctionFirstStageStartTime": null,
+          "callauctionSecondStageStartTime": null,
+          "callauctionThirdStageStartTime": null,
+          "tradingStartTime": null
+        }
+      ]
+    }
+  }
+}

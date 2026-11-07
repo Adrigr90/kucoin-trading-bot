@@ -1,0 +1,380 @@
+{
+  "recorded_from": "owner's PC (B14 a)",
+  "started_at": "2026-11-06T23:30:35.317343Z",
+  "spot_symbol": "BTC-USDT",
+  "futures_symbol": "XBTUSDTM",
+  "rest": [
+    {
+      "case": "v1_instrument_spot",
+      "route": "uta.v1.instrument",
+      "params": {
+        "tradeType": "SPOT",
+        "symbol": "BTC-USDT"
+      },
+      "probe": false,
+      "status": 200,
+      "code": "200000",
+      "weight": 4
+    },
+    {
+      "case": "v1_ticker_spot",
+      "route": "uta.v1.ticker",
+      "params": {
+        "tradeType": "SPOT",
+        "symbol": "BTC-USDT"
+      },
+      "probe": false,
+      "status": 200,
+      "code": "200000",
+      "weight": 15
+    },
+    {
+      "case": "v1_trades_spot",
+      "route": "uta.v1.trades",
+      "params": {
+        "tradeType": "SPOT",
+        "symbol": "BTC-USDT"
+      },
+      "probe": false,
+      "status": 200,
+      "code": "200000",
+      "weight": 3
+    },
+    {
+      "case": "v1_instrument_futures",
+      "route": "uta.v1.instrument",
+      "params": {
+        "tradeType": "FUTURES",
+        "symbol": "XBTUSDTM"
+      },
+      "probe": false,
+      "status": 200,
+      "code": "200000",
+      "weight": 4
+    },
+    {
+      "case": "v1_ticker_futures",
+      "route": "uta.v1.ticker",
+      "params": {
+        "tradeType": "FUTURES",
+        "symbol": "XBTUSDTM"
+      },
+      "probe": false,
+      "status": 200,
+      "code": "200000",
+      "weight": 15
+    },
+    {
+      "case": "v1_trades_futures",
+      "route": "uta.v1.trades",
+      "params": {
+        "tradeType": "FUTURES",
+        "symbol": "XBTUSDTM"
+      },
+      "probe": false,
+      "status": 200,
+      "code": "200000",
+      "weight": 3
+    },
+    {
+      "case": "v1_funding",
+      "route": "uta.v1.funding",
+      "params": {
+        "symbol": "XBTUSDTM"
+      },
+      "probe": false,
+      "status": 200,
+      "code": "200000",
+      "weight": 2
+    },
+    {
+      "case": "v2_instrument_spot",
+      "route": "uta.v2.instrument",
+      "params": {
+        "tradeType": "SPOT",
+        "symbol": "BTC-USDT"
+      },
+      "probe": false,
+      "status": 200,
+      "code": "200000",
+      "weight": 4
+    },
+    {
+      "case": "v2_ticker_spot",
+      "route": "uta.v2.ticker",
+      "params": {
+        "tradeType": "SPOT",
+        "symbol": "BTC-USDT"
+      },
+      "probe": false,
+      "status": 200,
+      "code": "200000",
+      "weight": 15
+    },
+    {
+      "case": "v2_trades_spot",
+      "route": "uta.v2.trades",
+      "params": {
+        "tradeType": "SPOT",
+        "symbol": "BTC-USDT"
+      },
+      "probe": false,
+      "status": 200,
+      "code": "200000",
+      "weight": 3
+    },
+    {
+      "case": "v2_instrument_futures",
+      "route": "uta.v2.instrument",
+      "params": {
+        "tradeType": "FUTURES",
+        "symbol": "XBTUSDTM"
+      },
+      "probe": false,
+      "status": 200,
+      "code": "200000",
+      "weight": 4
+    },
+    {
+      "case": "v2_ticker_futures",
+      "route": "uta.v2.ticker",
+      "params": {
+        "tradeType": "FUTURES",
+        "symbol": "XBTUSDTM"
+      },
+      "probe": false,
+      "status": 200,
+      "code": "200000",
+      "weight": 15
+    },
+    {
+      "case": "v2_trades_futures",
+      "route": "uta.v2.trades",
+      "params": {
+        "tradeType": "FUTURES",
+        "symbol": "XBTUSDTM"
+      },
+      "probe": false,
+      "status": 200,
+      "code": "200000",
+      "weight": 3
+    },
+    {
+      "case": "v2_funding",
+      "route": "uta.v2.funding",
+      "params": {
+        "symbol": "XBTUSDTM"
+      },
+      "probe": false,
+      "status": 200,
+      "code": "200000",
+      "weight": 2
+    },
+    {
+      "case": "v1_kline_spot",
+      "route": "uta.v1.kline",
+      "params": {
+        "tradeType": "SPOT",
+        "symbol": "BTC-USDT",
+        "interval": "1min"
+      },
+      "probe": false,
+      "status": 200,
+      "code": "200000",
+      "weight": 3
+    },
+    {
+      "case": "v1_kline_futures",
+      "route": "uta.v1.kline",
+      "params": {
+        "tradeType": "FUTURES",
+        "symbol": "XBTUSDTM",
+        "interval": "1min"
+      },
+      "probe": false,
+      "status": 200,
+      "code": "200000",
+      "weight": 3
+    },
+    {
+      "case": "v2_kline_spot",
+      "route": "uta.v2.kline",
+      "params": {
+        "tradeType": "SPOT",
+        "symbol": "BTC-USDT",
+        "interval": "1min"
+      },
+      "probe": false,
+      "status": 200,
+      "code": "200000",
+      "weight": 3
+    },
+    {
+      "case": "v2_kline_futures",
+      "route": "uta.v2.kline",
+      "params": {
+        "tradeType": "FUTURES",
+        "symbol": "XBTUSDTM",
+        "interval": "1min"
+      },
+      "probe": false,
+      "status": 200,
+      "code": "200000",
+      "weight": 3
+    },
+    {
+      "case": "v2_kline_futures_trade",
+      "route": "uta.v2.kline",
+      "params": {
+        "tradeType": "FUTURES",
+        "symbol": "XBTUSDTM",
+        "interval": "1min",
+        "klineType": "TRADE"
+      },
+      "probe": true,
+      "status": 200,
+      "code": "200000",
+      "weight": 3
+    },
+    {
+      "case": "v2_kline_futures_mark",
+      "route": "uta.v2.kline",
+      "params": {
+        "tradeType": "FUTURES",
+        "symbol": "XBTUSDTM",
+        "interval": "1min",
+        "klineType": "MARK"
+      },
+      "probe": true,
+      "status": 400,
+      "code": "148035",
+      "error": "uta.v2.kline: HTTP 400, code 148035: Parameter 'klineType' is invalid."
+    },
+    {
+      "case": "v2_kline_futures_index",
+      "route": "uta.v2.kline",
+      "params": {
+        "tradeType": "FUTURES",
+        "symbol": "XBTUSDTM",
+        "interval": "1min",
+        "klineType": "INDEX"
+      },
+      "probe": true,
+      "status": 400,
+      "code": "148035",
+      "error": "uta.v2.kline: HTTP 400, code 148035: Parameter 'klineType' is invalid."
+    },
+    {
+      "case": "v2_funding_usdt-futures",
+      "route": "uta.v2.funding",
+      "params": {
+        "symbol": "XBTUSDTM",
+        "productType": "USDT-FUTURES"
+      },
+      "probe": true,
+      "status": 200,
+      "code": "200000",
+      "weight": 2
+    },
+    {
+      "case": "v2_funding_coin-futures",
+      "route": "uta.v2.funding",
+      "params": {
+        "symbol": "XBTUSDTM",
+        "productType": "COIN-FUTURES"
+      },
+      "probe": true,
+      "status": 200,
+      "code": "200000",
+      "weight": 2
+    },
+    {
+      "case": "classic_contracts_active",
+      "route": "futures.contracts",
+      "params": {},
+      "probe": false,
+      "status": 200,
+      "code": "200000",
+      "weight": 3
+    },
+    {
+      "case": "classic_risk_limit",
+      "route": "futures.risk_limit",
+      "params": {},
+      "probe": false,
+      "status": 200,
+      "code": "200000",
+      "weight": 5
+    },
+    {
+      "case": "classic_mark_price",
+      "route": "futures.mark_price",
+      "params": {},
+      "probe": false,
+      "status": 200,
+      "code": "200000",
+      "weight": 3
+    },
+    {
+      "case": "classic_index",
+      "route": "futures.index",
+      "params": {
+        "symbol": ".KXBTUSDT",
+        "maxCount": "3"
+      },
+      "probe": false,
+      "status": 200,
+      "code": "200000",
+      "weight": 2
+    },
+    {
+      "case": "v1_funding_history",
+      "route": "uta.v1.funding_history",
+      "params": {
+        "symbol": "XBTUSDTM",
+        "startAt": "1793835035475",
+        "endAt": "1794007835475"
+      },
+      "probe": false,
+      "status": 200,
+      "code": "200000",
+      "weight": 5
+    },
+    {
+      "case": "v2_funding_history",
+      "route": "uta.v2.funding_history",
+      "params": {
+        "symbol": "XBTUSDTM",
+        "startAt": "1793835035475",
+        "endAt": "1794007835475"
+      },
+      "probe": false,
+      "status": 200,
+      "code": "200000",
+      "weight": 5
+    }
+  ],
+  "ws": {
+    "SPOT": {
+      "messages": {
+        "obu.SPOT/5": 1262,
+        "obu.SPOT/50": 1261,
+        "ticker.SPOT": 374,
+        "trade.SPOT": 143,
+        "kline.SPOT": 37
+      },
+      "pongs": 7
+    },
+    "FUTURES": {
+      "messages": {
+        "mark-price": 126,
+        "obu.FUTURES/50": 1254,
+        "obu.FUTURES/5": 1253,
+        "ticker.FUTURES": 4,
+        "trade.FUTURES": 4,
+        "kline.FUTURES": 6
+      },
+      "pongs": 6
+    }
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "recorded_at": "2026-11-06T23:30:46.435291Z",
+  "route": "uta.v1.kline",
+  "request": "https://api.kucoin.com/api/ua/v1/market/kline?tradeType=SPOT&symbol=BTC-USDT&interval=1min",
+  "status": 200,
+  "weight": 3,
+  "ratelimit": {
+    "limit": 2000,
+    "remaining": 1813,
+    "reset_ms": 19820
+  },
+  "truncated": {
+    "path": "data.list",
+    "kept": 3,
+    "total": 100
+  },
+  "body": {
+    "code": "200000",
+    "data": {
+      "tradeType": "SPOT",
+      "symbol": "BTC-USDT",
+      "list": [
+        [1794007800, "75935.8", "75935.8", "75935.7", "75935.7", "0.01102736", "837.37103266"],
+        [1794007740, "75938.7", "75938.7", "75932.8", "75934.8", "0.0417065", "3166.952021186"],
+        [1794007680, "75932.8", "75938.7", "75932.8", "75938.7", "0.02362586", "1793.99884789"]
+      ]
+    }
+  }
+}

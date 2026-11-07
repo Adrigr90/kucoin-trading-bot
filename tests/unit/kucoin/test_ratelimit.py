@@ -9,6 +9,7 @@ import os
 import random
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import httpx
@@ -27,6 +28,8 @@ from kbot.kucoin.ratelimit import (
     shared_limiter,
 )
 from kbot.kucoin.rest import KucoinApiError, KucoinRestClient
+
+ClientFactory = Callable[..., KucoinRestClient]
 
 KLINE = {"tradeType": "SPOT", "symbol": "BTC-USDT", "interval": "1min"}
 
@@ -153,62 +156,64 @@ def limited(code: str, *, status: int = 429, reset_ms: int | None = None) -> htt
     return httpx.Response(status, json={"code": code, "msg": "Too Many Requests"}, headers=headers)
 
 
-def run_client(fake: FakeTime, transport: Scripted, max_attempts: int = 4) -> object:
+def run_client(
+    build: ClientFactory, fake: FakeTime, transport: Scripted, max_attempts: int = 4
+) -> object:
     async def go() -> object:
-        async with KucoinRestClient(
-            limiter=limiter(fake), transport=transport, max_attempts=max_attempts
-        ) as client:
+        async with build(transport, limiter(fake), max_attempts=max_attempts) as client:
             return await client.get("uta.v2.kline", params=KLINE)
 
     return asyncio.run(go())
 
 
-def test_quota_exhausted_waits_until_the_reset() -> None:
+def test_quota_exhausted_waits_until_the_reset(test_client: ClientFactory) -> None:
     fake = FakeTime()
     transport = Scripted(fake, [limited("429000", reset_ms=12000), ok()])
-    run_client(fake, transport)
+    run_client(test_client, fake, transport)
     assert transport.sent_at[1] - transport.sent_at[0] == pytest.approx(12.5)
 
 
-def test_overload_without_headers_backs_off_at_least_five_seconds() -> None:
+def test_overload_without_headers_backs_off_at_least_five_seconds(
+    test_client: ClientFactory,
+) -> None:
     fake = FakeTime()
     responses = [limited("429000"), limited("429001", status=200), limited("429000"), ok()]
     transport = Scripted(fake, responses)
-    run_client(fake, transport)
+    run_client(test_client, fake, transport)
     gaps = [b - a for a, b in zip(transport.sent_at, transport.sent_at[1:], strict=False)]
     assert len(gaps) == 3
     assert all(gap >= MIN_BACKOFF_SECONDS for gap in gaps)
     assert gaps[2] >= 10.0  # third consecutive overload: cap 20 s, at least half
 
 
-def test_http_429_without_a_kucoin_code_is_an_overload() -> None:
+def test_http_429_without_a_kucoin_code_is_an_overload(test_client: ClientFactory) -> None:
     fake = FakeTime()
     transport = Scripted(fake, [httpx.Response(429, text="<html>busy</html>"), ok()])
-    run_client(fake, transport)
+    run_client(test_client, fake, transport)
     assert transport.sent_at[1] - transport.sent_at[0] >= MIN_BACKOFF_SECONDS
 
 
-def test_the_client_gives_up_after_max_attempts() -> None:
+def test_the_client_gives_up_after_max_attempts(test_client: ClientFactory) -> None:
     fake = FakeTime()
     transport = Scripted(fake, [limited("429001") for _ in range(3)])
     with pytest.raises(KucoinApiError, match="limited 3 times"):
-        run_client(fake, transport, max_attempts=3)
+        run_client(test_client, fake, transport, max_attempts=3)
     assert len(transport.sent_at) == 3
 
 
-def test_other_errors_are_raised_without_retry() -> None:
+def test_other_errors_are_raised_without_retry(test_client: ClientFactory) -> None:
     fake = FakeTime()
     body = {"code": "400100", "msg": "Parameter error"}
     transport = Scripted(fake, [httpx.Response(400, json=body), ok()])
     with pytest.raises(KucoinApiError, match="400100"):
-        run_client(fake, transport)
+        run_client(test_client, fake, transport)
     assert len(transport.sent_at) == 1
 
 
-def test_success_returns_data_and_headers() -> None:
+def test_success_returns_data_and_headers(test_client: ClientFactory) -> None:
     fake = FakeTime()
     transport = Scripted(fake, [ok()])
-    response = run_client(fake, transport)
+    response = run_client(test_client, fake, transport)
     assert response.data == []  # type: ignore[attr-defined]
     assert response.ratelimit == RateLimitHeaders(2000, 1997, 29000)  # type: ignore[attr-defined]
 
@@ -248,7 +253,7 @@ def worst_window(log: list[tuple[float, int]]) -> int:
     return max(prefix[bisect.bisect_left(times, t + 30.0)] - prefix[i] for i, t in enumerate(times))
 
 
-def two_clients(shared: bool) -> int:
+def two_clients(build: ClientFactory, shared: bool) -> int:
     """Two clients sending ticker requests (weight 15) concurrently; worst 30 s window."""
     fake = SharedTime()
     log: list[tuple[float, int]] = []
@@ -263,8 +268,8 @@ def two_clients(shared: bool) -> int:
 
     async def go() -> None:
         async with (
-            KucoinRestClient(limiter=budget(), transport=Stamped(fake, log)) as first,
-            KucoinRestClient(limiter=budget(), transport=Stamped(fake, log)) as second,
+            build(Stamped(fake, log), budget()) as first,
+            build(Stamped(fake, log), budget()) as second,
         ):
             await asyncio.gather(client_load(first), client_load(second))
 
@@ -273,12 +278,12 @@ def two_clients(shared: bool) -> int:
     return worst_window(log)
 
 
-def test_a2_01_clients_of_one_process_share_one_budget() -> None:
+def test_a2_01_clients_of_one_process_share_one_budget(test_client: ClientFactory) -> None:
     """A2-01: two clients together never exceed 1,000 weight in any 30 s window."""
-    assert two_clients(shared=True) <= POOL_WEIGHT / 2
+    assert two_clients(test_client, shared=True) <= POOL_WEIGHT / 2
     # The same load with a budget per client would reach the whole pool: the test above
     # would catch it.
-    assert two_clients(shared=False) > POOL_WEIGHT / 2
+    assert two_clients(test_client, shared=False) > POOL_WEIGHT / 2
 
 
 def test_a2_01_clients_use_the_shared_budget_by_default() -> None:
@@ -325,3 +330,30 @@ def test_r_e1_01_only_one_process_per_machine_gets_the_budget(tmp_path: Path) ->
         release_machine_lock(held)
     accepted = run_second_process(lock)
     assert accepted.returncode == 0, accepted.stderr
+
+
+@pytest.mark.parametrize(
+    ("option", "value"),
+    [
+        ("limiter", RestRateLimiter()),
+        ("transport", "any transport"),
+    ],
+)
+def test_r_e1_03_a_client_cannot_bring_its_own_budget_or_transport(
+    option: str, value: object
+) -> None:
+    """R-E1-03: the budget and the transport are not parameters, so no client can skip
+    the machine-wide lock of shared_limiter() or send its requests elsewhere."""
+    with pytest.raises(TypeError, match=option):
+        KucoinRestClient(**{option: value})  # type: ignore[arg-type]
+
+
+def test_r_e1_03_production_clients_use_the_real_network_and_the_machine_budget() -> None:
+    async def go() -> None:
+        async with KucoinRestClient() as client:
+            assert client.limiter is shared_limiter()
+            transport = client._http._transport
+            assert type(transport).__name__ == "GuardTransport"
+            assert type(transport._inner) is httpx.AsyncHTTPTransport  # type: ignore[attr-defined]
+
+    asyncio.run(go())

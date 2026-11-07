@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Callable
 
 import httpx
 import pytest
@@ -16,6 +17,8 @@ from kbot.kucoin.rest import (
     check_request,
 )
 from kbot.kucoin.routes import FUTURES_HOST, ROUTES, UTA_HOST, Route, find_route
+
+Factory = Callable[..., KucoinRestClient]
 
 OK_BODY = {"code": "200000", "data": {"ok": True}}
 
@@ -165,11 +168,11 @@ def test_check_request_returns_the_route() -> None:
     assert route is ROUTES["uta.v2.kline"]
 
 
-def test_client_blocks_before_the_network_and_keeps_no_cookies() -> None:
+def test_client_blocks_before_the_network_and_keeps_no_cookies(test_client: Factory) -> None:
     inner = Recorder()
 
     async def go() -> None:
-        async with KucoinRestClient(transport=inner) as client:
+        async with test_client(inner) as client:
             await client.get("uta.v2.kline", params=KLINE_QUERY)
             await client.get("uta.v2.kline", params=KLINE_QUERY)
             with pytest.raises(ForbiddenRequest, match="unknown route"):
@@ -185,7 +188,7 @@ def test_client_blocks_before_the_network_and_keeps_no_cookies() -> None:
         assert request.method == "GET"
 
 
-def test_redirects_are_not_followed() -> None:
+def test_redirects_are_not_followed(test_client: Factory) -> None:
     class Redirect(Recorder):
         async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
             self.requests.append(request)
@@ -194,7 +197,7 @@ def test_redirects_are_not_followed() -> None:
     inner = Redirect()
 
     async def go() -> None:
-        async with KucoinRestClient(transport=inner) as client:
+        async with test_client(inner) as client:
             await client.get("uta.v2.kline", params=KLINE_QUERY)
 
     with pytest.raises(KucoinApiError, match="HTTP 302"):
@@ -202,14 +205,14 @@ def test_redirects_are_not_followed() -> None:
     assert len(inner.requests) == 1
 
 
-def test_numbers_are_parsed_exactly() -> None:
+def test_numbers_are_parsed_exactly(test_client: Factory) -> None:
     class Funding(Recorder):
         async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
             body = '{"code":"200000","data":{"value":1.0E-4,"granularity":28800000}}'
             return httpx.Response(200, content=body.encode())
 
     async def go() -> object:
-        async with KucoinRestClient(transport=Funding()) as client:
+        async with test_client(Funding()) as client:
             response = await client.get("uta.v1.funding", params={"symbol": "XBTUSDTM"})
             return response.data
 

@@ -91,22 +91,30 @@ class GuardTransport(httpx.AsyncBaseTransport):
         await self._inner.aclose()
 
 
+def _network_transport() -> httpx.AsyncBaseTransport:
+    """The only way out to the network. Like ``shared_limiter``, it is not a parameter of
+    KucoinRestClient; the tests replace both with unittest.mock.patch."""
+    return httpx.AsyncHTTPTransport(retries=0)
+
+
 class KucoinRestClient:
+    """Every client uses the machine-wide budget (``shared_limiter``) and the real network
+    transport under ``GuardTransport``. Neither can be chosen by the caller, so no client
+    can get a budget of its own or send requests elsewhere."""
+
     def __init__(
         self,
         *,
-        limiter: RestRateLimiter | None = None,
-        transport: httpx.AsyncBaseTransport | None = None,
         clock: Clock | None = None,
         timeout_seconds: float = 10.0,
         max_attempts: int = 4,
     ) -> None:
         if max_attempts < 1:
             raise ValueError("max_attempts must be at least 1")
-        self.limiter = limiter or shared_limiter()
+        self.limiter: RestRateLimiter = shared_limiter()
         self._clock = clock or SystemClock()
         self._max_attempts = max_attempts
-        inner = transport or httpx.AsyncHTTPTransport(retries=0)
+        inner = _network_transport()
         self._http = httpx.AsyncClient(
             transport=GuardTransport(inner),
             timeout=timeout_seconds,

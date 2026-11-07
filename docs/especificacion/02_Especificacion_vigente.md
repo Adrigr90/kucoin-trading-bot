@@ -276,7 +276,7 @@ Este documento **sustituye, para leer y auditar**, al Informe V4 y a los anexos 
 | Funding histórico | Sí |
 | Libro de órdenes histórico | **No** [H] |
 
-### 3.8 Esquema `market` de la Fase 2 (etapa E2) [R, revisado con correcciones; migración `0002`]
+### 3.8 Esquema `market` de la Fase 2 (etapa E2) [revisado y confirmado; migración `0002`]
 
 **Reglas comunes:**
 - **Solo inserciones.** `kbot_ingest` tiene `SELECT` e `INSERT` en estas tablas y nada más (§8 y §9). Un estado que cambia se guarda como una fila nueva o se escribe una sola vez cuando ya es terminal; lo provisional (vela `abierta` o `pendiente_estabilizacion`, intervalo en curso) vive en memoria. Las reinserciones usan `ON CONFLICT DO NOTHING`, que solo necesita `INSERT`.
@@ -284,7 +284,8 @@ Este documento **sustituye, para leer y auditar**, al Informe V4 y a los anexos 
 - **Tiempos en UTC** (`timestamptz`, µs). Cada fila guarda la hora del exchange cuando existe y la hora de recepción.
 - **La coherencia entre filas la impone PostgreSQL, no solo Python** (§0, regla 6): claves foráneas compuestas que incluyen el estado y restricciones `CHECK` con la tabla de 3.5. Así es imposible guardar métricas de un intervalo que no es `valida`, una vela cuya evidencia contradice el flujo de su minuto o un estado de minuto que contradice su vela.
 - **Orden de cierre de un minuto:** primero `data_quality_minute` (estado terminal del flujo de cada canal), después `candles` (que la referencia) y por último `minute_status` (que referencia las dos y, si es `hueco`, su fila de `data_gaps`). Repetir el cierre, por ejemplo tras un reinicio, no cambia el primer resultado.
-- **Sin índices adicionales ni particionado** en E2: bastan las claves primarias y únicas. El particionado llega con E3, en una revisión explícita de la lista blanca de SQL.
+- **Sin índices adicionales ni particionado** en E2: bastan las claves primarias y únicas.
+- **Las migraciones son inmutables desde que entran en `main`:** antes se pueden corregir en su rama; después, cualquier cambio va en una migración nueva. La `0002` se corrigió en la rama `fase-2-e2` antes de integrarse; no existe ninguna base persistente con una versión anterior (la CI crea una base nueva en cada ejecución y el servidor de Oracle aún no existe). El particionado llega con E3, en una revisión explícita de la lista blanca de SQL.
 - **`funding_symbol_map` no se crea:** con D04 (V2) el funding usa el símbolo del contrato y la correspondencia de V1 (B6) ya no hace falta.
 
 | Tabla | Una fila por | Columnas principales (además de las horas) | Clave primaria |
@@ -1416,4 +1417,4 @@ $$\Delta Cap=\underbrace{8}_{\text{distancia mark-stop de lo cerrado}}+\underbra
 | 7 nov 2026 | **Decisión del propietario: D04 aprobada** (UTA V2 más Classic). Actualizado 3.2; las rutas V1 salen de la lista blanca | Propietario |
 | 7 nov 2026 | **Decisión del propietario: fuente de las velas de mark e index.** Velas propias de 1 minuto desde el canal `mark-price`; huecos del index reconstruidos con el histórico de Classic; huecos del mark registrados como hueco. Actualizados 3.7 y 7 | Propietario |
 | 7 nov 2026 | **Propuesta del esquema `market` de la etapa E2** (3.8): tablas solo de inserción, columnas y claves, métricas de profundidad, velas propias de mark e index, huecos y universo provisional. Sin `funding_symbol_map` (D04) | Claude (alcance aprobado de la F2); **pendiente de revisión** |
-| 7 nov 2026 | **Revisión del esquema y de los módulos de E2: APROBABLE CON CORRECCIONES** (7 hallazgos, ninguno crítico). Aplicadas en 3.8 y en el código: velas propias solo con los 60 segundos y precios válidos (ALTO); `risk_tiers` con mercado en la clave; coherencia entre intervalos, métricas, velas, flujo y minutos impuesta por PostgreSQL; orden de cierre idempotente; `M` ausente como nulo; horas con zona obligatoria | Revisor; aplicada, pendiente de confirmación |
+| 7 nov 2026 | **Revisión del esquema y de los módulos de E2: APROBABLE CON CORRECCIONES** (7 hallazgos, ninguno crítico). Aplicadas en 3.8 y en el código: velas propias solo con los 60 segundos y precios válidos (ALTO); `risk_tiers` con mercado en la clave; coherencia entre intervalos, métricas, velas, flujo y minutos impuesta por PostgreSQL; orden de cierre idempotente; `M` ausente como nulo; horas con zona obligatoria | Revisor; **confirmada el 7 nov 2026: los siete hallazgos cerrados** (el 3 tras restringir `ausencia_no_verificable` a S2 y S3) |

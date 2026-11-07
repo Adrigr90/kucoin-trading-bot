@@ -6,7 +6,7 @@ Bot de **análisis y paper trading** de criptomonedas en KuCoin (Spot y Futures 
 
 ## Estado
 
-**Fase 2 (recopilación y almacenamiento de datos), etapa E1.** La Fase 1 dejó la base: el proyecto Python, el núcleo de cálculo, la base de datos con su seguridad y la integración continua. La etapa E1 añade el cliente de KuCoin de solo lectura (REST y WebSocket públicos, sin claves). Todavía no guarda datos ni simula operaciones.
+**Fase 2 (recopilación y almacenamiento de datos), etapa E2.** La Fase 1 dejó la base: el proyecto Python, el núcleo de cálculo, la base de datos con su seguridad y la integración continua. La etapa E1 añadió el cliente de KuCoin de solo lectura (REST y WebSocket públicos, sin claves; API UTA V2 más Classic, según D04). Todavía no guarda datos ni simula operaciones.
 
 La especificación vigente y el Documento Maestro están en [`docs/especificacion/`](docs/especificacion/). El Documento Maestro es la fuente de verdad: nada puede contradecirlo.
 
@@ -33,7 +33,7 @@ Los límites de riesgo viven en la tabla `config.risk_limits`, que solo puede es
 | `ci/` | Instalación de PostgreSQL 18 y gitleaks en la integración continua |
 | `tests/` | Pruebas unitarias, de propiedades, de contrato (respuestas reales de KuCoin en `tests/fixtures/kucoin/`), de la integración continua y de PostgreSQL |
 | `docs/especificacion/` | Documento Maestro y especificación vigente |
-| `docs/kucoin/` | Matriz de revisión V1/V2 de la API de KuCoin (evidencia para D04) |
+| `docs/kucoin/` | Matriz de revisión V1/V2 de la API de KuCoin (evidencia de D04, ya decidida) |
 
 ## Cómo ejecutar las pruebas
 

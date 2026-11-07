@@ -63,6 +63,8 @@ Endpoints `wss://x-push-spot.kucoin.com` y `wss://x-push-futures.kucoin.com`, si
 4. **El cierre de una vela no se anuncia [I]:** no llega ningún mensaje de la vela después de su minuto, y el campo `S` no indica el cierre (vale `true` a mitad de minuto en Futures). El cierre se deduce por el tiempo y los valores definitivos se toman por REST.
 5. **Reloj del PC [I]:** según el reloj del PC, todas las muestras llegan entre 0,4 y 0,55 s **antes** de la hora `P` que marca KuCoin, así que el reloj del PC va al menos medio segundo por detrás. La latencia (D26) debe medirse en el servidor con el reloj sincronizado.
 
-## 5. Recomendación para D04 [R]
+## 5. D04: decidida
 
-**V2 para todos los endpoints REST de UTA, Classic para contratos, tramos de riesgo, mark price e índice, y el WebSocket UTA.** V2 envía todos los decimales como texto y usa el símbolo del contrato en el funding; los datos son los mismos que en V1. **La decisión es del propietario.** Mientras tanto, la lista blanca admite las dos versiones.
+**Aprobada por el propietario el 7 de noviembre de 2026** («d04 v2 mas classic»): **V2 para todos los endpoints REST de UTA, Classic para contratos, tramos de riesgo, mark price e índice, y el WebSocket UTA.** V2 envía todos los decimales como texto y usa el símbolo del contrato en el funding; los datos son los mismos que en V1.
+
+**Efecto en el código:** las rutas V1 salen de la lista blanca. Sus respuestas grabadas se conservan en `tests/fixtures/kucoin/evidencia_d04_v1/` solo como evidencia, y una prueba comprueba que una petición V1 se rechaza.

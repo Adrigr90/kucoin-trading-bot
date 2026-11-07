@@ -11,6 +11,9 @@ import pytest
 from kbot.kucoin.jsonparse import loads
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "kucoin"
+# V1 answers recorded for D04 (approved: V2 plus Classic). Evidence only: V1 is no longer
+# in the whitelist.
+V1_EVIDENCE = FIXTURES / "evidencia_d04_v1"
 
 
 @pytest.fixture(scope="session")
@@ -18,7 +21,8 @@ def recorded() -> Callable[[str], Any]:
     """Load one recorded fixture with exact decimals."""
 
     def load(name: str) -> Any:
-        return loads((FIXTURES / f"{name}.json").read_bytes())
+        folder = V1_EVIDENCE if name.startswith("v1_") else FIXTURES
+        return loads((folder / f"{name}.json").read_bytes())
 
     return load
 

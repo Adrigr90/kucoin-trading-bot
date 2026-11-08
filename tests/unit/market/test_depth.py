@@ -147,6 +147,23 @@ def test_a_sequence_that_goes_back_is_inconsistent_and_a_duplicate_is_ignored() 
     assert states(third) == ["valida"]
 
 
+def test_a_publication_time_that_goes_back_makes_the_book_inconsistent() -> None:
+    """Review of E2, third round (I-E2-07): the sequence grows (100, then 101) but KuCoin's
+    publication time goes back (5 s, then 4 s). The book is inconsistent, without metrics,
+    until a book published later arrives."""
+    ch = channel()
+    ch.connection_up(at(0))
+    ch.on_message(book(100, at(5)), at(5.1))
+    ch.on_message(book(101, at(4)), at(5.2))
+    slots, _ = ch.close_until(at(10), NO_LATENESS)
+    assert states(slots) == ["libro_inconsistente"] and slots[0].metrics is None
+    snapshot = parse_snapshot(book(101, at(4)), at(5.2), 100, at(5))
+    assert snapshot.problem == "publication time went back"
+    ch.on_message(book(102, at(15)), at(15))
+    slots, _ = ch.close_until(at(20), NO_LATENESS)
+    assert states(slots) == ["valida"]
+
+
 def test_ordinary_latency_never_makes_a_slot_late() -> None:
     """Live run of 8 November 2026: a book published just before the end of a slot and
     received just after it is on time; it is the book in force of its slot."""

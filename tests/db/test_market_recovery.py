@@ -168,3 +168,37 @@ def test_f2_a6_closing_a_day_from_the_database(ingest: psycopg.Connection) -> No
         ("sin_explicar", "ausencia_no_verificable", "S3", None),
     ]
     assert {r[1] for r in rows[5:]} == {"sin_explicar"}, "nothing was recording: S3, no gap"
+
+
+def test_a_trade_without_a_websocket_candle_rules_out_an_absence(
+    ingest: psycopg.Connection,
+) -> None:
+    """Review of E2, third round (I-E2-02), from the database: in minute 0 the trade channel
+    received a trade, the kline channel nothing, and KuCoin gave no candle: pending, never a
+    probable absence of trades. In minute 1 KuCoin gave a candle of volume 0 against a trade
+    received: a discrepancy. Closed again after a restart, nothing changes."""
+    from kbot.market.last_candles import FlowMinute, Ohlcv, decide
+    from kbot.market.mark_candles import FlowState
+    from kbot.market.store import close_day, write_flow, write_last_candles
+
+    symbol = "T" + secrets.token_hex(5).upper() + "-USDT"
+    day = datetime(2026, 11, 7, tzinfo=UTC) + timedelta(days=secrets.randbelow(3000))
+    m = [day, day + timedelta(minutes=1)]
+
+    def flow(minute: datetime, channel: str, messages: int) -> FlowMinute:
+        return FlowMinute("SPOT", symbol, channel, minute, FlowState.S1, messages, 0, 0)
+
+    write_flow(ingest, [flow(m[0], "trade", 1), flow(m[0], "kline", 0)])
+    write_flow(ingest, [flow(m[1], "trade", 1), flow(m[1], "kline", 0)])
+    zero = Ohlcv(m[1], *(Decimal(v) for v in ("100", "100", "100", "100", "0", "0")))
+    decision = decide("SPOT", symbol, flow(m[1], "trade", 1), zero, None, Decimal("0.1"))
+    assert decision.differences == ("websocket_sin_vela", "volumen_rest_cero")
+    write_last_candles(ingest, [decision])
+    for _ in range(2):
+        close_day(ingest, "SPOT", symbol, day)
+    rows = ingest.execute(
+        "SELECT status, candle_state FROM market.minute_status WHERE symbol = %s"
+        " ORDER BY minute_start LIMIT 2",
+        (symbol,),
+    ).fetchall()
+    assert rows == [("sin_explicar", "pendiente_estabilizacion"), ("datos", "discrepante")]

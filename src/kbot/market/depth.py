@@ -6,7 +6,8 @@ with **exactly one** terminal state, the first of this list that applies:
 
 * ``desconectado``: the connection was not healthy at some moment of the slot;
 * ``libro_inconsistente``: the snapshot in force at the end of the slot is inconsistent
-  (crossed, unordered, non-positive, or its sequence ``C`` went back);
+  (crossed, unordered, non-positive, its sequence ``C`` or its publication time ``P``
+  went back, or it was published in a slot already closed);
 * ``fuera_de_plazo``: a snapshot published during the slot arrived after the slot's
   deadline (its end plus the lateness margin), so the book in force at the deadline, if
   there was one, was not up to date;
@@ -17,15 +18,17 @@ with **exactly one** terminal state, the first of this list that applies:
 
 A snapshot belongs to the slot in which KuCoin published it (``P``); it counts if it arrives
 before the deadline, so ordinary network latency never makes a slot late (live run of 8
-November 2026). Duplicates (same ``C``) are ignored and never create slots. Metrics are
-computed only for ``valida`` slots and contain exact values only: no ratio, so nothing is
-rounded (§0 rule 5).
+November 2026). The recorder closes a slot only once the connection has proven itself alive
+after the deadline (``kbot.ingest.core``): one connection delivers in order, so by then every
+book published in the slot has arrived, in time or late. Duplicates (same ``C``) are ignored
+and never create slots. Metrics are computed only for ``valida`` slots and contain exact
+values only: no ratio, so nothing is rounded (§0 rule 5).
 """
 
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
@@ -113,10 +116,15 @@ def slot_start(moment: datetime) -> datetime:
 
 
 def parse_snapshot(
-    message: dict[str, Any], received_at: datetime, previous_sequence: int | None
+    message: dict[str, Any],
+    received_at: datetime,
+    previous_sequence: int | None,
+    previous_published: datetime | None = None,
 ) -> Snapshot:
-    """Read an ``obu`` message. Market problems make it inconsistent; a message without
-    integer ``C`` and ``P`` raises ValueError (DepthChannel records it as malformed)."""
+    """Read an ``obu`` message. Market problems make it inconsistent, and so does a
+    sequence ``C`` or a publication time ``P`` that goes back within the subscription
+    (02 §3.3 and §3.6). A message without integer ``C`` and ``P`` raises ValueError
+    (DepthChannel records it as malformed)."""
     received_at = as_utc(received_at, "received_at")
     data = message.get("d") or {}
     sequence = data.get("C")
@@ -124,14 +132,17 @@ def parse_snapshot(
     exchange = data.get("M")
     if not (is_int(sequence) and is_int(published)):
         raise ValueError("obu message without integer C and P")
+    published_at = from_nanoseconds(published)
     bids, bid_problem = _levels(data.get("b"))
     asks, ask_problem = _levels(data.get("a"))
     problem = bid_problem or ask_problem or _book_problem(bids, asks)
     if problem is None and previous_sequence is not None and sequence < previous_sequence:
         problem = f"sequence went back from {previous_sequence} to {sequence}"
+    if problem is None and previous_published is not None and published_at < previous_published:
+        problem = "publication time went back"
     return Snapshot(
         sequence=sequence,
-        published_at=from_nanoseconds(published),
+        published_at=published_at,
         exchange_ns=exchange if is_int(exchange) else None,
         received_at=received_at,
         bids=bids,
@@ -205,6 +216,7 @@ class DepthChannel:
         self._down: list[tuple[datetime, datetime | None]] = [(started_at, None)]
         self._snapshots: deque[Snapshot] = deque()
         self._max_sequence: int | None = None
+        self._max_published: datetime | None = None
         # Start of each confirmed subscription. A slot only uses snapshots received in the
         # subscription in force during the whole slot; older ones may describe a book that
         # changed while the connection was down.
@@ -225,6 +237,7 @@ class DepthChannel:
             self._down[-1] = (self._down[-1][0], at)
         self._subscribed_at.append(at)
         self._max_sequence = None
+        self._max_published = None
 
     def connection_down(self, at: datetime) -> None:
         at = as_utc(at, "at")
@@ -244,17 +257,28 @@ class DepthChannel:
         ):
             return  # duplicate: ignored, creates nothing
         try:
-            snapshot = parse_snapshot(message, received_at, self._max_sequence)
+            snapshot = parse_snapshot(message, received_at, self._max_sequence, self._max_published)
         except ValueError:
             # Without C and P the book cannot be placed: it is recorded as an inconsistent
             # book in force, with no invented sequence or time.
             snapshot = Snapshot(None, None, None, received_at, (), (), "malformed message")
         if (
             snapshot.consistent
-            and snapshot.sequence is not None
-            and (self._max_sequence is None or snapshot.sequence > self._max_sequence)
+            and snapshot.published_at is not None
+            and snapshot.published_at < self._next_slot
         ):
-            self._max_sequence = snapshot.sequence
+            # Its slot was closed after the connection proved that everything published
+            # before the deadline had arrived: a book that still comes is an anomaly, never a
+            # valid book for the slots that follow (review of E2, third round).
+            snapshot = replace(snapshot, problem="published in a slot already closed")
+        if snapshot.consistent and snapshot.sequence is not None:
+            if self._max_sequence is None or snapshot.sequence > self._max_sequence:
+                self._max_sequence = snapshot.sequence
+            published = snapshot.published_at
+            if published is not None and (
+                self._max_published is None or published > self._max_published
+            ):
+                self._max_published = published
         self._snapshots.append(snapshot)
 
     def close_until(

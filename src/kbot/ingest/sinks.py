@@ -31,6 +31,7 @@ class Sink(Protocol):
     def resume_points(self, specs: Iterable[InstrumentSpec]) -> ResumePoints: ...
     def pending_candles(self, since: datetime) -> list[PendingCandle]: ...
     def pending_index_rebuilds(self, since: datetime) -> list[IndexMinute]: ...
+    def unclosed_days(self, since: datetime, before: datetime) -> list[datetime]: ...
     def load_universe(self, day: datetime) -> list[UniverseEntry]: ...
     def universe_members(self, day: datetime) -> set[tuple[str, str]]: ...
     def write_universe(self, entries: list[UniverseEntry]) -> None: ...
@@ -81,6 +82,9 @@ class DatabaseSink:
 
     def pending_index_rebuilds(self, since: datetime) -> list[IndexMinute]:
         return store.pending_index_rebuilds(self.conn, since)
+
+    def unclosed_days(self, since: datetime, before: datetime) -> list[datetime]:
+        return store.unclosed_days(self.conn, since, before)
 
     def load_universe(self, day: datetime) -> list[UniverseEntry]:
         return store.load_universe(self.conn, day)
@@ -166,6 +170,17 @@ class MemorySink:
                     PendingCandle(flow, ws.get(key), tick_size[(flow.market, flow.symbol)])
                 )
         return pending
+
+    def unclosed_days(self, since: datetime, before: datetime) -> list[datetime]:
+        """What ``store.unclosed_days`` finds, from the lists (same rules)."""
+        closed = set(self.closed_days)
+        days = {
+            (f.market, f.symbol, floor_to(f.minute, _DAY))
+            for t in self.ticks
+            for f in t.flows
+            if f.channel == "trade" and since <= f.minute < before
+        }
+        return sorted({day for market, symbol, day in days if (market, symbol, day) not in closed})
 
     def pending_index_rebuilds(self, since: datetime) -> list[IndexMinute]:
         """What ``store.pending_index_rebuilds`` finds, from the lists (same rules)."""

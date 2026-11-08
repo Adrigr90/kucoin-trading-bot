@@ -7,10 +7,10 @@ Spec 02 §3.4 and §3.5, and the owner decision of 8 November 2026 (provisional 
   minute: any price more than one tick apart makes it ``discrepante``; volume and turnover
   of both are kept but do not judge the candle until D26 sets their tolerances;
 * with a degraded flow (S2 or S3) the REST candle stands alone (``cerrada_rest``);
-* without a REST candle, the minute is ``ausencia_sin_trades_probable`` only on S1 with no
-  WebSocket candle either, ``ausencia_no_verificable`` on S2 or S3, and stays pending
-  (``pendiente_estabilizacion``) on S1 when the WebSocket saw trades: KuCoin warns that its
-  REST candles may be incomplete, so the bot waits and never builds the candle itself.
+* without a REST candle, the minute is ``ausencia_sin_trades_probable`` only on S1 with
+  neither a WebSocket candle nor a trade, ``ausencia_no_verificable`` on S2 or S3, and stays
+  pending (``pendiente_estabilizacion``) on S1 when the WebSocket saw trading: KuCoin warns
+  that its REST candles may be incomplete, so the bot waits and never builds the candle.
 
 ``day_close`` turns the decisions of a day into the terminal ``minute_status`` of §3.5.
 """
@@ -282,27 +282,36 @@ def decide(
     ws: Ohlcv | None,
     tick: Decimal,
 ) -> CandleDecision:
-    """The candle of one closed minute. ``rest`` is None only when a successful REST answer
-    covering the minute had no candle for it; a failed request is not a decision."""
+    """The candle of one closed minute. ``flow`` is the minute of the ``trade`` channel;
+    ``rest`` is None only when a successful REST answer covering the minute had no candle
+    for it; a failed request is not a decision.
+
+    The WebSocket saw trading in the minute if it sent a candle for it or if the trade
+    channel received a trade: either one rules out a probable absence of trades, and either
+    one against a REST candle of volume 0 is a contradiction (review of E2, third round)."""
     minute, state_of_flow = flow.minute, flow.flow_state
     for candle in (rest, ws):
         if candle is not None and candle.open_time != minute:
             raise ValueError("candle of another minute")
+    traded = flow.messages > 0  # trades received in the minute (on S1 all of them valid)
     differences: tuple[str, ...] = ()
     if rest is not None:
+        rest_without_trades = rest.volume == 0 and rest.turnover == 0
         if state_of_flow is not FlowState.S1:
             state, evidence = CandleState.CERRADA_REST, CandleEvidence.REST_SUFICIENTE
             ws = None
-        elif ws is None and rest.volume == 0 and rest.turnover == 0:
+        elif ws is None and rest_without_trades and not traded:
             # Spot: KuCoin publishes a flat zero-volume candle for a minute without trades
             # [H, measured 8 Nov 2026]; a continuous flow that saw no trades agrees with it.
             state, evidence = CandleState.CERRADA_CRUZADA, CandleEvidence.CRUZADA_CONSISTENTE
         elif ws is None:
             state, evidence = CandleState.DISCREPANTE, CandleEvidence.CRUZADA_DISCREPANTE
             differences = ("websocket_sin_vela",)
+            if rest.volume == 0:
+                differences = (*differences, "volumen_rest_cero")
         else:
             differences = price_differences(rest, ws, tick)
-            if rest.volume == 0 and ws.volume > 0:
+            if rest.volume == 0 and (ws.volume > 0 or traded):
                 # Not a tolerance (D26): KuCoin says no trade happened, the flow saw some.
                 differences = (*differences, "volumen_rest_cero")
             if differences:
@@ -314,7 +323,7 @@ def decide(
                 )
     elif state_of_flow is not FlowState.S1:
         state, evidence = CandleState.AUSENCIA_NO_VERIFICABLE, None
-    elif ws is None:
+    elif ws is None and not traded:
         state, evidence = CandleState.AUSENCIA_SIN_TRADES, None
     else:
         state, evidence = CandleState.PENDIENTE, None
@@ -388,8 +397,13 @@ def _consistent(candle: Ohlcv) -> bool:
     )
 
 
-def state_without_candle(flow: FlowState, kline_messages: int) -> CandleState:
-    """State of a minute that has no candle row, from what the database recorded."""
+def state_without_candle(
+    flow: FlowState, kline_messages: int, trade_messages: int = 0
+) -> CandleState:
+    """State of a minute that has no candle row, from what the database recorded. On S1 the
+    minute is still pending if the WebSocket saw anything in it (a candle or a trade), and
+    a probable absence of trades only when it saw nothing (review of E2, third round)."""
     if flow is not FlowState.S1:
         return CandleState.AUSENCIA_NO_VERIFICABLE
-    return CandleState.PENDIENTE if kline_messages > 0 else CandleState.AUSENCIA_SIN_TRADES
+    seen = kline_messages > 0 or trade_messages > 0
+    return CandleState.PENDIENTE if seen else CandleState.AUSENCIA_SIN_TRADES

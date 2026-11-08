@@ -93,9 +93,13 @@ CREATE TABLE market.candles (
     FOREIGN KEY (market, symbol, flow_channel, open_time, flow_state)
         REFERENCES market.data_quality_minute (market, symbol, channel, minute_start, flow_state),
     CHECK (low <= open AND low <= close AND open <= high AND close <= high),
+    -- A CHECK passes when it evaluates to NULL, and a foreign key with a NULL column is not
+    -- checked: every column a combination needs is required explicitly with IS NOT NULL, so
+    -- a missing flow, sample count or series is refused, never let through (review of E2,
+    -- third round).
     CHECK (
         (series = 'last' AND volume IS NOT NULL AND turnover IS NOT NULL AND samples IS NULL
-            AND flow_channel = 'trade' AND flow_state IS NOT NULL
+            AND flow_channel IS NOT NULL AND flow_channel = 'trade' AND flow_state IS NOT NULL
             AND ((state = 'cerrada_cruzada' AND evidence = 'vela_cruzada_consistente'
                     AND flow_state = 'S1'
                     AND ((ws_volume IS NOT NULL AND ws_turnover IS NOT NULL)
@@ -108,8 +112,9 @@ CREATE TABLE market.candles (
                     AND flow_state IN ('S2', 'S3') AND ws_volume IS NULL AND ws_turnover IS NULL)))
         OR (series IN ('mark', 'index') AND market = 'FUTURES' AND volume IS NULL
             AND turnover IS NULL AND ws_volume IS NULL AND ws_turnover IS NULL
-            AND state = 'cerrada_propia' AND samples = 60
-            AND ((evidence = 'construida_flujo' AND flow_channel = 'mark-price'
+            AND state = 'cerrada_propia' AND samples IS NOT NULL AND samples = 60
+            AND ((evidence = 'construida_flujo' AND flow_channel IS NOT NULL
+                    AND flow_channel = 'mark-price' AND flow_state IS NOT NULL
                     AND flow_state = 'S1')
                 OR (series = 'index' AND evidence = 'reconstruida_classic'
                     AND flow_channel IS NULL AND flow_state IS NULL)))
@@ -198,8 +203,11 @@ CREATE TABLE market.minute_status (
         REFERENCES market.candles (series, market, symbol, open_time, state),
     FOREIGN KEY (market, flow_channel, symbol, gap_start)
         REFERENCES market.data_gaps (market, channel, symbol, start_at),
+    -- candle_series IS NOT NULL: with a NULL series the foreign key to the candle would not
+    -- be checked (see candles).
     CHECK (
-        (status = 'datos' AND candle_series = 'last' AND gap_start IS NULL
+        (status = 'datos' AND candle_series IS NOT NULL AND candle_series = 'last'
+            AND gap_start IS NULL
             AND (candle_state IN ('cerrada_rest', 'cerrada_cruzada')
                 OR (candle_state = 'discrepante' AND flow_state = 'S1')))
         OR (status = 'sin_operaciones_probable' AND candle_series IS NULL AND gap_start IS NULL

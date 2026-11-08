@@ -40,8 +40,9 @@ def candle(o: str = "100", h: str = "101", low: str = "99", c: str = "100.5") ->
     return Ohlcv(T0, Decimal(o), Decimal(h), Decimal(low), Decimal(c), Decimal(2), Decimal(201))
 
 
-def flow(state: FlowState, minute: datetime = T0) -> FlowMinute:
-    return FlowMinute("SPOT", "BTC-USDT", "trade", minute, state, 10, 0, 0)
+def flow(state: FlowState, minute: datetime = T0, trades: int = 0) -> FlowMinute:
+    """A minute of the trade channel; by default the WebSocket received no trade in it."""
+    return FlowMinute("SPOT", "BTC-USDT", "trade", minute, state, trades, 0, 0)
 
 
 @pytest.mark.parametrize(
@@ -279,6 +280,23 @@ def test_a_zero_volume_spot_candle_agrees_with_a_flow_without_trades() -> None:
     assert traded.differences == ("volumen_rest_cero",)
     degraded = decide("SPOT", "BNB-USDT", flow(FlowState.S2), flat(), None, TICK)
     assert degraded.state is CandleState.CERRADA_REST
+
+
+def test_a_trade_without_a_websocket_candle_still_counts_as_trading() -> None:
+    """Review of E2, third round (I-E2-02): the trade channel received a trade but no candle
+    arrived on the kline channel. A REST answer without the candle is not a probable
+    absence of trades, and a REST candle of volume 0 contradicts the trade, also after a
+    restart, when the day is closed from the database."""
+    traded = flow(FlowState.S1, trades=1)
+    assert decide("SPOT", "BTC-USDT", traded, None, None, TICK).state is CandleState.PENDIENTE
+    zero = decide("SPOT", "BTC-USDT", traded, flat(), None, TICK)
+    assert zero.state is CandleState.DISCREPANTE
+    assert zero.differences == ("websocket_sin_vela", "volumen_rest_cero")
+    flat_ws = decide("SPOT", "BTC-USDT", traded, flat(), flat(), TICK)
+    assert flat_ws.state is CandleState.DISCREPANTE
+    assert flat_ws.differences == ("volumen_rest_cero",)
+    assert state_without_candle(FlowState.S1, 0, trade_messages=1) is CandleState.PENDIENTE
+    assert state_without_candle(FlowState.S1, 0, 0) is CandleState.AUSENCIA_SIN_TRADES
     assert rest_kline([T0_S, "130.678", "130.678", "130.678", "130.678", "0", "0"]) == Ohlcv(
         T0, *(Decimal(v) for v in ("130.678",) * 4), Decimal(0), Decimal(0)
     )

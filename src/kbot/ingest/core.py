@@ -248,6 +248,10 @@ class RecorderCore:
         # Minutes waiting for their REST candle, per (market, symbol): kept apart from the
         # instruments, so they are decided even after their instrument left the universe.
         self._awaiting: dict[tuple[str, str], dict[datetime, _Awaiting]] = {}
+        # Per connection: whether it is up, and its last proof of life (any message or pong
+        # received). While it is up, nothing is closed beyond that proof (``_proven``).
+        self._up: dict[str, bool] = dict.fromkeys(MARKETS, False)
+        self._alive: dict[str, datetime | None] = dict.fromkeys(MARKETS, None)
         for spec in specs:
             key = (spec.market, spec.symbol)
             if key in self._instruments:
@@ -315,6 +319,8 @@ class RecorderCore:
     # --- events ----------------------------------------------------------------------------
 
     def on_message(self, market: str, message: dict[str, Any], received_at: datetime) -> None:
+        received_at = as_utc(received_at, "received_at")
+        self._prove_alive(market, received_at)
         topic = str(message.get("T", ""))
         data = message.get("d")
         symbol = data.get("s") if isinstance(data, dict) else None
@@ -345,10 +351,39 @@ class RecorderCore:
         else:
             self.anomalies += 1
 
+    def on_alive(self, market: str, at: datetime) -> None:
+        """A control message (pong, acknowledgement or welcome) received at ``at``: a proof
+        of life of the connection even when no market data arrives."""
+        self._prove_alive(market, as_utc(at, "at"))
+
+    def on_stall(self, start: datetime, end: datetime, detail: str) -> None:
+        """The process did not run from ``start`` to ``end`` (review of E2, third round).
+
+        A connection that was up is recorded down from its last proof of life (never later
+        than ``start``) to ``end``, as ``proceso_detenido``, and up again at ``end``; nothing
+        after ``end`` counts as healthy until the connection proves itself alive again. A
+        connection that was already down stays down: only its stream can say it is back."""
+        start, end = as_utc(start, "start"), as_utc(end, "end")
+        for market in MARKETS:
+            if not self._up[market]:
+                continue
+            alive = self._alive[market]
+            down_from = min(start, alive) if alive is not None else start
+            self.on_state(market, "disconnected", down_from, detail)
+            self.on_state(market, "connected", end, "stall over")
+
+    def _prove_alive(self, market: str, at: datetime) -> None:
+        if self._up.get(market):
+            current = self._alive.get(market)
+            if current is None or at > current:
+                self._alive[market] = at
+
     def on_state(self, market: str, state: str, at: datetime, detail: str) -> None:
         at = as_utc(at, "at")
         instruments = [i for i in self._instruments.values() if i.spec.market == market]
         if state == "connected":
+            self._up[market] = True
+            self._alive[market] = at
             for instrument in instruments:
                 for depth in instrument.depth.values():
                     depth.connection_up(at)
@@ -361,6 +396,7 @@ class RecorderCore:
                     if gap is not None:
                         self._closed_gaps.append(gap)
         elif state == "disconnected":
+            self._up[market] = False
             cause = cause_from_state_detail(detail)
             for instrument in instruments:
                 for depth in instrument.depth.values():
@@ -381,9 +417,9 @@ class RecorderCore:
         out = TickOutput(gaps=self._closed_gaps)
         self._closed_gaps = []
         for instrument in [*self._instruments.values(), *self._retired]:
-            until = now
+            until = self._proven(instrument.spec.market, now)
             if instrument.retired_at is not None:
-                until = min(now, instrument.retired_at + self.lateness)
+                until = min(until, instrument.retired_at + self.lateness)
             self._close(instrument, until, out)
         self._retired = [
             i
@@ -391,6 +427,20 @@ class RecorderCore:
             if i.recorded_until() < i.retired_at  # type: ignore[operator]
         ]
         return out
+
+    def _proven(self, market: str, now: datetime) -> datetime:
+        """How far the trackers of ``market`` may close (review of E2, third round).
+
+        While its connection is up, only up to its last proof of life: a slot or a minute
+        closes once a message or a pong arrived at least the lateness margin after its end.
+        One connection delivers in order, so by then everything published in it has
+        arrived, in time or late, and a disconnection (dated from the last proof of life)
+        can never fall on a result already written as healthy. While it is down, up to
+        ``now``: nothing healthy is claimed and nothing more can arrive."""
+        alive = self._alive.get(market)
+        if not self._up.get(market) or alive is None:
+            return now
+        return min(now, alive)
 
     def _close(self, instrument: _Instrument, now: datetime, out: TickOutput) -> None:
         spec = instrument.spec

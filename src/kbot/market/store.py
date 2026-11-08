@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 import psycopg
 from psycopg.types.json import Jsonb
@@ -329,6 +329,7 @@ def close_day(conn: psycopg.Connection, market: str, symbol: str, day: datetime)
             (market, symbol, day, end),
         ).fetchall()
         flows = {m: FlowState(state) for channel, m, state, _ in rows if channel == "trade"}
+        trades = {m: messages for channel, m, _, messages in rows if channel == "trade"}
         klines = {m: messages for channel, m, _, messages in rows if channel == "kline"}
         states = {
             row[0]: CandleState(row[1])
@@ -340,7 +341,9 @@ def close_day(conn: psycopg.Connection, market: str, symbol: str, day: datetime)
         }
         for minute, flow in flows.items():
             if minute not in states:
-                states[minute] = state_without_candle(flow, klines.get(minute, 0))
+                states[minute] = state_without_candle(
+                    flow, klines.get(minute, 0), trades.get(minute, 0)
+                )
         statuses = day_close(
             day, flows, states, trade_gaps(conn, market, symbol, day), market=market, symbol=symbol
         )
@@ -430,6 +433,22 @@ def write_exhausted_index(
             " attempts, flow_state) VALUES ('FUTURES', %s, %s, %s, %s) ON CONFLICT DO NOTHING",
             [(m.symbol, m.minute, attempts, m.flow_state.value) for m, attempts in minutes],
         )
+
+
+def unclosed_days(conn: psycopg.Connection, since: datetime, before: datetime) -> list[datetime]:
+    """UTC days in [since, before) with a recorded trade minute that has no terminal status
+    yet: their close was interrupted or was still waiting for a candle when the process
+    stopped (review of E2, third round)."""
+    rows = conn.execute(
+        "SELECT DISTINCT date_trunc('day', q.minute_start, 'UTC') AS day"
+        " FROM market.data_quality_minute AS q"
+        " WHERE q.channel = 'trade' AND q.minute_start >= %s AND q.minute_start < %s"
+        " AND NOT EXISTS (SELECT 1 FROM market.minute_status AS s WHERE s.market = q.market"
+        "   AND s.symbol = q.symbol AND s.minute_start = q.minute_start)"
+        " ORDER BY day",
+        (since, before),
+    ).fetchall()
+    return [row[0].astimezone(UTC) for row in rows]
 
 
 def day_is_closed(conn: psycopg.Connection, market: str, symbol: str, day: datetime) -> bool:

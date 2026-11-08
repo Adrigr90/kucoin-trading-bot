@@ -24,7 +24,7 @@ from kbot.market.gaps import GapCause
 from kbot.market.last_candles import CandleState
 from kbot.market.mark_candles import Evidence, FlowState
 from tests.unit.ingest.fake_kucoin import FakeKucoin
-from tests.unit.ingest.messages import book, kline, mark, rest_row, seconds, trade
+from tests.unit.ingest.messages import beat, book, kline, mark, rest_row, seconds, trade
 
 DAY = datetime(2026, 11, 7, tzinfo=UTC)
 MIDNIGHT = DAY + timedelta(days=1)
@@ -95,14 +95,14 @@ def test_five_simulated_minutes_around_midnight(
             core.on_state(market, "connected", START + timedelta(seconds=1), "wss://...")
         minute = MIDNIGHT - timedelta(minutes=2)  # 23:58
         feed(recorder, minute)
-        await recorder.step(minute)
+        await beat(recorder, minute)
         assert {(f.kind, f.symbol) for f in sink.funding} == {
             ("previsto", "XBTUSDTM"),
             ("liquidado", "XBTUSDTM"),
         }
 
         # 23:59:00: tomorrow's universe is evaluated, effective at midnight.
-        await recorder.step(MIDNIGHT - timedelta(minutes=1))
+        await beat(recorder, MIDNIGHT - timedelta(minutes=1))
         assert {e.evaluated_at for e in sink.universe} == {START, MIDNIGHT}
 
         # 23:59:16: minute 23:58 closed, its REST candles decided, its own candles built.
@@ -114,7 +114,7 @@ def test_five_simulated_minutes_around_midnight(
             "ConnectionClosedError: no close frame received or sent",
         )
         core.on_state("FUTURES", "connected", MIDNIGHT - timedelta(seconds=35), "wss://...")
-        await recorder.step(MIDNIGHT - timedelta(seconds=44))
+        await beat(recorder, MIDNIGHT - timedelta(seconds=44))
         decided = {(d.symbol, d.minute): d.state for d in sink.last_candles}
         assert decided[("BTC-USDT", minute)] is CandleState.CERRADA_CRUZADA
         assert decided[("XBTUSDTM", minute)] is CandleState.CERRADA_CRUZADA
@@ -124,9 +124,9 @@ def test_five_simulated_minutes_around_midnight(
         assert own == [("mark", minute, Evidence.FLOW), ("index", minute, Evidence.FLOW)]
 
         # Midnight: the day switches; 00:00:16 the last minute is decided and the day closed.
-        await recorder.step(MIDNIGHT)
+        await beat(recorder, MIDNIGHT)
         assert recorder.restart_streams is False, "same universe: no new subscriptions"
-        await recorder.step(MIDNIGHT + timedelta(seconds=16))
+        await beat(recorder, MIDNIGHT + timedelta(seconds=16))
         last = MIDNIGHT - timedelta(minutes=1)
         decided = {(d.symbol, d.minute): d.state for d in sink.last_candles}
         assert decided[("BTC-USDT", last)] is CandleState.CERRADA_CRUZADA
@@ -138,7 +138,7 @@ def test_five_simulated_minutes_around_midnight(
 
         # 00:02:01: the index minute of the outage is rebuilt from Classic (23:57, the
         # half-recorded first minute, was rebuilt at midnight).
-        await recorder.step(MIDNIGHT + timedelta(minutes=2, seconds=1))
+        await beat(recorder, MIDNIGHT + timedelta(minutes=2, seconds=1))
         assert [(c.series, c.open_time, c.evidence, c.samples) for c in sink.index_candles] == [
             ("index", before, Evidence.CLASSIC, 60),
             ("index", last, Evidence.CLASSIC, 60),
@@ -162,8 +162,8 @@ def test_a_new_universe_renews_the_subscriptions(
     async def scenario() -> None:
         await recorder.startup(START)
         fake.spot = ["BTC-USDT", "ETH-USDT"]  # ETH appears in tomorrow's listings
-        await recorder.step(MIDNIGHT - timedelta(minutes=1))
-        await recorder.step(MIDNIGHT)
+        await beat(recorder, MIDNIGHT - timedelta(minutes=1))
+        await beat(recorder, MIDNIGHT)
         assert recorder.restart_streams is True
         core = recorder.core
         assert core is not None
@@ -228,7 +228,7 @@ def test_pending_rest_candles_survive_a_restart(
         await recorder.startup(START)
         connect_both(recorder, START + timedelta(seconds=1))
         feed(recorder, minute)
-        await recorder.step(minute + timedelta(seconds=62))  # its REST candle is due at :15
+        await beat(recorder, minute + timedelta(seconds=62))  # its REST candle is due at :15
 
     run(first_run())
     assert {(d.minute, d.state) for d in sink.last_candles} == {
@@ -245,7 +245,7 @@ def test_pending_rest_candles_survive_a_restart(
         assert core is not None
         assert core.awaiting_minutes("SPOT", "BTC-USDT") == [minute]
         assert core.awaiting_minutes("FUTURES", "XBTUSDTM") == [minute]
-        await restarted.step(minute + timedelta(seconds=75))
+        await beat(restarted, minute + timedelta(seconds=75))
 
     run(second_run())
     decided = {(d.symbol, d.minute): d for d in sink.last_candles}
@@ -273,7 +273,7 @@ def test_pending_index_rebuilds_survive_a_restart(
         connect_both(recorder, START + timedelta(seconds=1))
         feed(recorder, minute)
         drop_futures(recorder, minute)
-        await recorder.step(minute + timedelta(seconds=62))  # Classic is asked 3 min later
+        await beat(recorder, minute + timedelta(seconds=62))  # Classic is asked 3 min later
 
     run(first_run())
     assert sink.index_candles == []
@@ -281,7 +281,7 @@ def test_pending_index_rebuilds_survive_a_restart(
 
     async def second_run() -> None:
         await restarted.startup(minute + timedelta(seconds=70))
-        await restarted.step(minute + timedelta(minutes=3, seconds=1))
+        await beat(restarted, minute + timedelta(minutes=3, seconds=1))
 
     run(second_run())
     assert [(c.open_time, c.evidence, c.samples) for c in sink.index_candles] == [
@@ -316,10 +316,10 @@ def test_an_index_minute_that_cannot_be_rebuilt(
         feed(recorder, minute)
         drop_futures(recorder, minute)
         moment = minute + timedelta(seconds=62)
-        await recorder.step(moment)
+        await beat(recorder, moment)
         for _ in range(INDEX_ATTEMPTS):
             moment += INDEX_DELAY
-            await recorder.step(moment)
+            await beat(recorder, moment)
 
     run(scenario())
     assert sink.index_candles == []
@@ -348,9 +348,9 @@ def test_a_stall_across_midnight_evaluates_the_day_that_started(
         await recorder.startup(START)
         connect_both(recorder, START + timedelta(seconds=1))
         recorder._last_beat = MIDNIGHT - timedelta(minutes=2)  # as run() does
-        await recorder.step(MIDNIGHT - timedelta(minutes=2))  # the last beat before the stall
+        await beat(recorder, MIDNIGHT - timedelta(minutes=2))  # the last beat before the stall
         fake.spot = ["BTC-USDT", "ETH-USDT"]  # ETH enters the listings of the new day
-        await recorder.step(late)
+        await beat(recorder, late)
         core = recorder.core
         assert core is not None
         assert {e.evaluated_at for e in sink.universe} == {START, late}
@@ -359,7 +359,7 @@ def test_a_stall_across_midnight_evaluates_the_day_that_started(
         assert recorder._next_evaluation == MIDNIGHT + EVALUATION_TIME
         assert recorder._tomorrow is None
         recorder._last_beat = None
-        await recorder.step(late + timedelta(seconds=30))
+        await beat(recorder, late + timedelta(seconds=30))
 
     run(scenario())
     eth = [s.slot_start for t in sink.ticks for s in t.slots if s.symbol == "ETH-USDT"]
@@ -396,7 +396,7 @@ def test_a_restart_before_midnight_reuses_tomorrows_evaluation(
     the stored evaluation instead of making a second one for the same midnight."""
     recorder, sink, fake = setup
     run(recorder.startup(START))
-    run(recorder.step(MIDNIGHT - timedelta(minutes=1)))
+    run(beat(recorder, MIDNIGHT - timedelta(minutes=1)))
     stored = [e for e in sink.universe if e.evaluated_at == MIDNIGHT]
     assert stored
     fake.spot = ["BTC-USDT", "ETH-USDT"]  # the listings change before the restart
@@ -404,8 +404,8 @@ def test_a_restart_before_midnight_reuses_tomorrows_evaluation(
 
     async def scenario() -> None:
         await restarted.startup(MIDNIGHT - timedelta(seconds=30))
-        await restarted.step(MIDNIGHT - timedelta(seconds=29))
-        await restarted.step(MIDNIGHT)
+        await beat(restarted, MIDNIGHT - timedelta(seconds=29))
+        await beat(restarted, MIDNIGHT)
 
     run(scenario())
     assert [e for e in sink.universe if e.evaluated_at == MIDNIGHT] == stored
@@ -435,7 +435,7 @@ def test_a_candle_that_can_still_be_recovered_keeps_its_day_open(
         feed(recorder, minute)
         feed(recorder, minute + timedelta(minutes=1))
         for moment in steps:
-            await recorder.step(moment)
+            await beat(recorder, moment)
 
     run(first_run())
     assert sink.closed_days == [("SPOT", "BTC-USDT", DAY)], "XBTUSDTM can still be recovered"
@@ -449,7 +449,7 @@ def test_a_candle_that_can_still_be_recovered_keeps_its_day_open(
 
     async def second_run() -> None:
         await restarted.startup(MIDNIGHT + timedelta(hours=9))
-        await restarted.step(MIDNIGHT + timedelta(hours=9, seconds=1))
+        await beat(restarted, MIDNIGHT + timedelta(hours=9, seconds=1))
 
     run(second_run())
     decided = {d.minute: d.state for d in sink.last_candles if d.symbol == "XBTUSDTM"}
@@ -462,10 +462,50 @@ def test_a_candle_that_can_still_be_recovered_keeps_its_day_open(
 
     again = Recorder(sink, rest=recorder._rest)
     run(again.startup(MIDNIGHT + timedelta(hours=9, minutes=5)))
-    run(again.step(MIDNIGHT + timedelta(hours=9, minutes=5, seconds=1)))
+    run(beat(again, MIDNIGHT + timedelta(hours=9, minutes=5, seconds=1)))
     assert again.core is not None
     assert [m for m in again.core.awaiting_minutes("FUTURES", "XBTUSDTM") if m < MIDNIGHT] == []
     assert len(sink.closed_days) == 2, "no day is closed twice"
+
+
+def test_a_day_left_open_is_closed_after_a_restart_beyond_48_hours(
+    setup: tuple[Recorder, MemorySink, FakeKucoin],
+) -> None:
+    """Review of E2, third round (I-E2-06): XBTUSDTM's day stays open because KuCoin never
+    answers for its candles, and the process starts again three days later. Its minutes can
+    no longer be recovered, but the day is found in the database and closed as it is;
+    another start changes nothing."""
+    recorder, sink, fake = setup
+    fake.unreachable = {"XBTUSDTM"}
+    minute = MIDNIGHT - timedelta(minutes=2)
+
+    async def first_run() -> None:
+        await recorder.startup(START)
+        connect_both(recorder, START + timedelta(seconds=1))
+        feed(recorder, minute)
+        for moment in (minute + timedelta(seconds=62), MIDNIGHT + timedelta(seconds=16)):
+            await beat(recorder, moment)
+
+    run(first_run())
+    assert sink.closed_days == [("SPOT", "BTC-USDT", DAY)]
+    later = MIDNIGHT + timedelta(days=3, hours=1)
+    restarted = Recorder(sink, rest=recorder._rest)
+
+    async def second_run() -> None:
+        await restarted.startup(later)
+        await beat(restarted, later + timedelta(seconds=1))
+
+    run(second_run())
+    assert restarted.core is not None
+    waiting = restarted.core.awaiting_minutes("FUTURES", "XBTUSDTM")
+    assert [m for m in waiting if m < MIDNIGHT] == [], "older than 48 h: not asked again"
+    of_the_day = sorted(d for d in sink.closed_days if d[2] == DAY)
+    assert of_the_day == [("FUTURES", "XBTUSDTM", DAY), ("SPOT", "BTC-USDT", DAY)]
+    closed = len(sink.closed_days)
+    again = Recorder(sink, rest=recorder._rest)
+    run(again.startup(later + timedelta(minutes=5)))
+    run(beat(again, later + timedelta(minutes=5, seconds=1)))
+    assert len(sink.closed_days) == closed, "nothing is closed twice"
 
 
 def test_a_minute_settled_without_its_candle_is_final_once_its_day_is_closed(
@@ -487,7 +527,7 @@ def test_a_minute_settled_without_its_candle_is_final_once_its_day_is_closed(
         connect_both(recorder, START + timedelta(seconds=1))
         feed(recorder, minute)
         for answers in range(MAX_CANDLE_ATTEMPTS + 2):  # 23:59 is first asked at 00:01:02
-            await recorder.step(MIDNIGHT + timedelta(minutes=answers, seconds=2))
+            await beat(recorder, MIDNIGHT + timedelta(minutes=answers, seconds=2))
             assert (len(sink.closed_days) == 2) is (answers >= MAX_CANDLE_ATTEMPTS)
 
     run(scenario())
@@ -509,11 +549,11 @@ def test_incomplete_listings_are_evaluated_again_soon(
     recorder, sink, fake = setup
     run(recorder.startup(START))
     fake.futures = []  # KuCoin lists no contract at 23:59
-    run(recorder.step(MIDNIGHT - timedelta(minutes=1)))
+    run(beat(recorder, MIDNIGHT - timedelta(minutes=1)))
     assert {e.evaluated_at for e in sink.universe} == {START}
     assert recorder._next_evaluation == MIDNIGHT - timedelta(seconds=30)
     fake.futures = ["XBTUSDTM"]
-    run(recorder.step(MIDNIGHT - timedelta(seconds=30)))
+    run(beat(recorder, MIDNIGHT - timedelta(seconds=30)))
     assert {e.evaluated_at for e in sink.universe} == {START, MIDNIGHT}, "on time, for midnight"
     assert recorder._next_evaluation == MIDNIGHT + EVALUATION_TIME
 
@@ -528,11 +568,11 @@ def test_listings_missing_until_after_midnight_give_a_late_evaluation(
         await recorder.startup(START)
         fake.futures = []
         for moment in (MIDNIGHT - timedelta(minutes=1), MIDNIGHT - timedelta(seconds=30), MIDNIGHT):
-            await recorder.step(moment)
+            await beat(recorder, moment)
         assert {e.evaluated_at for e in sink.universe} == {START}, "never a partial universe"
         fake.futures = ["XBTUSDTM"]
         fake.spot = ["BTC-USDT", "ETH-USDT"]
-        await recorder.step(late)
+        await beat(recorder, late)
 
     run(scenario())
     assert {e.evaluated_at for e in sink.universe} == {START, late}
@@ -556,9 +596,9 @@ def test_a_stall_is_an_outage_never_a_healthy_connection(
         for market in ("SPOT", "FUTURES"):
             core.on_state(market, "connected", START + timedelta(seconds=1), "wss://...")
         recorder._last_beat = START + timedelta(seconds=2)  # as run() does
-        await recorder.step(START + timedelta(seconds=3))  # one second later: no stall
+        await beat(recorder, START + timedelta(seconds=3))  # one second later: no stall
         frozen_until = START + timedelta(minutes=2)
-        await recorder.step(frozen_until)  # the next beat comes two minutes late
+        await beat(recorder, frozen_until)  # the next beat comes two minutes late
 
     run(scenario())
     gaps = [g for t in sink.ticks for g in t.gaps if g.cause is GapCause.PROCESO_DETENIDO]

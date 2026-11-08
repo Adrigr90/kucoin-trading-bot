@@ -384,6 +384,64 @@ def test_only_an_index_minute_without_its_own_candle_can_be_given_up(
     given_up(ingest, symbol, minute, "S3")
 
 
+@pytest.mark.parametrize(
+    ("columns", "values"),
+    [
+        # A last candle without its flow channel: the CHECK would be NULL and the foreign key
+        # not checked, so it would stand without any flow row.
+        (
+            "series, flow_channel, flow_state, state, evidence, samples, volume, turnover",
+            "'last', NULL, 'S2', 'cerrada_rest', 'vela_rest_suficiente', NULL, 2, 200",
+        ),
+        # Own candles without their sample count or without the state of their flow.
+        (
+            "series, flow_channel, flow_state, state, evidence, samples, volume, turnover",
+            "'mark', 'mark-price', 'S1', 'cerrada_propia', 'construida_flujo', NULL, NULL, NULL",
+        ),
+        (
+            "series, flow_channel, flow_state, state, evidence, samples, volume, turnover",
+            "'index', 'mark-price', NULL, 'cerrada_propia', 'construida_flujo', 60, NULL, NULL",
+        ),
+    ],
+)
+def test_a_candle_never_stands_without_the_evidence_it_needs(
+    ingest: psycopg.Connection, symbol: str, columns: str, values: str
+) -> None:
+    """Review of E2, third round (I-E2-01): a NULL in a column the combination needs is
+    refused, never let through by a CHECK that evaluates to NULL."""
+    quality(ingest, symbol, "mark-price", T0, "S1")
+    with pytest.raises(errors.CheckViolation):
+        ingest.execute(
+            f"INSERT INTO market.candles (market, symbol, open_time, open, high, low, close,"
+            f" {columns}) VALUES ('FUTURES', %s, %s, 100, 101, 99, 100.5, {values})",
+            (symbol, T0),
+        )
+
+
+def test_a_data_minute_never_stands_without_its_candle(
+    ingest: psycopg.Connection, symbol: str
+) -> None:
+    """Review of E2, third round (I-E2-01): `datos` with no candle series would skip the
+    foreign key to the candle; it is refused. The legitimate rows still go in."""
+    quality(ingest, symbol, "trade", T0, "S2")
+    with pytest.raises(errors.CheckViolation):
+        ingest.execute(
+            "INSERT INTO market.minute_status (market, symbol, minute_start, status,"
+            " candle_state, flow_channel, flow_state, candle_series) VALUES ('FUTURES', %s,"
+            " %s, 'datos', 'cerrada_rest', 'trade', 'S2', NULL)",
+            (symbol, T0),
+        )
+    candle(
+        ingest, symbol, T0, state="cerrada_rest", evidence="vela_rest_suficiente", flow_state="S2"
+    )
+    ingest.execute(
+        "INSERT INTO market.minute_status (market, symbol, minute_start, status,"
+        " candle_state, flow_channel, flow_state, candle_series) VALUES ('FUTURES', %s,"
+        " %s, 'datos', 'cerrada_rest', 'trade', 'S2', 'last')",
+        (symbol, T0),
+    )
+
+
 def test_a_late_slot_with_no_book_in_force_has_no_sequence(
     ingest: psycopg.Connection, symbol: str
 ) -> None:

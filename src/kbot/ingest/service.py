@@ -66,6 +66,7 @@ log = structlog.get_logger("kbot.ingest")
 DAY = timedelta(days=1)
 EVALUATION_TIME = timedelta(hours=23, minutes=59)  # tomorrow's universe, from today's data
 EVALUATION_RETRY = timedelta(seconds=30)  # after incomplete listings
+CLOSE_LOOKBACK = timedelta(days=30)  # how far back start-up looks for days left unclosed
 FUNDING_EVERY = timedelta(minutes=10)
 SETTLED_EVERY = timedelta(hours=1)
 INDEX_DELAY = timedelta(minutes=2)  # Classic history of a minute, asked this long after it
@@ -124,7 +125,10 @@ class Recorder:
         resume = await self._db(self.sink.resume_points, specs)
         core = RecorderCore(specs, started_at=now, resume=resume)
         self.core = core
-        self._days_to_close = {day - DAY, day - 2 * DAY}
+        # The two days before, and any earlier day the database shows recorded but not closed
+        # (for example kept open by a candle that could no longer be recovered).
+        unclosed = await self._db(self.sink.unclosed_days, day - CLOSE_LOOKBACK, day)
+        self._days_to_close = {day - DAY, day - 2 * DAY, *unclosed}
         # What the previous run left pending and can still be recovered.
         oldest = floor_to(now - RECOVERY_HORIZON, MINUTE)
         candles = core.restore_awaiting(await self._db(self.sink.pending_candles, oldest))
@@ -510,13 +514,12 @@ class Recorder:
 
     def report_stall(self, start: datetime, end: datetime) -> None:
         """The recorder did not run from ``start`` to ``end``: whatever arrived or did not
-        arrive in between cannot be trusted, so both connections count as down."""
+        arrive in between cannot be trusted. A connection that was up counts as down for that
+        time; one that was already down stays down (``RecorderCore.on_stall``)."""
         core = self._require_core()
         seconds = (end - start).total_seconds()
         log.warning("recorder_stalled", start=start.isoformat(), seconds=round(seconds, 1))
-        for market in MARKETS:
-            core.on_state(market, "disconnected", start, f"Stall: did not run for {seconds:.0f} s")
-            core.on_state(market, "connected", end, "stall over")
+        core.on_stall(start, end, f"Stall: did not run for {seconds:.0f} s")
 
     def _check_stall(self, now: datetime) -> None:
         """Called by the watchdog every second and by every step before it closes anything,
@@ -578,6 +581,8 @@ class Recorder:
                 subscriptions,
                 on_message=lambda message, at, m=market: core.on_message(m, message, at),
                 on_state=lambda state, at, detail, m=market: core.on_state(m, state, at, detail),
+                # Pongs and acknowledgements are proofs of life too (RecorderCore._proven).
+                on_control=lambda _message, at, m=market: core.on_alive(m, at),
                 pacer=pacer,
             )
             streams.append((stop, asyncio.create_task(stream.run(stop))))

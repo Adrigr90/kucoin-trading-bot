@@ -7,7 +7,7 @@ from decimal import Decimal
 
 import pytest
 
-from kbot.ingest.core import MAX_CANDLE_ATTEMPTS, InstrumentSpec, RecorderCore
+from kbot.ingest.core import MAX_CANDLE_ATTEMPTS, InstrumentSpec, RecorderCore, TickOutput
 from kbot.market.depth import SlotState
 from kbot.market.gaps import GapCause
 from kbot.market.last_candles import (
@@ -18,7 +18,7 @@ from kbot.market.last_candles import (
     ws_kline,
 )
 from kbot.market.mark_candles import Evidence, FlowState
-from tests.unit.ingest.messages import book, kline, mark, rest_row, trade
+from tests.unit.ingest.messages import book, kline, mark, pong, rest_row, trade
 
 T0 = datetime(2026, 11, 7, 12, 0, tzinfo=UTC)
 
@@ -40,6 +40,12 @@ def core(*specs: InstrumentSpec, **kwargs: object) -> RecorderCore:
 def connect(recorder: RecorderCore, moment: datetime) -> None:
     for market in ("SPOT", "FUTURES"):
         recorder.on_state(market, "connected", moment, "wss://...")
+
+
+def tick(recorder: RecorderCore, moment: datetime) -> TickOutput:
+    """A tick right after a pong on both connections: everything up to ``moment`` proven."""
+    pong(recorder, moment)
+    return recorder.tick(moment)
 
 
 def feed_minute(recorder: RecorderCore, minute: datetime, *, with_marks: bool = True) -> None:
@@ -84,7 +90,7 @@ def test_a_whole_minute_is_closed_and_written_in_order() -> None:
     recorder = core()
     connect(recorder, at(0))
     feed_minute(recorder, at(0))
-    out = recorder.tick(at(62))
+    out = tick(recorder, at(62))
     assert {(s.symbol, s.depth) for s in out.slots} == {
         ("BTC-USDT", 5),
         ("BTC-USDT", 50),
@@ -127,7 +133,7 @@ def test_a_disconnection_gives_gaps_desconectado_slots_and_an_index_rebuild() ->
     feed_minute(recorder, at(0))
     recorder.on_state("FUTURES", "disconnected", at(30), "ProtocolViolation: no pong in time")
     recorder.on_state("FUTURES", "connected", at(35), "wss://...")
-    out = recorder.tick(at(62))
+    out = tick(recorder, at(62))
     states = [s.state for s in out.slots if s.depth == 5]
     assert states[3] is SlotState.DESCONECTADO and states[0] is SlotState.VALIDA
     assert {(g.channel, g.cause) for g in out.gaps} == {
@@ -139,6 +145,97 @@ def test_a_disconnection_gives_gaps_desconectado_slots_and_an_index_rebuild() ->
         ("XBTUSDTM", ".KXBTUSDT", at(0))
     ]
     assert {f.flow_state for f in out.flows} == {FlowState.S2}
+
+
+def test_nothing_is_closed_as_healthy_without_a_later_proof_of_life() -> None:
+    """Review of E2, third round (I-E2-03): the last message arrives at 1 s and the stream
+    notices the dead connection only at 24 s, dating the outage from that last proof of
+    life. Until then nothing after the proof is closed, so the outage never contradicts a
+    slot already written as valid."""
+    recorder = core(SPOT)
+    connect(recorder, at(0))
+    recorder.on_message("SPOT", book("SPOT", "BTC-USDT", 1, at(1)), at(1))
+    assert recorder.tick(at(12)).slots == [], "no proof of life after the slot's deadline"
+    recorder.on_state("SPOT", "disconnected", at(1), "ProtocolViolation: no pong in time")
+    out = recorder.tick(at(24))
+    assert [(s.slot_start, s.state) for s in out.slots if s.depth == 5] == [
+        (at(0), SlotState.DESCONECTADO),
+        (at(10), SlotState.DESCONECTADO),
+    ]
+    assert all(s.metrics is None for s in out.slots)
+
+    healthy = core(SPOT)
+    connect(healthy, at(0))
+    healthy.on_message("SPOT", book("SPOT", "BTC-USDT", 1, at(1)), at(1))
+    healthy.on_alive("SPOT", at(12))  # a pong: the connection was alive after the deadline
+    assert [s.state for s in healthy.tick(at(12)).slots if s.depth == 5] == [SlotState.VALIDA]
+
+
+@pytest.mark.parametrize("earlier_book", [False, True])
+def test_a_late_book_is_seen_before_its_slot_closes(earlier_book: bool) -> None:
+    """Review of E2, third round (I-E2-04): with a 2 s margin the slot [0, 10) cannot close at
+    12 s without a proof of life; the book published at 9.5 s arrives at 13 s and the slot
+    closes fuera_de_plazo, with or without an earlier book."""
+    recorder = core(SPOT)
+    connect(recorder, at(0))
+    if earlier_book:
+        recorder.on_message("SPOT", book("SPOT", "BTC-USDT", 1, at(1)), at(1))
+    assert recorder.tick(at(12)).slots == []
+    recorder.on_message("SPOT", book("SPOT", "BTC-USDT", 2, at(9.5)), at(13))
+    (first,) = [s for s in recorder.tick(at(13)).slots if s.depth == 5]
+    assert first.state is SlotState.FUERA_DE_PLAZO
+    assert first.sequence == (1 if earlier_book else None)
+
+
+def test_a_book_for_a_slot_already_closed_is_an_anomaly() -> None:
+    """If a book still comes for a closed slot (the connection broke its order), it is never
+    a valid book for the following slots: they are libro_inconsistente until a new one."""
+    recorder = core(SPOT)
+    connect(recorder, at(0))
+    recorder.on_message("SPOT", book("SPOT", "BTC-USDT", 1, at(1)), at(1))
+    assert [s.state for s in tick(recorder, at(12)).slots if s.depth == 5] == [SlotState.VALIDA]
+    recorder.on_message("SPOT", book("SPOT", "BTC-USDT", 2, at(9.5)), at(13))
+    assert [s.state for s in tick(recorder, at(22)).slots if s.depth == 5] == [
+        SlotState.LIBRO_INCONSISTENTE
+    ]
+    recorder.on_message("SPOT", book("SPOT", "BTC-USDT", 3, at(25)), at(25))
+    assert [s.state for s in tick(recorder, at(32)).slots if s.depth == 5] == [SlotState.VALIDA]
+
+
+def test_a_stall_never_reconnects_a_connection_that_was_down() -> None:
+    """Review of E2, third round (I-E2-05): the connection drops at 10 s, then the process
+    is suspended from 20 to 40 s. The stall does not declare it connected: its gap stays
+    open and nothing after 10 s is healthy until the stream really reconnects."""
+    recorder = core(SPOT)
+    connect(recorder, at(0))
+    recorder.on_message("SPOT", book("SPOT", "BTC-USDT", 1, at(1)), at(1))
+    recorder.on_state("SPOT", "disconnected", at(10), "ConnectionClosedError: no close frame")
+    recorder.on_stall(at(20), at(40), "Stall: did not run for 20 s")
+    out = tick(recorder, at(60))
+    assert [g for g in out.gaps if g.symbol == "BTC-USDT"] == [], "its gap is still open"
+    assert {s.state for s in out.slots if s.slot_start >= at(10)} == {SlotState.DESCONECTADO}
+    recorder.on_state("SPOT", "connected", at(70), "wss://...")
+    gaps = {(g.channel, g.start_at, g.end_at, g.cause) for g in tick(recorder, at(72)).gaps}
+    assert ("trade", at(10), at(70), GapCause.DESCONEXION) in gaps
+
+
+def test_a_stall_on_a_live_connection_is_an_outage_from_its_last_proof_of_life() -> None:
+    recorder = core(SPOT)
+    connect(recorder, at(0))
+    recorder.on_message("SPOT", book("SPOT", "BTC-USDT", 1, at(1)), at(1))
+    recorder.on_alive("SPOT", at(15))
+    recorder.on_stall(at(20), at(40), "Stall: did not run for 20 s")
+    out = recorder.tick(at(60))  # no proof of life after the stall yet
+    states = {s.slot_start: s.state for s in out.slots if s.depth == 5}
+    assert states == {
+        at(0): SlotState.VALIDA,
+        at(10): SlotState.DESCONECTADO,  # from the pong at 15 s, the last proof of life
+        at(20): SlotState.DESCONECTADO,
+    }, "[30, 40) waits: the slot after it cannot close before a proof of life"
+    stall = [g for g in out.gaps if g.channel == "trade"]
+    assert [(g.start_at, g.end_at, g.cause) for g in stall] == [
+        (at(15), at(40), GapCause.PROCESO_DETENIDO)
+    ]
 
 
 def test_messages_of_unknown_instruments_or_topics_are_anomalies() -> None:
@@ -157,7 +254,7 @@ def test_a_malformed_trade_degrades_its_minute() -> None:
     bad = trade("SPOT", "BTC-USDT", at(5))
     bad["d"]["p"] = "NaN"
     recorder.on_message("SPOT", bad, at(5))
-    out = recorder.tick(at(62))
+    out = tick(recorder, at(62))
     trade_flow = next(f for f in out.flows if f.channel == "trade")
     assert trade_flow.flow_state is FlowState.S2 and trade_flow.anomalies == 1
 
@@ -166,7 +263,7 @@ def test_answers_without_the_candle_are_limited_attempts() -> None:
     recorder = core(SPOT)
     connect(recorder, at(0))
     feed_minute(recorder, at(0))
-    recorder.tick(at(62))
+    tick(recorder, at(62))
     moment = at(75)
     for attempt in range(MAX_CANDLE_ATTEMPTS):
         (request,) = recorder.candle_requests(moment)
@@ -186,7 +283,7 @@ def test_failed_requests_never_use_up_the_attempts() -> None:
     recorder = core(SPOT)
     connect(recorder, at(0))
     feed_minute(recorder, at(0))
-    recorder.tick(at(62))
+    tick(recorder, at(62))
     moment = at(75)
     for pause in (1, 2, 4, 8, 15, 15, 15):
         (request,) = recorder.candle_requests(moment)
@@ -204,7 +301,7 @@ def test_a_minute_never_answered_is_given_up_after_48_hours() -> None:
     recorder = core(SPOT)
     connect(recorder, at(0))
     feed_minute(recorder, at(0))
-    recorder.tick(at(62))
+    tick(recorder, at(62))
     for moment in (at(75), at(48 * 3600 - 200)):  # the second one, 200 s before 48 h
         (request,) = recorder.candle_requests(moment)
         recorder.apply_rest_candles(request, None, moment)
@@ -219,7 +316,7 @@ def test_a_minute_seen_on_the_websocket_waits_for_its_rest_candle() -> None:
     recorder = core(SPOT)
     connect(recorder, at(0))
     feed_minute(recorder, at(0))
-    recorder.tick(at(62))
+    tick(recorder, at(62))
     (request,) = recorder.candle_requests(at(75))
     assert recorder.apply_rest_candles(request, [], at(75)) == []  # pendiente: ask again
     (again,) = recorder.candle_requests(at(135))
@@ -234,7 +331,7 @@ def test_the_websocket_candle_leaves_memory_with_its_flow() -> None:
     recorder = core(SPOT)
     connect(recorder, at(0))
     feed_minute(recorder, at(0))
-    out = recorder.tick(at(62))
+    out = tick(recorder, at(62))
     (ws,) = out.ws_candles
     assert (ws.market, ws.symbol, ws.candle.open_time) == ("SPOT", "BTC-USDT", at(0))
     assert ws.published_at == at(30) and ws.candle.volume == Decimal(2)
@@ -292,7 +389,7 @@ def test_a_restart_resumes_where_the_database_says() -> None:
     }
     recorder = core(FUT, resume=resume)
     connect(recorder, at(2))
-    out = recorder.tick(at(62))
+    out = tick(recorder, at(62))
     gaps = {(g.channel, g.start_at, g.end_at, g.cause) for g in out.gaps}
     assert (("trade", stopped, at(2), GapCause.PROCESO_DETENIDO)) in gaps
     slot_states = [s.state for s in out.slots if s.depth == 5]
@@ -311,7 +408,7 @@ def test_old_resume_points_are_limited_but_the_gap_covers_the_whole_stop() -> No
     resume = {(SPOT.market, SPOT.symbol, c): stopped for c in ("obu5", "obu50", "trade", "kline")}
     recorder = core(SPOT, resume=resume, max_backfill=timedelta(hours=1))
     connect(recorder, at(0))
-    out = recorder.tick(at(10))
+    out = tick(recorder, at(10))
     trade_gap = next(g for g in out.gaps if g.channel == "trade")
     assert trade_gap.start_at == stopped
     assert min(s.slot_start for s in out.slots) == at(-3600)
@@ -323,14 +420,14 @@ def test_the_universe_changes_at_midnight() -> None:
     for market in ("SPOT", "FUTURES"):
         recorder.on_state(market, "connected", midnight - timedelta(minutes=2), "wss://...")
     feed_minute(recorder, midnight - timedelta(minutes=1), with_marks=False)
-    recorder.tick(midnight - timedelta(seconds=30))
+    tick(recorder, midnight - timedelta(seconds=30))
 
     changed = recorder.apply_universe([SPOT, FUT], midnight)  # ETH leaves, XBT enters
     assert changed
     assert [s.symbol for s in recorder.specs] == ["BTC-USDT", "XBTUSDTM"]
     assert recorder.apply_universe([SPOT, FUT], midnight) is False, "nothing changes twice"
 
-    out = recorder.tick(midnight + timedelta(minutes=5))
+    out = tick(recorder, midnight + timedelta(minutes=5))
     eth_slots = [s for s in out.slots if s.symbol == "ETH-USDT"]
     assert eth_slots and max(s.slot_start for s in eth_slots) < midnight, "ETH stops at midnight"
     xbt_slots = [s for s in out.slots if s.symbol == "XBTUSDTM"]
@@ -352,7 +449,7 @@ def test_the_universe_changes_at_midnight() -> None:
         CandleState.AUSENCIA_SIN_TRADES,
         CandleState.CERRADA_CRUZADA,
     ]
-    recorder.tick(midnight + timedelta(minutes=6))
+    tick(recorder, midnight + timedelta(minutes=6))
     assert recorder.awaiting_until(midnight) == 2, "only the two minutes of BTC still wait"
 
 

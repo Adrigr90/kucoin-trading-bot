@@ -71,6 +71,19 @@ def mark(symbol: str, at: datetime, mp: str = "100", ip: str = "101") -> dict[st
     }
 
 
+def pong(core: Any, moment: datetime) -> None:
+    """A pong on both connections at ``moment``: the proof of life without which nothing
+    after the last message received is closed (``RecorderCore._proven``)."""
+    for market in ("SPOT", "FUTURES"):
+        core.on_alive(market, moment)
+
+
+async def beat(recorder: Any, moment: datetime) -> None:
+    """One step of the recorder, after a pong on both connections at that moment."""
+    pong(recorder.core, moment)
+    await recorder.step(moment)
+
+
 def rest_row(minute: datetime) -> list[object]:
     return [seconds(minute), "100", "101", "99", "100.5", "2", "201"]
 

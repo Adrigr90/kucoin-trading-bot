@@ -21,7 +21,7 @@ from kbot.ingest.sinks import DatabaseSink
 from kbot.kucoin.ratelimit import RestRateLimiter
 from kbot.kucoin.rest import KucoinRestClient
 from tests.unit.ingest.fake_kucoin import FakeKucoin
-from tests.unit.ingest.messages import feed_minute, rest_candles_until
+from tests.unit.ingest.messages import beat, book, feed_minute, rest_candles_until
 
 pytestmark = pytest.mark.db
 
@@ -53,8 +53,8 @@ def test_the_recorder_writes_a_consistent_day_and_resumes(
             for market in ("SPOT", "FUTURES"):
                 core.on_state(market, "connected", start + timedelta(seconds=1), "wss://...")
             feed_minute(core, midnight - timedelta(minutes=2), spot, futures)
-            await recorder.step(midnight - timedelta(minutes=2))
-            await recorder.step(midnight - timedelta(minutes=1))
+            await beat(recorder, midnight - timedelta(minutes=2))
+            await beat(recorder, midnight - timedelta(minutes=1))
             feed_minute(core, midnight - timedelta(minutes=1), spot, futures)
             core.on_state(
                 "FUTURES",
@@ -63,10 +63,10 @@ def test_the_recorder_writes_a_consistent_day_and_resumes(
                 "ConnectionClosedError: no close frame received or sent",
             )
             core.on_state("FUTURES", "connected", midnight - timedelta(seconds=35), "wss://...")
-            await recorder.step(midnight - timedelta(seconds=44))
-            await recorder.step(midnight)
-            await recorder.step(midnight + timedelta(seconds=16))
-            await recorder.step(midnight + timedelta(minutes=2, seconds=1))
+            await beat(recorder, midnight - timedelta(seconds=44))
+            await beat(recorder, midnight)
+            await beat(recorder, midnight + timedelta(seconds=16))
+            await beat(recorder, midnight + timedelta(minutes=2, seconds=1))
 
         asyncio.run(first_run())
 
@@ -166,7 +166,7 @@ def test_the_recorder_writes_a_consistent_day_and_resumes(
             assert core is not None
             for market in ("SPOT", "FUTURES"):
                 core.on_state(market, "connected", restart + timedelta(seconds=2), "wss://...")
-            await restarted.step(restart + timedelta(seconds=30))
+            await beat(restarted, restart + timedelta(seconds=30))
 
         asyncio.run(second_run())
         stop_gaps = rows(
@@ -232,7 +232,7 @@ def test_pending_work_survives_restarts(connect: Connect, test_client: Factory) 
                 "ConnectionClosedError: no close frame received or sent",
             )
             first.core.on_state("FUTURES", "connected", minute + timedelta(seconds=45), "wss://")
-            await first.step(minute + timedelta(seconds=62))  # 23:58 written, nothing asked
+            await beat(first, minute + timedelta(seconds=62))  # 23:58 written, nothing asked
 
         asyncio.run(first_run())
         assert rows(
@@ -256,8 +256,8 @@ def test_pending_work_survives_restarts(connect: Connect, test_client: Factory) 
             assert second.core.awaiting_minutes("FUTURES", futures) == [minute]
             assert sorted(m for _, m in second._index) == [minute - timedelta(minutes=1), minute]
             connected(second, minute + timedelta(seconds=71))
-            await second.step(minute + timedelta(seconds=75))  # the REST candles
-            await second.step(minute + timedelta(minutes=3, seconds=1))  # Classic
+            await beat(second, minute + timedelta(seconds=75))  # the REST candles
+            await beat(second, minute + timedelta(minutes=3, seconds=1))  # Classic
 
         asyncio.run(second_run())
         last = rows(
@@ -328,7 +328,7 @@ def test_a_recoverable_candle_keeps_its_day_open(connect: Connect, test_client: 
                 first.core.on_state(market, "connected", start + timedelta(seconds=1), "wss://")
             feed_minute(first.core, minute, spot, futures)
             for moment in steps:
-                await first.step(moment)
+                await beat(first, moment)
 
         asyncio.run(first_run())
         assert statuses(spot) == (1440,)
@@ -339,7 +339,7 @@ def test_a_recoverable_candle_keeps_its_day_open(connect: Connect, test_client: 
 
         async def second_run() -> None:
             await second.startup(midnight + timedelta(hours=9))
-            await second.step(midnight + timedelta(hours=9, seconds=1))
+            await beat(second, midnight + timedelta(hours=9, seconds=1))
 
         asyncio.run(second_run())
         assert conn.execute(
@@ -355,9 +355,112 @@ def test_a_recoverable_candle_keeps_its_day_open(connect: Connect, test_client: 
 
         async def third_run() -> None:
             await third.startup(midnight + timedelta(hours=9, minutes=5))
-            await third.step(midnight + timedelta(hours=9, minutes=5, seconds=1))
+            await beat(third, midnight + timedelta(hours=9, minutes=5, seconds=1))
 
         asyncio.run(third_run())
         assert third.core is not None
         assert [m for m in third.core.awaiting_minutes("FUTURES", futures) if m < midnight] == []
         assert (statuses(spot), statuses(futures)) == ((1440,), (1440,))
+
+
+def day_statuses(conn: psycopg.Connection, symbol: str, day: datetime) -> object:
+    return conn.execute(
+        "SELECT count(*) FROM market.minute_status WHERE symbol = %s"
+        " AND minute_start >= %s AND minute_start < %s",
+        (symbol, day, day + timedelta(days=1)),
+    ).fetchone()
+
+
+def test_a_day_left_open_is_closed_after_a_restart_beyond_48_hours(
+    connect: Connect, test_client: Factory
+) -> None:
+    """Review of E2, third round (I-E2-06), in PostgreSQL: the contract's day stays open
+    because KuCoin never answers for its candles, and the process starts again three days
+    later. Its minutes are past the 48 h and are not asked for again, but the day is found
+    in the database and closed as it is; another start changes nothing."""
+    day = datetime(2020, 1, 1, tzinfo=UTC) + timedelta(days=secrets.randbelow(2000))
+    midnight = day + timedelta(days=1)
+    start = midnight - timedelta(minutes=2, seconds=30)
+    minute = midnight - timedelta(minutes=2)
+    spot = "S" + secrets.token_hex(4).upper() + "-USDT"
+    futures = "F" + secrets.token_hex(4).upper() + "USDTM"
+    fake = FakeKucoin(
+        spot=[spot], futures=[futures], candles=rest_candles_until(midnight + timedelta(hours=1))
+    )
+    fake.unreachable = {futures}
+    later = midnight + timedelta(days=3, hours=1)
+
+    with connect("kbot_ingest") as conn:
+        sink = DatabaseSink(conn)
+        rest = test_client(fake, RestRateLimiter(pool_weight=10**6))
+        first = Recorder(sink, rest=rest)
+
+        async def first_run() -> None:
+            await first.startup(start)
+            assert first.core is not None
+            for market in ("SPOT", "FUTURES"):
+                first.core.on_state(market, "connected", start + timedelta(seconds=1), "wss://")
+            feed_minute(first.core, minute, spot, futures)
+            for moment in (minute + timedelta(seconds=62), midnight + timedelta(seconds=16)):
+                await beat(first, moment)
+
+        asyncio.run(first_run())
+        assert (day_statuses(conn, spot, day), day_statuses(conn, futures, day)) == ((1440,), (0,))
+
+        for moment in (later, later + timedelta(minutes=5)):  # two starts three days later
+            restarted = Recorder(sink, rest=rest)
+
+            async def run_again(at: datetime = moment, recorder: Recorder = restarted) -> None:
+                await recorder.startup(at)
+                await beat(recorder, at + timedelta(seconds=1))
+
+            asyncio.run(run_again())
+            assert day_statuses(conn, futures, day) == (1440,)
+        assert conn.execute(
+            "SELECT status, candle_state FROM market.minute_status"
+            " WHERE symbol = %s AND minute_start = %s",
+            (futures, minute),
+        ).fetchall() == [("sin_explicar", "pendiente_estabilizacion")], "no candle: as it is"
+
+
+def test_a_late_disconnection_never_contradicts_a_valid_slot(
+    connect: Connect, test_client: Factory
+) -> None:
+    """Review of E2, third round (I-E2-03), in PostgreSQL: the last message arrives at
+    12:00:01 and the stream notices the dead connection at 12:00:24, dating the outage from
+    that last proof of life. The slot [12:00:00, 12:00:10) is not written before the outage
+    is known, and then only as desconectado, without metrics."""
+    start = datetime(2020, 1, 1, 12, tzinfo=UTC) + timedelta(days=secrets.randbelow(2000))
+    spot = "S" + secrets.token_hex(4).upper() + "-USDT"
+    futures = "F" + secrets.token_hex(4).upper() + "USDTM"
+    fake = FakeKucoin(spot=[spot], futures=[futures])
+
+    with connect("kbot_ingest") as conn:
+        sink = DatabaseSink(conn)
+        recorder = Recorder(sink, rest=test_client(fake, RestRateLimiter(pool_weight=10**6)))
+
+        async def scenario() -> None:
+            await recorder.startup(start)
+            core = recorder.core
+            assert core is not None
+            core.on_state("SPOT", "connected", start, "wss://")
+            last = start + timedelta(seconds=1)  # the last message ever received
+            core.on_message("SPOT", book("SPOT", spot, 1, last), last)
+            await recorder.step(start + timedelta(seconds=12))  # no proof of life after it
+            core.on_state(
+                "SPOT", "disconnected", start + timedelta(seconds=1), "ProtocolViolation: no pong"
+            )
+            await recorder.step(start + timedelta(seconds=24))
+
+        asyncio.run(scenario())
+        slots = conn.execute(
+            "SELECT s.slot_start, s.state, m.slot_start IS NOT NULL"
+            " FROM market.depth_slot_status s LEFT JOIN market.depth_metrics m"
+            " USING (market, symbol, depth, slot_start)"
+            " WHERE s.symbol = %s AND s.depth = 5 ORDER BY s.slot_start",
+            (spot,),
+        ).fetchall()
+        assert slots == [
+            (start, "desconectado", False),
+            (start + timedelta(seconds=10), "desconectado", False),
+        ]

@@ -16,6 +16,7 @@ from kbot.market.depth import (
     DepthChannel,
     SlotState,
     compute_metrics,
+    effective_state,
     parse_snapshot,
     slot_start,
 )
@@ -197,6 +198,73 @@ def test_a_late_book_with_no_earlier_one_makes_the_slot_late_not_missing() -> No
     assert (slots[0].sequence, slots[0].age_ms) == (None, None), "no book was in force"
     following, _ = ch.close_until(at(21), timedelta(seconds=1))
     assert states(following) == ["valida"] and following[0].sequence == 1
+
+
+def test_a_late_book_is_stored_and_its_slot_counts_as_late() -> None:
+    """Review of E2, fourth round (I-E2-04), the reviewer's sequence: [0, 10) is closed as
+    valid at 12 s, a book published at 9.5 s arrives at 13 s and a correct one at 14 s,
+    before the next close. [10, 20) is valid with the correct book; the late book is kept
+    for the database, so [0, 10) counts as fuera_de_plazo from then on."""
+    ch = channel()
+    ch.connection_up(at(0))
+    ch.on_message(book(1, at(1)), at(1))
+    slots, _ = ch.close_until(at(12), timedelta(seconds=2))
+    assert states(slots) == ["valida"]
+    ch.on_message(book(2, at(9.5)), at(13))
+    ch.on_message(book(3, at(14)), at(14))
+    (late,) = ch.take_late_books()
+    assert (late.slot_start, late.last_slot_start, late.sequence) == (at(0), at(0), 2)
+    assert (late.published_at, late.received_at) == (at(9.5), at(13))
+    assert ch.take_late_books() == [], "handed over once"
+    slots, _ = ch.close_until(at(22), timedelta(seconds=2))
+    assert states(slots) == ["valida"] and slots[0].sequence == 3
+    assert effective_state(SlotState.VALIDA, True) is SlotState.FUERA_DE_PLAZO
+    assert effective_state(SlotState.NO_RECIBIDA, True) is SlotState.FUERA_DE_PLAZO
+    for state in (SlotState.DESCONECTADO, SlotState.LIBRO_INCONSISTENTE, SlotState.FUERA_DE_PLAZO):
+        assert effective_state(state, True) is state, "already not healthy, or already late"
+    assert effective_state(SlotState.VALIDA, False) is SlotState.VALIDA
+
+
+def test_a_late_book_contradicts_every_slot_closed_since_its_own() -> None:
+    ch = channel()
+    ch.connection_up(at(0))
+    ch.on_message(book(1, at(1)), at(1))
+    assert states(ch.close_until(at(32), timedelta(seconds=2))[0]) == ["valida"] * 3
+    ch.on_message(book(2, at(9.5)), at(33))
+    (late,) = ch.take_late_books()
+    assert (late.slot_start, late.last_slot_start) == (at(0), at(20))
+    slots, _ = ch.close_until(at(42), timedelta(seconds=2))
+    assert states(slots) == ["libro_inconsistente"], "never a valid book for what follows"
+
+
+def test_a_book_published_before_the_subscription_is_not_late() -> None:
+    """A book KuCoin published before the connection subscribed again describes the book it
+    had then: it is not late, and it is valid with its age."""
+    ch = channel()
+    ch.connection_up(at(0))
+    ch.connection_down(at(5))
+    ch.close_until(at(30), timedelta(seconds=2))  # [0, 10) and [10, 20): desconectado
+    ch.connection_up(at(25))
+    ch.on_message(book(4, at(15)), at(26))  # published in [10, 20), before subscribing
+    assert ch.take_late_books() == []
+    slots, _ = ch.close_until(at(42), timedelta(seconds=2))
+    assert states(slots) == ["desconectado", "valida"]
+    assert (slots[1].sequence, slots[1].age_ms) == (4, 25_000)
+
+
+def test_a_contradicted_slot_never_gives_the_snapshot_of_its_minute() -> None:
+    ch = channel(started=-0.001)
+    ch.connection_up(at(0))
+    for sequence, moment in ((1, 5), (2, 25), (3, 45)):
+        ch.on_message(book(sequence, at(moment)), at(moment))
+    ch.close_until(at(50), NO_LATENESS)  # [0, 50) valid; the minute is still open
+    ch.on_message(book(4, at(35)), at(50.5))  # published in [30, 40), already closed
+    (late,) = ch.take_late_books()
+    assert (late.slot_start, late.last_slot_start) == (at(30), at(40))
+    slots, minutes = ch.close_until(at(60), NO_LATENESS)
+    assert states(slots) == ["libro_inconsistente"]
+    (minute,) = minutes
+    assert (minute.slot_start, minute.snapshot.sequence) == (at(20), 2), "the last one standing"
 
 
 def test_a_book_published_after_the_end_belongs_to_the_next_slot() -> None:

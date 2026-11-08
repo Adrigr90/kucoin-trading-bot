@@ -14,12 +14,13 @@ from datetime import UTC, datetime, timedelta
 import psycopg
 from psycopg.types.json import Jsonb
 
-from kbot.market.depth import SLOT_SECONDS, MinuteSnapshot, SlotResult
+from kbot.market.depth import SLOT_SECONDS, LateBook, MinuteSnapshot, SlotResult
 from kbot.market.gaps import DataGap
 from kbot.market.last_candles import (
     CandleDecision,
     CandleState,
     FlowMinute,
+    LateTrading,
     MinuteStatus,
     Ohlcv,
     PendingCandle,
@@ -126,6 +127,64 @@ def write_depth(
         )
 
 
+def write_late_books(conn: psycopg.Connection, books: Iterable[LateBook]) -> None:
+    """Books that arrived after their slot was closed (review of E2, fourth round). Both
+    slots they name were closed, and written, before the book arrived."""
+    with conn.transaction(), conn.cursor() as cur:
+        cur.executemany(
+            "INSERT INTO market.depth_late_books (market, symbol, depth, slot_start,"
+            " last_slot_start, sequence, published_at, received_at)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
+            [
+                (
+                    b.market,
+                    b.symbol,
+                    b.depth,
+                    b.slot_start,
+                    b.last_slot_start,
+                    b.sequence,
+                    b.published_at,
+                    b.received_at,
+                )
+                for b in books
+            ],
+        )
+
+
+def write_late_trading(conn: psycopg.Connection, items: Iterable[LateTrading]) -> None:
+    """Trading seen in a minute closed as S1 without any (review of E2, fourth round)."""
+    with conn.transaction(), conn.cursor() as cur:
+        cur.executemany(
+            "INSERT INTO market.trading_seen_late (market, symbol, minute_start, channel,"
+            " received_at) VALUES (%s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
+            [(t.market, t.symbol, t.minute, t.channel, t.received_at) for t in items],
+        )
+
+
+def slot_states(
+    conn: psycopg.Connection,
+    market: str,
+    symbol: str,
+    depth: int,
+    start: datetime,
+    end: datetime,
+) -> dict[datetime, str]:
+    """What each slot in [start, end) counts as (02 §3.5): its terminal state, except that a
+    slot written ``valida`` or ``no_recibida`` between the slot of a late book and the last
+    slot closed when it arrived counts as ``fuera_de_plazo`` (``depth.effective_state``).
+    Readers of the depth use this, never ``depth_slot_status`` alone."""
+    rows = conn.execute(
+        "SELECT s.slot_start, CASE WHEN s.state IN ('valida', 'no_recibida') AND EXISTS ("
+        "   SELECT 1 FROM market.depth_late_books AS l WHERE l.market = s.market"
+        "   AND l.symbol = s.symbol AND l.depth = s.depth AND l.slot_start <= s.slot_start"
+        "   AND l.last_slot_start >= s.slot_start) THEN 'fuera_de_plazo' ELSE s.state END"
+        " FROM market.depth_slot_status AS s WHERE s.market = %s AND s.symbol = %s"
+        " AND s.depth = %s AND s.slot_start >= %s AND s.slot_start < %s ORDER BY s.slot_start",
+        (market, symbol, depth, start, end),
+    ).fetchall()
+    return {row[0]: row[1] for row in rows}
+
+
 def write_gap(conn: psycopg.Connection, gap: DataGap) -> None:
     conn.execute(
         "INSERT INTO market.data_gaps (market, channel, symbol, start_at, end_at, cause,"
@@ -189,7 +248,9 @@ def write_flow(conn: psycopg.Connection, minutes: Iterable[FlowMinute]) -> None:
 def fill_missing_flow(
     conn: psycopg.Connection, market: str, symbol: str, channel: str, day: datetime
 ) -> None:
-    """S3 for every minute of ``day`` with no flow row: nothing was recording it."""
+    """S3 for every minute of ``day`` with no flow row: nothing was recording it. Only for
+    a day whose minutes the recorder has all closed (``RecorderCore.closed_through``), so a
+    minute still open in memory is never taken for one that nobody recorded."""
     conn.execute(
         "INSERT INTO market.data_quality_minute (market, symbol, channel, minute_start,"
         " flow_state, messages, anomalies, sequence_breaks, reconnections)"
@@ -331,6 +392,14 @@ def close_day(conn: psycopg.Connection, market: str, symbol: str, day: datetime)
         flows = {m: FlowState(state) for channel, m, state, _ in rows if channel == "trade"}
         trades = {m: messages for channel, m, _, messages in rows if channel == "trade"}
         klines = {m: messages for channel, m, _, messages in rows if channel == "kline"}
+        late = {
+            row[0]
+            for row in conn.execute(
+                "SELECT minute_start FROM market.trading_seen_late WHERE market = %s"
+                " AND symbol = %s AND minute_start >= %s AND minute_start < %s",
+                (market, symbol, day, end),
+            ).fetchall()
+        }
         states = {
             row[0]: CandleState(row[1])
             for row in conn.execute(
@@ -342,13 +411,42 @@ def close_day(conn: psycopg.Connection, market: str, symbol: str, day: datetime)
         for minute, flow in flows.items():
             if minute not in states:
                 states[minute] = state_without_candle(
-                    flow, klines.get(minute, 0), trades.get(minute, 0)
+                    flow, klines.get(minute, 0), trades.get(minute, 0), seen_late=minute in late
                 )
         statuses = day_close(
             day, flows, states, trade_gaps(conn, market, symbol, day), market=market, symbol=symbol
         )
         write_minute_status(conn, statuses)
     return len(statuses)
+
+
+def minute_statuses(
+    conn: psycopg.Connection, market: str, symbol: str, day: datetime
+) -> dict[datetime, tuple[str, str]]:
+    """What each minute of a closed day counts as (02 §3.5): its terminal status and candle
+    state, except where the WebSocket saw trading only after the minute was closed and
+    after it was decided (``trading_seen_late``): a probable absence of trades counts as
+    ``sin_explicar`` (still pending), and a zero-volume REST candle that agreed with a
+    WebSocket that had seen nothing counts as ``discrepante``. Readers use this, never
+    ``minute_status`` alone."""
+    rows = conn.execute(
+        "SELECT s.minute_start,"
+        " CASE WHEN l.minute_start IS NOT NULL AND s.status = 'sin_operaciones_probable'"
+        "   THEN 'sin_explicar' ELSE s.status END,"
+        " CASE WHEN l.minute_start IS NOT NULL AND s.status = 'sin_operaciones_probable'"
+        "   THEN 'pendiente_estabilizacion'"
+        "   WHEN l.minute_start IS NOT NULL AND c.state = 'cerrada_cruzada'"
+        "   AND c.ws_volume IS NULL THEN 'discrepante' ELSE s.candle_state END"
+        " FROM market.minute_status AS s"
+        " LEFT JOIN market.trading_seen_late AS l ON l.market = s.market"
+        "   AND l.symbol = s.symbol AND l.minute_start = s.minute_start"
+        " LEFT JOIN market.candles AS c ON c.series = 'last' AND c.market = s.market"
+        "   AND c.symbol = s.symbol AND c.open_time = s.minute_start"
+        " WHERE s.market = %s AND s.symbol = %s AND s.minute_start >= %s"
+        " AND s.minute_start < %s ORDER BY s.minute_start",
+        (market, symbol, day, day + timedelta(days=1)),
+    ).fetchall()
+    return {row[0]: (row[1], row[2]) for row in rows}
 
 
 # --- resuming after a stop --------------------------------------------------------------
@@ -371,10 +469,13 @@ def flow_resume_point(
 def pending_candles(conn: psycopg.Connection, since: datetime) -> list[PendingCandle]:
     """Minutes of the last series that still wait for their REST candle (audit E2-01): a
     trade flow row since ``since`` with neither a candle nor a terminal status, with the
-    WebSocket candle stored with it and the tick size in force when the minute ended."""
+    WebSocket candle stored with it, the tick size in force when the minute ended and
+    whether trading was seen in it after it was closed (review of E2, fourth round)."""
     rows = conn.execute(
         "SELECT q.market, q.symbol, q.minute_start, q.flow_state, q.messages, q.anomalies,"
-        " q.reconnections, w.open, w.high, w.low, w.close, w.volume, w.turnover, i.tick_size"
+        " q.reconnections, w.open, w.high, w.low, w.close, w.volume, w.turnover, i.tick_size,"
+        " EXISTS (SELECT 1 FROM market.trading_seen_late AS l WHERE l.market = q.market"
+        "   AND l.symbol = q.symbol AND l.minute_start = q.minute_start)"
         " FROM market.data_quality_minute AS q"
         " LEFT JOIN market.ws_candles AS w ON w.market = q.market AND w.symbol = q.symbol"
         "   AND w.open_time = q.minute_start"
@@ -393,14 +494,14 @@ def pending_candles(conn: psycopg.Connection, since: datetime) -> list[PendingCa
     pending = []
     for row in rows:
         market, symbol, minute, state, messages, anomalies, reconnections = row[:7]
-        o, h, low, c, volume, turnover, tick_size = row[7:]
+        o, h, low, c, volume, turnover, tick_size, seen_late = row[7:]
         if tick_size is None:
             continue  # never recorded: the recorder stores the reference data first
         flow = FlowMinute(
             market, symbol, "trade", minute, FlowState(state), messages, anomalies, reconnections
         )
         ws = Ohlcv(minute, o, h, low, c, volume, turnover) if o is not None else None
-        pending.append(PendingCandle(flow, ws, tick_size))
+        pending.append(PendingCandle(flow, ws, tick_size, seen_late=seen_late))
     return pending
 
 

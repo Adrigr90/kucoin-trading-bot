@@ -7,7 +7,8 @@ with **exactly one** terminal state, the first of this list that applies:
 * ``desconectado``: the connection was not healthy at some moment of the slot;
 * ``libro_inconsistente``: the snapshot in force at the end of the slot is inconsistent
   (crossed, unordered, non-positive, its sequence ``C`` or its publication time ``P``
-  went back, or it was published in a slot already closed);
+  went back, or it is a late book: published in this subscription, in a slot already
+  closed);
 * ``fuera_de_plazo``: a snapshot published during the slot arrived after the slot's
   deadline (its end plus the lateness margin), so the book in force at the deadline, if
   there was one, was not up to date;
@@ -19,10 +20,17 @@ with **exactly one** terminal state, the first of this list that applies:
 A snapshot belongs to the slot in which KuCoin published it (``P``); it counts if it arrives
 before the deadline, so ordinary network latency never makes a slot late (live run of 8
 November 2026). The recorder closes a slot only once the connection has proven itself alive
-after the deadline (``kbot.ingest.core``): one connection delivers in order, so by then every
-book published in the slot has arrived, in time or late. Duplicates (same ``C``) are ignored
-and never create slots. Metrics are computed only for ``valida`` slots and contain exact
-values only: no ratio, so nothing is rounded (§0 rule 5).
+after the deadline (``kbot.ingest.core``), so a disconnection never falls on a slot already
+closed as healthy. That proves nothing about completeness: KuCoin does not document that a
+pong leaves after everything published before it. A book of the current subscription that
+still comes for a closed slot is a late book (``LateBook``, review of E2, fourth round): it
+is stored, never discarded, and every slot from its own to the last one closed counts as
+``fuera_de_plazo`` if it was written ``valida`` or ``no_recibida`` (``effective_state``);
+the rows written stay as they are. The late book itself is inconsistent until a new one
+arrives, and no slot it contradicts gives the snapshot of its minute.
+
+Duplicates (same ``C``) are ignored and never create slots. Metrics are computed only for
+``valida`` slots and contain exact values only: no ratio, so nothing is rounded (§0 rule 5).
 """
 
 from __future__ import annotations
@@ -110,9 +118,36 @@ class MinuteSnapshot:
     snapshot: Snapshot
 
 
+@dataclass(frozen=True)
+class LateBook:
+    """A book published in a slot that was already closed when it arrived (``depth_late_books``).
+
+    It contradicts every slot from ``slot_start`` (the slot of its ``P``) to
+    ``last_slot_start`` (the last slot closed when it arrived): the book in force at their
+    deadlines was not the last one KuCoin had published. Worst case (02 §3.6)."""
+
+    market: str
+    symbol: str
+    depth: int
+    slot_start: datetime
+    last_slot_start: datetime
+    sequence: int
+    published_at: datetime
+    received_at: datetime
+
+
 def slot_start(moment: datetime) -> datetime:
     """Start of the 10-second slot that contains ``moment`` (UTC), computed exactly."""
     return floor_to(moment, timedelta(seconds=SLOT_SECONDS))
+
+
+def effective_state(state: SlotState, contradicted: bool) -> SlotState:
+    """The state a slot counts as. A slot written ``valida`` or ``no_recibida`` that a late
+    book contradicts counts as ``fuera_de_plazo``; the other states already say that the
+    slot was not healthy, or that its book was late, and stand."""
+    if contradicted and state in (SlotState.VALIDA, SlotState.NO_RECIBIDA):
+        return SlotState.FUERA_DE_PLAZO
+    return state
 
 
 def parse_snapshot(
@@ -222,13 +257,19 @@ class DepthChannel:
         # changed while the connection was down.
         self._subscribed_at: list[datetime] = []
         self._next_slot = slot_start(started_at)
-        self._minute_best: Snapshot | None = None
-        self._minute_best_slot: datetime | None = None
-        self._minute_had_valid = False
+        # Valid slots of the minute in progress, with their book: the last one that no late
+        # book contradicts becomes the snapshot of the minute.
+        self._minute_valid: list[tuple[datetime, Snapshot]] = []
+        self._late: list[LateBook] = []
 
     @property
     def next_slot(self) -> datetime:
         return self._next_slot
+
+    def take_late_books(self) -> list[LateBook]:
+        """The late books received since the last call, to be stored."""
+        late, self._late = self._late, []
+        return late
 
     def connection_up(self, at: datetime) -> None:
         """The subscription is confirmed: from now on the connection counts as healthy."""
@@ -262,15 +303,19 @@ class DepthChannel:
             # Without C and P the book cannot be placed: it is recorded as an inconsistent
             # book in force, with no invented sequence or time.
             snapshot = Snapshot(None, None, None, received_at, (), (), "malformed message")
+        published = snapshot.published_at
         if (
-            snapshot.consistent
-            and snapshot.published_at is not None
-            and snapshot.published_at < self._next_slot
+            published is not None
+            and snapshot.sequence is not None
+            and self._subscribed_at[-1] <= published < self._next_slot
         ):
-            # Its slot was closed after the connection proved that everything published
-            # before the deadline had arrived: a book that still comes is an anomaly, never a
-            # valid book for the slots that follow (review of E2, third round).
-            snapshot = replace(snapshot, problem="published in a slot already closed")
+            # Published in this subscription, in a slot already closed: a late book. It is
+            # stored and contradicts the slots closed since its own (review of E2, fourth
+            # round); for the slots that follow it is never a valid book (third round). A
+            # book published before the subscription is the state KuCoin had then, not late.
+            self._late_book(snapshot.sequence, published, received_at)
+            if snapshot.consistent:
+                snapshot = replace(snapshot, problem="published in a slot already closed")
         if snapshot.consistent and snapshot.sequence is not None:
             if self._max_sequence is None or snapshot.sequence > self._max_sequence:
                 self._max_sequence = snapshot.sequence
@@ -280,6 +325,24 @@ class DepthChannel:
             ):
                 self._max_published = published
         self._snapshots.append(snapshot)
+
+    def _late_book(self, sequence: int, published: datetime, received_at: datetime) -> None:
+        first = slot_start(published)
+        last = self._next_slot - timedelta(seconds=SLOT_SECONDS)
+        self._late.append(
+            LateBook(
+                self.market,
+                self.symbol,
+                self.depth,
+                first,
+                last,
+                sequence,
+                published,
+                received_at,
+            )
+        )
+        # A contradicted slot never gives the snapshot of its minute.
+        self._minute_valid = [(s, b) for s, b in self._minute_valid if s < first]
 
     def close_until(
         self, now: datetime, lateness: timedelta
@@ -293,30 +356,23 @@ class DepthChannel:
             start = self._next_slot
             result = self._close(start, start + step, lateness)
             slots.append(result)
-            if result.state is SlotState.VALIDA:
-                self._minute_had_valid = True
-                self._minute_best = result.snapshot
-                self._minute_best_slot = start
+            if result.state is SlotState.VALIDA and result.snapshot is not None:
+                self._minute_valid.append((start, result.snapshot))
             end = start + step
             if end.second == 0:
-                if (
-                    self._minute_had_valid
-                    and self._minute_best is not None
-                    and self._minute_best_slot is not None
-                ):
+                if self._minute_valid:
+                    valid_slot, valid_book = self._minute_valid[-1]
                     minutes.append(
                         MinuteSnapshot(
                             self.market,
                             self.symbol,
                             self.depth,
                             end - timedelta(minutes=1),
-                            self._minute_best_slot,
-                            self._minute_best,
+                            valid_slot,
+                            valid_book,
                         )
                     )
-                self._minute_best = None
-                self._minute_best_slot = None
-                self._minute_had_valid = False
+                self._minute_valid = []
             self._next_slot = end
             self._forget_before(end)
         return slots, minutes

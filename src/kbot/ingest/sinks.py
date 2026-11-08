@@ -51,12 +51,14 @@ class Sink(Protocol):
 def write_tick_to(conn: psycopg.Connection, output: TickOutput) -> None:
     """One tick, in the order the foreign keys need: flows, then the WebSocket and own
     candles that point at them, then depth (slot status before metrics and snapshots)
-    and gaps."""
+    and gaps, and last the late evidence (its slots and minutes were written before)."""
     with conn.transaction():
         store.write_flow(conn, output.flows)
         store.write_ws_candles(conn, output.ws_candles)
         store.write_own_candles(conn, "FUTURES", output.own_candles)
         store.write_depth(conn, output.slots, output.minute_snapshots, output.gaps)
+        store.write_late_books(conn, output.late_books)
+        store.write_late_trading(conn, output.late_trading)
 
 
 class DatabaseSink:
@@ -154,6 +156,7 @@ class MemorySink:
             for w in tick.ws_candles
         }
         tick_size = {(row.market, row.symbol): row.tick_size for row in self.instruments}
+        late = {(t.market, t.symbol, t.minute) for tick in self.ticks for t in tick.late_trading}
         pending = []
         for tick in self.ticks:
             for flow in tick.flows:
@@ -167,7 +170,12 @@ class MemorySink:
                 ):
                     continue
                 pending.append(
-                    PendingCandle(flow, ws.get(key), tick_size[(flow.market, flow.symbol)])
+                    PendingCandle(
+                        flow,
+                        ws.get(key),
+                        tick_size[(flow.market, flow.symbol)],
+                        seen_late=key in late,
+                    )
                 )
         return pending
 
@@ -303,6 +311,10 @@ class FileSink(MemorySink):
                 for s in output.slots
             ),
         )
+        self._append("late_books", output.late_books)
+        self._append("late_trading", output.late_trading)
+        self.counts.update("late_book" for _ in output.late_books)
+        self.counts.update("late_trading" for _ in output.late_trading)
         self.counts.update(f"slot:{s.state.value}" for s in output.slots)
         self.counts.update(f"flow:{f.channel}:{f.flow_state.value}" for f in output.flows)
         self.counts.update(f"own:{c.series}" for c in output.own_candles)

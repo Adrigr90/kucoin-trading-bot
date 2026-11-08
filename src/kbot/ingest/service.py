@@ -11,8 +11,9 @@ second. ``step`` does everything that depends on the clock, from the time it is 
 * at 23:59 UTC: evaluate tomorrow's universe and refresh the reference data (again 30 s
   later if KuCoin's listings are incomplete);
 * at 00:00 UTC: switch to that universe (the streams are renewed if it changed); from
-  00:00:15, close the day of each instrument once none of its minutes waits for a REST
-  candle that can still be recovered (``RECOVERY_HORIZON``).
+  00:00:15, close the day of each instrument once the core has closed all its minutes of
+  the day and none of them waits for a REST candle that can still be recovered
+  (``RECOVERY_HORIZON``).
 
 At start-up the recorder resumes from the database what the previous run left pending in
 the last 48 h: the REST candles of closed minutes and the index rebuilds (audit E2-01 and
@@ -197,13 +198,16 @@ class Recorder:
         self._next_midnight = midnight + DAY
 
     async def _close_days(self, now: datetime) -> None:
-        """Close the day of each instrument once none of its minutes waits for a REST candle.
+        """Close the day of each instrument once the core has closed all its minutes of the
+        day and none of them waits for a REST candle.
 
-        What the close writes is terminal and never changes, so a minute whose candle can
-        still be recovered keeps its instrument's day open: answers without the candle end
-        within minutes, and a minute KuCoin never answered for is given up after
-        ``RECOVERY_HORIZON`` (review of E2, second round). The other instruments close on
-        time."""
+        What the close writes is terminal and never changes. It fills with S3 the minutes
+        that nobody recorded, so it waits until the core has closed every minute it
+        records, including one still waiting for its proof of life (review of E2, fourth
+        round). And a minute whose candle can still be recovered keeps its instrument's day
+        open: answers without the candle end within minutes, and a minute KuCoin never
+        answered for is given up after ``RECOVERY_HORIZON`` (second round). The other
+        instruments close on time."""
         core = self._require_core()
         for day in sorted(self._days_to_close):
             end = day + DAY
@@ -213,6 +217,8 @@ class Recorder:
                 self._closing[day] = set(await self._db(self.sink.universe_members, day))
             remaining = self._closing[day]
             for market, symbol in sorted(remaining):
+                if not core.closed_through(market, symbol, end):
+                    continue
                 if any(day <= m < end for m in core.awaiting_minutes(market, symbol)):
                     continue
                 if not await self._db(self.sink.day_is_closed, market, symbol, day):

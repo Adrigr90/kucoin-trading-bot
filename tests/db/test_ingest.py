@@ -20,8 +20,18 @@ from kbot.ingest.service import Recorder
 from kbot.ingest.sinks import DatabaseSink
 from kbot.kucoin.ratelimit import RestRateLimiter
 from kbot.kucoin.rest import KucoinRestClient
+from kbot.market import store
 from tests.unit.ingest.fake_kucoin import FakeKucoin
-from tests.unit.ingest.messages import beat, book, feed_minute, rest_candles_until
+from tests.unit.ingest.messages import (
+    beat,
+    book,
+    feed_minute,
+    kline,
+    rest_candles_until,
+    rest_row,
+    seconds,
+    trade,
+)
 
 pytestmark = pytest.mark.db
 
@@ -464,3 +474,193 @@ def test_a_late_disconnection_never_contradicts_a_valid_slot(
             (start, "desconectado", False),
             (start + timedelta(seconds=10), "desconectado", False),
         ]
+
+
+def test_the_day_waits_for_the_proof_of_life_of_its_last_minute(
+    connect: Connect, test_client: Factory
+) -> None:
+    """Review of E2, fourth round (R4-E2-01), in PostgreSQL, the reviewer's sequence on a
+    quiet connection: the trade and the candle of 23:59 arrive, a pong at 00:00:00 and the
+    next one at 00:00:18, with no pong in between. At 00:00:15 the day is not closed; after
+    the pong of 00:00:18 the flow S1, the candle and the status datos are stored without any
+    error, and a restart keeps them."""
+    day = datetime(2020, 1, 1, tzinfo=UTC) + timedelta(days=secrets.randbelow(2000))
+    midnight = day + timedelta(days=1)
+    start = midnight - timedelta(minutes=2, seconds=30)
+    minute = midnight - timedelta(minutes=1)
+    spot = "S" + secrets.token_hex(4).upper() + "-USDT"
+    futures = "F" + secrets.token_hex(4).upper() + "USDTM"
+    fake = FakeKucoin(spot=[spot], futures=[futures], candles=rest_candles_until(midnight))
+
+    with connect("kbot_ingest") as conn:
+        sink = DatabaseSink(conn)
+        rest = test_client(fake, RestRateLimiter(pool_weight=10**6))
+        recorder = Recorder(sink, rest=rest)
+
+        async def scenario() -> None:
+            await recorder.startup(start)
+            core = recorder.core
+            assert core is not None
+            for market in ("SPOT", "FUTURES"):
+                core.on_state(market, "connected", start + timedelta(seconds=1), "wss://")
+            await beat(recorder, minute)  # 23:59:00: tomorrow's universe
+            feed_minute(core, minute, spot, futures)
+            await beat(recorder, midnight)  # the pong at 00:00:00
+            await recorder.step(midnight + timedelta(seconds=15))  # no pong since then
+            assert day_statuses(conn, spot, day) == (0,), "23:59 waits for its proof of life"
+            await beat(recorder, midnight + timedelta(seconds=18))  # the next pong
+
+        asyncio.run(scenario())
+
+        def last_minute(symbol: str) -> list[tuple[object, ...]]:
+            return conn.execute(
+                "SELECT q.flow_state, c.state, s.status FROM market.data_quality_minute q"
+                " JOIN market.candles c ON c.series = 'last' AND c.market = q.market"
+                " AND c.symbol = q.symbol AND c.open_time = q.minute_start"
+                " JOIN market.minute_status s ON s.market = q.market AND s.symbol = q.symbol"
+                " AND s.minute_start = q.minute_start"
+                " WHERE q.channel = 'trade' AND q.symbol = %s AND q.minute_start = %s",
+                (symbol, minute),
+            ).fetchall()
+
+        for symbol in (spot, futures):
+            assert last_minute(symbol) == [("S1", "cerrada_cruzada", "datos")]
+            assert day_statuses(conn, symbol, day) == (1440,)
+
+        restarted = Recorder(sink, rest=rest)
+
+        async def again() -> None:
+            await restarted.startup(midnight + timedelta(minutes=1))
+            await beat(restarted, midnight + timedelta(minutes=1, seconds=1))
+
+        asyncio.run(again())
+        for symbol in (spot, futures):
+            assert last_minute(symbol) == [("S1", "cerrada_cruzada", "datos")]
+            assert day_statuses(conn, symbol, day) == (1440,)
+
+
+def test_a_late_book_is_stored_and_its_slot_never_counts_as_valid(
+    connect: Connect, test_client: Factory
+) -> None:
+    """Review of E2, fourth round (I-E2-04), in PostgreSQL, the reviewer's sequence: a pong
+    at 12:00:12 closes [12:00:00, 12:00:10) as valid, a book published at 12:00:09.5 arrives
+    at 12:00:13 and a correct one at 12:00:14, before the next close. The rows written stay
+    as they are; the late book is stored, and the first slot counts as fuera_de_plazo."""
+    start = datetime(2020, 1, 1, 12, tzinfo=UTC) + timedelta(days=secrets.randbelow(2000))
+    spot = "S" + secrets.token_hex(4).upper() + "-USDT"
+    futures = "F" + secrets.token_hex(4).upper() + "USDTM"
+    fake = FakeKucoin(spot=[spot], futures=[futures])
+
+    def moment(s: float) -> datetime:
+        return start + timedelta(seconds=s)
+
+    with connect("kbot_ingest") as conn:
+        sink = DatabaseSink(conn)
+        recorder = Recorder(sink, rest=test_client(fake, RestRateLimiter(pool_weight=10**6)))
+
+        async def scenario() -> None:
+            await recorder.startup(start)
+            core = recorder.core
+            assert core is not None
+            core.on_state("SPOT", "connected", start, "wss://")
+            core.on_message("SPOT", book("SPOT", spot, 1, moment(1)), moment(1))
+            await beat(recorder, moment(12))
+            core.on_message("SPOT", book("SPOT", spot, 2, moment(9.5)), moment(13))
+            core.on_message("SPOT", book("SPOT", spot, 3, moment(14)), moment(14))
+            await beat(recorder, moment(22))
+
+        asyncio.run(scenario())
+        written = conn.execute(
+            "SELECT slot_start, state, sequence FROM market.depth_slot_status"
+            " WHERE symbol = %s AND depth = 5 ORDER BY slot_start",
+            (spot,),
+        ).fetchall()
+        assert written == [(start, "valida", 1), (moment(10), "valida", 3)]
+        late = conn.execute(
+            "SELECT depth, slot_start, last_slot_start, sequence, published_at, received_at"
+            " FROM market.depth_late_books WHERE symbol = %s",
+            (spot,),
+        ).fetchall()
+        assert late == [(5, start, start, 2, moment(9.5), moment(13))]
+        assert store.slot_states(conn, "SPOT", spot, 5, start, moment(20)) == {
+            start: "fuera_de_plazo",
+            moment(10): "valida",
+        }
+
+
+def test_trading_seen_late_is_stored_and_never_left_as_a_probable_absence(
+    connect: Connect, test_client: Factory
+) -> None:
+    """Review of E2, fourth round, in PostgreSQL. Nothing is traded on the WebSocket from
+    23:58 on, so 23:58 and 23:59 close as S1 with neither a trade nor a candle. KuCoin's
+    REST gives a flat zero-volume candle in Spot and none in Futures, as it does without
+    trades [H, 8 Nov 2026]. A trade of 23:58 arrives in Spot before its candle is decided:
+    the candle is discrepante. A candle of 23:59 arrives in Spot, and a trade of 23:59 in
+    Futures, after the day was closed: the rows stay as written, and they count as
+    discrepante and sin_explicar."""
+    day = datetime(2020, 1, 1, tzinfo=UTC) + timedelta(days=secrets.randbelow(2000))
+    midnight = day + timedelta(days=1)
+    start = midnight - timedelta(minutes=2, seconds=30)
+    first = midnight - timedelta(minutes=3)  # 23:57, recorded only in part
+    m58, m59 = midnight - timedelta(minutes=2), midnight - timedelta(minutes=1)
+    spot = "S" + secrets.token_hex(4).upper() + "-USDT"
+    futures = "F" + secrets.token_hex(4).upper() + "USDTM"
+
+    def answer(market: str, symbol: str, begin: int, end: int) -> list[list[object]]:
+        minutes = range(end - end % 60, begin - begin % 60, -60)
+        if market == "SPOT":
+            return [
+                [s, "100", "100", "100", "100", "0", "0"] for s in minutes if s < seconds(midnight)
+            ]
+        return [rest_row(first)] if seconds(first) in minutes else []
+
+    fake = FakeKucoin(spot=[spot], futures=[futures], candles=answer)
+
+    with connect("kbot_ingest") as conn:
+        sink = DatabaseSink(conn)
+        recorder = Recorder(sink, rest=test_client(fake, RestRateLimiter(pool_weight=10**6)))
+
+        async def scenario() -> None:
+            await recorder.startup(start)
+            core = recorder.core
+            assert core is not None
+            for market in ("SPOT", "FUTURES"):
+                core.on_state(market, "connected", start + timedelta(seconds=1), "wss://")
+            await beat(recorder, m59 + timedelta(seconds=2))  # 23:58 closed, nothing seen
+            late = m58 + timedelta(seconds=59.5)
+            core.on_message("SPOT", trade("SPOT", spot, late), m59 + timedelta(seconds=3))
+            await beat(recorder, m59 + timedelta(seconds=16))  # 23:58 decided with it
+            await beat(recorder, midnight + timedelta(seconds=16))  # 23:59; the day closed
+            after = midnight + timedelta(seconds=20)
+            core.on_message("SPOT", kline("SPOT", spot, m59, after), after)
+            core.on_message("FUTURES", trade("FUTURES", futures, m59), after)
+            await beat(recorder, midnight + timedelta(seconds=21))
+
+        asyncio.run(scenario())
+        seen = conn.execute(
+            "SELECT symbol, minute_start, channel FROM market.trading_seen_late"
+            " WHERE symbol IN (%s, %s) ORDER BY symbol, minute_start",
+            (spot, futures),
+        ).fetchall()
+        assert seen == [(futures, m59, "trade"), (spot, m58, "trade"), (spot, m59, "kline")]
+        written = dict(
+            conn.execute(
+                "SELECT symbol || ' ' || to_char(minute_start AT TIME ZONE 'UTC', 'HH24:MI'),"
+                " status || ' ' || candle_state FROM market.minute_status"
+                " WHERE symbol IN (%s, %s) AND minute_start >= %s AND minute_start < %s",
+                (spot, futures, first, midnight),
+            ).fetchall()
+        )
+        assert written == {
+            f"{spot} 23:57": "datos cerrada_rest",
+            f"{spot} 23:58": "datos discrepante",
+            f"{spot} 23:59": "datos cerrada_cruzada",
+            f"{futures} 23:57": "datos cerrada_rest",
+            f"{futures} 23:58": "sin_operaciones_probable ausencia_sin_trades_probable",
+            f"{futures} 23:59": "sin_operaciones_probable ausencia_sin_trades_probable",
+        }
+        spot_day = store.minute_statuses(conn, "SPOT", spot, day)
+        futures_day = store.minute_statuses(conn, "FUTURES", futures, day)
+        assert (spot_day[m58], spot_day[m59]) == (("datos", "discrepante"),) * 2
+        assert futures_day[m58] == ("sin_operaciones_probable", "ausencia_sin_trades_probable")
+        assert futures_day[m59] == ("sin_explicar", "pendiente_estabilizacion")

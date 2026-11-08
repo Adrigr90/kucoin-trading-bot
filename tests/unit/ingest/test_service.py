@@ -508,6 +508,47 @@ def test_a_day_left_open_is_closed_after_a_restart_beyond_48_hours(
     assert len(sink.closed_days) == closed, "nothing is closed twice"
 
 
+def test_the_day_waits_for_the_proof_of_life_of_its_last_minute(
+    setup: tuple[Recorder, MemorySink, FakeKucoin],
+) -> None:
+    """Review of E2, fourth round (R4-E2-01), the reviewer's sequence on a quiet connection:
+    the trade and the candle of 23:59 arrive, a pong at 00:00:00 and the next one at
+    00:00:18, with no pong in between. At 00:00:15 the minute still waits for its proof of
+    life, so the day is not closed; at 00:00:18 the minute closes as S1, its candle is
+    decided and only then is the day closed. A restart changes nothing."""
+    recorder, sink, _fake = setup
+    minute = MIDNIGHT - timedelta(minutes=1)
+
+    def trade_flows() -> dict[str, FlowState]:
+        return {
+            f.symbol: f.flow_state
+            for t in sink.ticks
+            for f in t.flows
+            if f.channel == "trade" and f.minute == minute
+        }
+
+    async def scenario() -> None:
+        await recorder.startup(START)
+        connect_both(recorder, START + timedelta(seconds=1))
+        await beat(recorder, minute)  # 23:59:00: tomorrow's universe
+        feed(recorder, minute)
+        await beat(recorder, MIDNIGHT)  # the pong at 00:00:00
+        await recorder.step(MIDNIGHT + timedelta(seconds=15))  # no pong since then
+        assert trade_flows() == {} and sink.closed_days == [], "23:59 is not closed yet"
+        await beat(recorder, MIDNIGHT + timedelta(seconds=18))  # the next pong
+
+    run(scenario())
+    assert trade_flows() == {"BTC-USDT": FlowState.S1, "XBTUSDTM": FlowState.S1}
+    decided = {(d.symbol, d.minute): d.state for d in sink.last_candles}
+    assert decided[("BTC-USDT", minute)] is CandleState.CERRADA_CRUZADA
+    assert decided[("XBTUSDTM", minute)] is CandleState.CERRADA_CRUZADA
+    assert sorted(sink.closed_days) == [("FUTURES", "XBTUSDTM", DAY), ("SPOT", "BTC-USDT", DAY)]
+    restarted = Recorder(sink, rest=recorder._rest)
+    run(restarted.startup(MIDNIGHT + timedelta(minutes=1)))
+    run(beat(restarted, MIDNIGHT + timedelta(minutes=1, seconds=1)))
+    assert len(sink.closed_days) == 2, "nothing is closed twice"
+
+
 def test_a_minute_settled_without_its_candle_is_final_once_its_day_is_closed(
     setup: tuple[Recorder, MemorySink, FakeKucoin],
 ) -> None:

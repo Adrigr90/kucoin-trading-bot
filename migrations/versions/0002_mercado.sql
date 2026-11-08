@@ -295,6 +295,53 @@ CREATE TABLE market.depth_snapshots (
     CHECK (slot_start >= minute_start)
 );
 
+-- Late evidence (02 §3.5 and §3.8, review of E2, fourth round). A slot or a minute is closed
+-- after a proof of life, which rules out a disconnection inside it but does not prove that
+-- everything published in it has arrived: KuCoin does not document that a pong leaves after
+-- everything published before it. What still arrives and contradicts a closed result is kept
+-- here; the rows already written never change, and readers apply it (market/store.py).
+
+-- A book published in this subscription in a slot that was already closed when it arrived.
+-- Every slot of its channel from slot_start (the slot of its P) to last_slot_start (the last
+-- one closed when it arrived) that was written valida or no_recibida counts as
+-- fuera_de_plazo: the book in force at its deadline was not the last one published.
+CREATE TABLE market.depth_late_books (
+    market text NOT NULL,
+    symbol text NOT NULL,
+    depth int2 NOT NULL,
+    slot_start timestamptz NOT NULL,
+    last_slot_start timestamptz NOT NULL,
+    sequence int8 NOT NULL CHECK (sequence >= 0),
+    published_at timestamptz NOT NULL,
+    received_at timestamptz NOT NULL,
+    recorded_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (market, symbol, depth, slot_start, sequence),
+    FOREIGN KEY (market, symbol, depth, slot_start)
+        REFERENCES market.depth_slot_status (market, symbol, depth, slot_start),
+    FOREIGN KEY (market, symbol, depth, last_slot_start)
+        REFERENCES market.depth_slot_status (market, symbol, depth, slot_start),
+    CHECK (published_at >= slot_start AND last_slot_start >= slot_start)
+);
+
+-- A minute of the last series closed as S1 with neither a trade nor a WebSocket candle, in
+-- which the WebSocket saw trading afterwards: a trade with its match time M, or a candle with
+-- its opening time O, in the minute. It rules out a probable absence of trades: the day close
+-- writes sin_explicar, and a zero-volume REST candle decided before it arrived counts as
+-- discrepante. The foreign key ties it to the S1 trade flow of its minute.
+CREATE TABLE market.trading_seen_late (
+    market text NOT NULL CHECK (market IN ('SPOT', 'FUTURES')),
+    symbol text NOT NULL,
+    minute_start timestamptz NOT NULL,
+    channel text NOT NULL CHECK (channel IN ('trade', 'kline')),
+    received_at timestamptz NOT NULL,
+    flow_channel text NOT NULL DEFAULT 'trade' CHECK (flow_channel = 'trade'),
+    flow_state text NOT NULL DEFAULT 'S1' CHECK (flow_state = 'S1'),
+    recorded_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (market, symbol, minute_start),
+    FOREIGN KEY (market, symbol, flow_channel, minute_start, flow_state)
+        REFERENCES market.data_quality_minute (market, symbol, channel, minute_start, flow_state)
+);
+
 -- Settled rates are observed once (observed_at = funding_time); predicted rates
 -- (nextFundingRate) are kept for every observation.
 CREATE TABLE market.funding_rates (
@@ -340,5 +387,6 @@ GRANT SELECT, INSERT ON TABLE
     market.instruments, market.risk_tiers, market.data_quality_minute, market.candles,
     market.ws_candles, market.exhausted_index_rebuilds, market.data_gaps,
     market.minute_status, market.depth_slot_status, market.depth_metrics,
-    market.depth_snapshots, market.funding_rates, market.universe_snapshots
+    market.depth_snapshots, market.depth_late_books, market.trading_seen_late,
+    market.funding_rates, market.universe_snapshots
     TO kbot_ingest;

@@ -20,7 +20,13 @@ import pytest
 
 from kbot.market.depth import DepthChannel
 from kbot.market.gaps import GapCause, GapTracker
-from kbot.market.store import depth_channel_name, resume_point, write_depth
+from kbot.market.store import (
+    depth_channel_name,
+    resume_point,
+    slot_states,
+    write_depth,
+    write_late_books,
+)
 
 pytestmark = pytest.mark.db
 
@@ -113,6 +119,95 @@ def test_f2_a5_a_stop_and_a_restart(ingest: psycopg.Connection) -> None:
         (symbol,),
     ).fetchall()
     assert snapshots == [(at(0), at(50), 1)]
+
+
+def test_a_late_book_is_kept_and_its_slots_count_as_late(ingest: psycopg.Connection) -> None:
+    """Review of E2, fourth round (I-E2-04), from the database: three slots are written as
+    valid, then a book published in the second one arrives. It is stored with the slots it
+    contradicts; their rows and metrics stay as written, and they count as fuera_de_plazo."""
+    symbol = "L" + secrets.token_hex(5).upper() + "-USDT"
+    channel = DepthChannel("SPOT", symbol, 5, multiplier=Decimal(1), started_at=at(0))
+    channel.connection_up(at(0))
+    channel.on_message(book(1, at(1)), at(1))
+    slots, minutes = channel.close_until(at(32), timedelta(seconds=2))
+    write_depth(ingest, slots, minutes)
+    channel.on_message(book(2, at(19.5)), at(33))  # published in [10, 20)
+    write_late_books(ingest, channel.take_late_books())
+    write_late_books(ingest, [])  # nothing more to store
+    assert slot_states(ingest, "SPOT", symbol, 5, at(0), at(40)) == {
+        at(0): "valida",
+        at(10): "fuera_de_plazo",
+        at(20): "fuera_de_plazo",
+    }
+    rows = ingest.execute(
+        "SELECT s.state, m.slot_start IS NOT NULL FROM market.depth_slot_status s"
+        " LEFT JOIN market.depth_metrics m USING (market, symbol, depth, slot_start)"
+        " WHERE s.symbol = %s ORDER BY s.slot_start",
+        (symbol,),
+    ).fetchall()
+    assert rows == [("valida", True)] * 3, "what was written stays as it was"
+    late = ingest.execute(
+        "SELECT slot_start, last_slot_start, sequence, published_at, received_at"
+        " FROM market.depth_late_books WHERE symbol = %s",
+        (symbol,),
+    ).fetchall()
+    assert late == [(at(10), at(20), 2, at(19.5), at(33))]
+
+
+def test_trading_seen_late_rules_out_a_probable_absence(ingest: psycopg.Connection) -> None:
+    """Review of E2, fourth round, from the database: three minutes closed as S1 with neither
+    a trade nor a candle. In minute 0 trading was seen before the day was closed: the close
+    writes sin_explicar. In minute 1 a zero-volume REST candle was cross-checked before it
+    was seen, and in minute 2 the day was closed before: their rows stay, and they count as
+    discrepante and sin_explicar. Closing again changes nothing."""
+    from kbot.market.last_candles import CandleState, FlowMinute, LateTrading, Ohlcv, decide
+    from kbot.market.mark_candles import FlowState
+    from kbot.market.store import (
+        close_day,
+        minute_statuses,
+        write_flow,
+        write_last_candles,
+        write_late_trading,
+    )
+
+    symbol = "Q" + secrets.token_hex(5).upper() + "-USDT"
+    day = datetime(2026, 11, 7, tzinfo=UTC) + timedelta(days=secrets.randbelow(3000))
+    m = [day + timedelta(minutes=i) for i in range(3)]
+
+    def flow(minute: datetime, channel: str) -> FlowMinute:
+        return FlowMinute("SPOT", symbol, channel, minute, FlowState.S1, 0, 0, 0)
+
+    def seen(minute: datetime) -> LateTrading:
+        return LateTrading("SPOT", symbol, minute, "kline", minute + timedelta(seconds=70))
+
+    write_flow(ingest, [flow(minute, channel) for minute in m for channel in ("trade", "kline")])
+    write_late_trading(ingest, [seen(m[0])])
+    zero = Ohlcv(m[1], *(Decimal(v) for v in ("100", "100", "100", "100", "0", "0")))
+    decision = decide("SPOT", symbol, flow(m[1], "trade"), zero, None, Decimal("0.1"))
+    assert decision.state is CandleState.CERRADA_CRUZADA, "both sources saw no trades then"
+    write_last_candles(ingest, [decision])
+    write_late_trading(ingest, [seen(m[1])])
+    close_day(ingest, "SPOT", symbol, day)
+    write_late_trading(ingest, [seen(m[2])])
+    close_day(ingest, "SPOT", symbol, day)  # again, as after a restart
+    written = ingest.execute(
+        "SELECT status, candle_state FROM market.minute_status WHERE symbol = %s"
+        " ORDER BY minute_start LIMIT 3",
+        (symbol,),
+    ).fetchall()
+    assert written == [
+        ("sin_explicar", "pendiente_estabilizacion"),
+        ("datos", "cerrada_cruzada"),
+        ("sin_operaciones_probable", "ausencia_sin_trades_probable"),
+    ]
+    effective = minute_statuses(ingest, "SPOT", symbol, day)
+    assert [effective[minute] for minute in m] == [
+        ("sin_explicar", "pendiente_estabilizacion"),
+        ("datos", "discrepante"),
+        ("sin_explicar", "pendiente_estabilizacion"),
+    ]
+    assert len(effective) == 1440
+    assert effective[day + timedelta(minutes=3)] == ("sin_explicar", "ausencia_no_verificable")
 
 
 def test_f2_a6_closing_a_day_from_the_database(ingest: psycopg.Connection) -> None:

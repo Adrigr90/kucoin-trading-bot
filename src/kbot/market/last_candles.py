@@ -8,9 +8,10 @@ Spec 02 §3.4 and §3.5, and the owner decision of 8 November 2026 (provisional 
   of both are kept but do not judge the candle until D26 sets their tolerances;
 * with a degraded flow (S2 or S3) the REST candle stands alone (``cerrada_rest``);
 * without a REST candle, the minute is ``ausencia_sin_trades_probable`` only on S1 with
-  neither a WebSocket candle nor a trade, ``ausencia_no_verificable`` on S2 or S3, and stays
-  pending (``pendiente_estabilizacion``) on S1 when the WebSocket saw trading: KuCoin warns
-  that its REST candles may be incomplete, so the bot waits and never builds the candle.
+  neither a WebSocket candle nor a trade, not even one that arrived after the minute was
+  closed (``LateTrading``), ``ausencia_no_verificable`` on S2 or S3, and stays pending
+  (``pendiente_estabilizacion``) on S1 when the WebSocket saw trading: KuCoin warns that
+  its REST candles may be incomplete, so the bot waits and never builds the candle.
 
 ``day_close`` turns the decisions of a day into the terminal ``minute_status`` of §3.5.
 """
@@ -94,12 +95,27 @@ class WsCandle:
 
 
 @dataclass(frozen=True)
+class LateTrading:
+    """The WebSocket saw trading in a minute only after the minute was closed as S1 without
+    any trade or candle (``trading_seen_late``, review of E2, fourth round): a trade whose
+    match time ``M``, or a candle whose opening ``O``, falls in it. It rules out a probable
+    absence of trades, which the closed minute could otherwise have been given."""
+
+    market: str
+    symbol: str
+    minute: datetime
+    channel: str  # "trade" or "kline": the message that showed it
+    received_at: datetime
+
+
+@dataclass(frozen=True)
 class PendingCandle:
     """A closed minute that still waits for its REST candle, as the database holds it."""
 
     flow: FlowMinute
     ws: Ohlcv | None
     tick_size: Decimal
+    seen_late: bool = False  # trading seen after the minute was closed (LateTrading)
 
 
 @dataclass(frozen=True)
@@ -194,8 +210,9 @@ class EventFlow:
         self, received_at: datetime, *, valid: bool, minute: datetime | None = None
     ) -> None:
         """Count a message in the minute it was received, or in ``minute`` when its content
-        names one (a candle counts in its own minute). A minute already closed is not
-        changed: the message is late and only adds to nothing."""
+        names one (a candle counts in its own minute, a trade in that of its match time). A
+        minute already closed is not changed (its row is written); what a late message
+        shows is looked at by the recorder (``RecorderCore``, ``LateTrading``)."""
         received_at = as_utc(received_at, "received_at")
         minute = floor_to(received_at if minute is None else as_utc(minute, "minute"), MINUTE)
         if minute < self._next:
@@ -281,19 +298,24 @@ def decide(
     rest: Ohlcv | None,
     ws: Ohlcv | None,
     tick: Decimal,
+    *,
+    seen_late: bool = False,
 ) -> CandleDecision:
     """The candle of one closed minute. ``flow`` is the minute of the ``trade`` channel;
     ``rest`` is None only when a successful REST answer covering the minute had no candle
     for it; a failed request is not a decision.
 
-    The WebSocket saw trading in the minute if it sent a candle for it or if the trade
-    channel received a trade: either one rules out a probable absence of trades, and either
-    one against a REST candle of volume 0 is a contradiction (review of E2, third round)."""
+    The WebSocket saw trading in the minute if it sent a candle for it or a trade of it (by
+    its match time ``M``): either one rules out a probable absence of trades, and either one
+    against a REST candle of volume 0 is a contradiction (review of E2, third round). So
+    does trading it showed only after the minute was closed (``seen_late``, fourth round)."""
     minute, state_of_flow = flow.minute, flow.flow_state
     for candle in (rest, ws):
         if candle is not None and candle.open_time != minute:
             raise ValueError("candle of another minute")
-    traded = flow.messages > 0  # trades received in the minute (on S1 all of them valid)
+    # Trades of the minute received before it closed (on S1 all of them valid), or trading
+    # seen in it afterwards.
+    traded = flow.messages > 0 or seen_late
     differences: tuple[str, ...] = ()
     if rest is not None:
         rest_without_trades = rest.volume == 0 and rest.turnover == 0
@@ -398,12 +420,13 @@ def _consistent(candle: Ohlcv) -> bool:
 
 
 def state_without_candle(
-    flow: FlowState, kline_messages: int, trade_messages: int = 0
+    flow: FlowState, kline_messages: int, trade_messages: int = 0, *, seen_late: bool = False
 ) -> CandleState:
     """State of a minute that has no candle row, from what the database recorded. On S1 the
-    minute is still pending if the WebSocket saw anything in it (a candle or a trade), and
-    a probable absence of trades only when it saw nothing (review of E2, third round)."""
+    minute is still pending if the WebSocket saw anything in it (a candle or a trade, in
+    time or after the minute was closed), and a probable absence of trades only when it saw
+    nothing (review of E2, third and fourth rounds)."""
     if flow is not FlowState.S1:
         return CandleState.AUSENCIA_NO_VERIFICABLE
-    seen = kline_messages > 0 or trade_messages > 0
+    seen = kline_messages > 0 or trade_messages > 0 or seen_late
     return CandleState.PENDIENTE if seen else CandleState.AUSENCIA_SIN_TRADES

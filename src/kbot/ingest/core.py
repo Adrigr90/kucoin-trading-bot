@@ -23,7 +23,14 @@ The universe changes at a UTC midnight (``apply_universe``), or at the moment of
 evaluation when the recorder was stopped or suspended across midnight: an instrument that
 leaves stops producing rows at that instant, and its pending REST candles are still
 decided; one that enters starts at that instant. The day close covers every instrument
-that was in the universe at some moment of the day.
+that was in the universe at some moment of the day, once the core has closed all its
+minutes of the day (``closed_through``).
+
+Closing after a proof of life protects against disconnections but does not prove that
+everything arrived (``_proven``). What still arrives for a closed interval and contradicts
+it is never discarded: late books (``LateBook``) and trading seen in a minute closed as S1
+without any (``LateTrading``) go to the database with the next tick (review of E2, fourth
+round).
 """
 
 from __future__ import annotations
@@ -35,7 +42,7 @@ from decimal import Decimal
 from typing import Any
 
 from kbot.kucoin.ws import Subscription
-from kbot.market.depth import DepthChannel, MinuteSnapshot, SlotResult
+from kbot.market.depth import DepthChannel, LateBook, MinuteSnapshot, SlotResult, slot_start
 from kbot.market.gaps import DataGap, GapCause, GapTracker, cause_from_state_detail
 from kbot.market.last_candles import (
     STABILIZATION,
@@ -43,6 +50,7 @@ from kbot.market.last_candles import (
     CandleState,
     EventFlow,
     FlowMinute,
+    LateTrading,
     Ohlcv,
     PendingCandle,
     WsCandle,
@@ -56,7 +64,14 @@ from kbot.market.mark_candles import (
     OwnCandle,
     positive_price,
 )
-from kbot.market.timeutil import MINUTE, as_utc, floor_to, from_milliseconds, is_int
+from kbot.market.timeutil import (
+    MINUTE,
+    as_utc,
+    floor_to,
+    from_milliseconds,
+    from_nanoseconds,
+    is_int,
+)
 
 MARKETS = ("SPOT", "FUTURES")
 LATENESS = timedelta(seconds=2)  # provisional until D26
@@ -74,6 +89,10 @@ RETRY_INTERVAL = timedelta(minutes=1)
 # with a growing pause, and the minute stays pending for this long after it.
 RECOVERY_HORIZON = timedelta(hours=48)
 MAX_FAILURE_PAUSE = timedelta(minutes=15)
+# How long the minutes closed as S1 without any trade or candle are remembered, so that
+# trading seen in them afterwards is stored (LateTrading). Older evidence comes after the
+# minute was decided and its day closed, from nothing that can reach it any more.
+QUIET_MEMORY = RECOVERY_HORIZON
 
 
 @dataclass(frozen=True)
@@ -119,6 +138,9 @@ class TickOutput:
     minute_snapshots: list[MinuteSnapshot] = field(default_factory=list)
     gaps: list[DataGap] = field(default_factory=list)
     index_rebuilds: list[IndexRebuild] = field(default_factory=list)
+    # Evidence for intervals closed in earlier ticks, so their rows are already written.
+    late_books: list[LateBook] = field(default_factory=list)
+    late_trading: list[LateTrading] = field(default_factory=list)
 
     def is_empty(self) -> bool:
         return not (
@@ -129,6 +151,8 @@ class TickOutput:
             or self.minute_snapshots
             or self.gaps
             or self.index_rebuilds
+            or self.late_books
+            or self.late_trading
         )
 
 
@@ -140,6 +164,7 @@ class _Awaiting:
     attempts: int = 0  # answers without the candle
     failures: int = 0  # requests without an answer
     next_try: datetime | None = None
+    seen_late: bool = False  # trading seen after the minute was closed (LateTrading)
 
 
 @dataclass
@@ -152,14 +177,23 @@ class _Instrument:
     mark: MarkCandleBuilder | None
     gaps: dict[str, GapTracker]
     retired_at: datetime | None = None
+    # Minutes closed as S1 with neither a trade nor a WebSocket candle (QUIET_MEMORY).
+    quiet: set[datetime] = field(default_factory=set)
 
-    def recorded_until(self) -> datetime:
-        """The earliest moment not closed yet by any of its trackers."""
-        moments = [d.next_slot for d in self.depth.values()]
-        moments += [self.trade.next_minute, self.kline.next_minute]
+    def finished(self) -> bool:
+        """A retired instrument has closed every slot and minute that ends by the moment it
+        was retired. The slot and the minute that contain that moment, when a late
+        evaluation retires it between their bounds, never close."""
+        at = self.retired_at
+        if at is None:
+            return False
+        minute = floor_to(at, MINUTE)
+        minutes = [self.trade.next_minute, self.kline.next_minute]
         if self.mark is not None:
-            moments.append(self.mark.next_minute)
-        return min(moments)
+            minutes.append(self.mark.next_minute)
+        return min(minutes) >= minute and all(
+            d.next_slot >= slot_start(at) for d in self.depth.values()
+        )
 
 
 ResumePoints = Mapping[tuple[str, str, str], datetime | None]
@@ -248,6 +282,7 @@ class RecorderCore:
         # Minutes waiting for their REST candle, per (market, symbol): kept apart from the
         # instruments, so they are decided even after their instrument left the universe.
         self._awaiting: dict[tuple[str, str], dict[datetime, _Awaiting]] = {}
+        self._late_trading: list[LateTrading] = []
         # Per connection: whether it is up, and its last proof of life (any message or pong
         # received). While it is up, nothing is closed beyond that proof (``_proven``).
         self._up: dict[str, bool] = dict.fromkeys(MARKETS, False)
@@ -336,7 +371,13 @@ class RecorderCore:
                 return
             depth.on_message(message, received_at)
         elif topic == f"trade.{market}":
-            instrument.trade.message(received_at, valid=_valid_trade(data))
+            # A trade counts in the minute of its match time M, as a candle does in its own
+            # (review of E2, fourth round); a malformed one, where it arrived.
+            valid = _valid_trade(data)
+            matched = floor_to(from_nanoseconds(data["M"]), MINUTE) if valid else None
+            instrument.trade.message(received_at, valid=valid, minute=matched)
+            if matched is not None:
+                self._seen_trading(instrument, matched, "trade", received_at)
         elif topic == f"kline.{market}":
             accepted = instrument.ws_candles.add(message)
             opened = data.get("O")
@@ -346,10 +387,37 @@ class RecorderCore:
                 else floor_to(received_at, MINUTE)
             )
             instrument.kline.message(received_at, valid=accepted, minute=minute)
+            if accepted:
+                self._seen_trading(instrument, minute, "kline", received_at)
         elif topic == "mark-price" and instrument.mark is not None:
             instrument.mark.on_message(message)
         else:
             self.anomalies += 1
+
+    def _seen_trading(
+        self, instrument: _Instrument, minute: datetime, channel: str, received_at: datetime
+    ) -> None:
+        """A trade or a candle of ``minute``. Once the minute is closed it can no longer be
+        counted; if it was closed as S1 with neither a trade nor a candle, this is the first
+        sign of trading in it and is stored (review of E2, fourth round). In any other
+        closed minute it contradicts nothing: trading was already seen (for example the
+        closing candle that KuCoin Futures sends again with the first trade of the next
+        minute [H, E1 recording])."""
+        spec = instrument.spec
+        # A spec change retires the instrument and adds it again: the retired one may have
+        # closed the minute.
+        holder = next(
+            (i for i in self._tracking(spec.market, spec.symbol) if minute in i.quiet), None
+        )
+        if holder is None:
+            return
+        holder.quiet.discard(minute)
+        self._late_trading.append(
+            LateTrading(spec.market, spec.symbol, minute, channel, received_at)
+        )
+        awaiting = self._awaiting.get((spec.market, spec.symbol), {}).get(minute)
+        if awaiting is not None:
+            awaiting.seen_late = True  # still to be decided: decided with it
 
     def on_alive(self, market: str, at: datetime) -> None:
         """A control message (pong, acknowledgement or welcome) received at ``at``: a proof
@@ -414,18 +482,22 @@ class RecorderCore:
 
     def tick(self, now: datetime) -> TickOutput:
         now = as_utc(now, "now")
-        out = TickOutput(gaps=self._closed_gaps)
+        out = TickOutput(gaps=self._closed_gaps, late_trading=self._late_trading)
         self._closed_gaps = []
+        self._late_trading = []
         for instrument in [*self._instruments.values(), *self._retired]:
+            for depth in instrument.depth.values():  # before closing: their slots are written
+                out.late_books += depth.take_late_books()
             until = self._proven(instrument.spec.market, now)
             if instrument.retired_at is not None:
                 until = min(until, instrument.retired_at + self.lateness)
             self._close(instrument, until, out)
-        self._retired = [
-            i
-            for i in self._retired
-            if i.recorded_until() < i.retired_at  # type: ignore[operator]
-        ]
+        for instrument in [i for i in self._retired if i.finished()]:
+            self._retired.remove(instrument)
+            # Added again with another spec: the new one keeps the minutes to watch.
+            current = self._instruments.get((instrument.spec.market, instrument.spec.symbol))
+            if current is not None:
+                current.quiet |= instrument.quiet
         return out
 
     def _proven(self, market: str, now: datetime) -> datetime:
@@ -433,14 +505,43 @@ class RecorderCore:
 
         While its connection is up, only up to its last proof of life: a slot or a minute
         closes once a message or a pong arrived at least the lateness margin after its end.
-        One connection delivers in order, so by then everything published in it has
-        arrived, in time or late, and a disconnection (dated from the last proof of life)
-        can never fall on a result already written as healthy. While it is down, up to
-        ``now``: nothing healthy is claimed and nothing more can arrive."""
+        A disconnection is dated from the last proof of life, so it can never fall on a
+        result already written as healthy. While it is down, up to ``now``: nothing healthy
+        is claimed.
+
+        It does not prove that everything published in the interval has arrived: KuCoin
+        does not document that a pong leaves after everything published before it (review
+        of E2, fourth round). What still arrives and contradicts a closed interval is
+        stored (``LateBook``, ``LateTrading``) and lowers what that interval counts as,
+        without changing the rows already written."""
         alive = self._alive.get(market)
         if not self._up.get(market) or alive is None:
             return now
         return min(now, alive)
+
+    def _tracking(self, market: str, symbol: str) -> list[_Instrument]:
+        """The instrument recorded now, if any, and any retired one still closing."""
+        current = self._instruments.get((market, symbol))
+        retired = [i for i in self._retired if (i.spec.market, i.spec.symbol) == (market, symbol)]
+        return [current, *retired] if current is not None else retired
+
+    def closed_through(self, market: str, symbol: str, moment: datetime) -> bool:
+        """Whether the trade and kline flows of the instrument have closed every minute
+        before ``moment`` that they will ever close (review of E2, fourth round).
+
+        The day close fills with S3 the minutes that have no flow row because nothing was
+        recording them; it waits for this, so it never takes a minute that the core has not
+        closed yet (for example one still waiting for its proof of life) for one that
+        nobody recorded. A retired instrument counts up to the minute in which it was
+        retired; an instrument the core does not record has nothing left to close."""
+        moment = as_utc(moment, "moment")
+        for instrument in self._tracking(market, symbol):
+            target = moment
+            if instrument.retired_at is not None:
+                target = min(target, floor_to(instrument.retired_at, MINUTE))
+            if min(instrument.trade.next_minute, instrument.kline.next_minute) < target:
+                return False
+        return True
 
     def _close(self, instrument: _Instrument, now: datetime, out: TickOutput) -> None:
         spec = instrument.spec
@@ -459,10 +560,15 @@ class RecorderCore:
             self._awaiting.setdefault((spec.market, spec.symbol), {})[flow.minute] = _Awaiting(
                 flow, ws, spec.tick_size
             )
+            if flow.flow_state is FlowState.S1 and flow.messages == 0 and ws is None:
+                instrument.quiet.add(flow.minute)  # nothing seen: trading seen later is stored
         # A WebSocket candle of a minute whose flow is already closed can no longer be used.
         closed = instrument.trade.next_minute
         for minute in [m for m in instrument.ws_candles.latest if m < closed]:
             instrument.ws_candles.pop(minute)
+        if instrument.quiet:
+            oldest = closed - QUIET_MEMORY
+            instrument.quiet = {m for m in instrument.quiet if m >= oldest}
         if instrument.mark is not None:
             for result in instrument.mark.close_until(now, self.lateness):
                 out.flows.append(_mark_flow(spec, result))
@@ -486,7 +592,9 @@ class RecorderCore:
             flow = item.flow
             minutes = self._awaiting.setdefault((flow.market, flow.symbol), {})
             if flow.minute not in minutes:
-                minutes[flow.minute] = _Awaiting(flow, item.ws, item.tick_size)
+                minutes[flow.minute] = _Awaiting(
+                    flow, item.ws, item.tick_size, seen_late=item.seen_late
+                )
                 added += 1
         return added
 
@@ -551,6 +659,7 @@ class RecorderCore:
                 by_minute.get(minute),
                 awaiting.ws,
                 awaiting.tick_size,
+                seen_late=awaiting.seen_late,
             )
             if decision.state in RETRIED and awaiting.attempts < MAX_CANDLE_ATTEMPTS:
                 continue
@@ -568,11 +677,13 @@ class RecorderCore:
 
 
 def _valid_trade(data: dict[str, Any]) -> bool:
+    matched = data.get("M")  # match time, ns [H, E1 recording]
     return (
         positive_price(data.get("p")) is not None
         and positive_price(data.get("q")) is not None
         and data.get("S") in ("buy", "sell")
-        and is_int(data.get("M"))
+        and is_int(matched)
+        and 0 <= matched < 2**63  # a 64-bit time, so it always gives a date
     )
 
 

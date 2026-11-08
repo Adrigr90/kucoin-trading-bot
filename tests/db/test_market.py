@@ -452,6 +452,86 @@ def test_a_late_slot_with_no_book_in_force_has_no_sequence(
     )
 
 
+def late_book(
+    conn: psycopg.Connection,
+    symbol: str,
+    first: datetime,
+    last: datetime,
+    published: datetime | None = None,
+) -> None:
+    conn.execute(
+        "INSERT INTO market.depth_late_books (market, symbol, depth, slot_start,"
+        " last_slot_start, sequence, published_at, received_at)"
+        " VALUES ('SPOT', %s, 5, %s, %s, 8, %s, %s)",
+        (
+            symbol,
+            first,
+            last,
+            published if published is not None else first + timedelta(seconds=9.5),
+            last + timedelta(seconds=13),
+        ),
+    )
+
+
+def test_a_late_book_names_slots_already_written_and_changes_none(
+    ingest: psycopg.Connection, symbol: str
+) -> None:
+    """Review of E2, fourth round (I-E2-04): a late book points at the slot in which it was
+    published and at the last slot closed when it arrived, both written before it. The rows
+    it contradicts stay as they are; readers see the valid and missing ones as late."""
+    with pytest.raises(errors.ForeignKeyViolation):
+        late_book(ingest, symbol, T0, T0)  # no slot written yet
+    written = ["valida", "no_recibida", "libro_inconsistente", "valida"]
+    for i, state in enumerate(written):
+        slot(ingest, symbol, T0 + timedelta(seconds=10 * i), state)
+    with pytest.raises(errors.ForeignKeyViolation):
+        late_book(ingest, symbol, T0, T0 + timedelta(seconds=40))  # a slot not written
+    with pytest.raises(errors.CheckViolation):
+        late_book(ingest, symbol, T0 + timedelta(seconds=10), T0)  # ends before it starts
+    with pytest.raises(errors.CheckViolation):
+        late_book(ingest, symbol, T0, T0, published=T0 - timedelta(seconds=1))  # another slot
+    late_book(ingest, symbol, T0, T0 + timedelta(seconds=20))
+    assert store.slot_states(ingest, "SPOT", symbol, 5, T0, T0 + timedelta(seconds=40)) == {
+        T0: "fuera_de_plazo",
+        T0 + timedelta(seconds=10): "fuera_de_plazo",
+        T0 + timedelta(seconds=20): "libro_inconsistente",  # already not valid: it stands
+        T0 + timedelta(seconds=30): "valida",  # closed after the late book arrived
+    }
+    rows = ingest.execute(
+        "SELECT state FROM market.depth_slot_status WHERE symbol = %s ORDER BY slot_start",
+        (symbol,),
+    ).fetchall()
+    assert [r[0] for r in rows] == written, "the rows written never change"
+
+
+def seen_late(conn: psycopg.Connection, symbol: str, minute: datetime) -> None:
+    conn.execute(
+        "INSERT INTO market.trading_seen_late (market, symbol, minute_start, channel,"
+        " received_at) VALUES ('FUTURES', %s, %s, 'kline', %s)",
+        (symbol, minute, minute + timedelta(seconds=75)),
+    )
+
+
+def test_trading_seen_late_belongs_to_a_minute_closed_as_s1(
+    ingest: psycopg.Connection, symbol: str
+) -> None:
+    """Review of E2, fourth round: only a minute whose trade flow was S1 can have claimed that
+    the WebSocket saw no trading, so only such a minute can be contradicted; once."""
+    with pytest.raises(errors.ForeignKeyViolation):
+        seen_late(ingest, symbol, T0)  # no flow row
+    quality(ingest, symbol, "kline", T0, "S1")
+    with pytest.raises(errors.ForeignKeyViolation):
+        seen_late(ingest, symbol, T0)  # it belongs to the trade flow of its minute
+    quality(ingest, symbol, "trade", T0, "S2")
+    with pytest.raises(errors.ForeignKeyViolation):
+        seen_late(ingest, symbol, T0)  # a degraded flow claimed nothing
+    minute = T0 + timedelta(minutes=1)
+    quality(ingest, symbol, "trade", minute, "S1")
+    seen_late(ingest, symbol, minute)
+    with pytest.raises(errors.UniqueViolation):
+        seen_late(ingest, symbol, minute)  # one per minute
+
+
 def test_pending_work_is_found_from_the_database_alone(
     ingest: psycopg.Connection, symbol: str
 ) -> None:
@@ -482,12 +562,14 @@ def test_pending_work_is_found_from_the_database_alone(
         " 'ausencia_sin_trades_probable', 'trade', 'S1')",
         (symbol, m[3]),
     )
+    seen_late(ingest, symbol, m[2])  # trading seen after it was closed (fourth round)
     pending = [p for p in store.pending_candles(ingest, m[0]) if p.flow.symbol == symbol]
     assert [(p.flow.minute, p.flow.flow_state, p.ws is not None, p.tick_size) for p in pending] == [
         (m[0], FlowState.S1, True, Decimal("0.1")),
         (m[2], FlowState.S1, False, Decimal("0.5")),
         (m[4], FlowState.S1, False, Decimal("0.5")),
     ]
+    assert [p.seen_late for p in pending] == [False, True, False]
     assert pending[0].ws is not None and pending[0].ws.close == Decimal("100.5")
     later = [p.flow.minute for p in store.pending_candles(ingest, m[1]) if p.flow.symbol == symbol]
     assert later == [m[2], m[4]]

@@ -275,7 +275,8 @@ def test_late_evidence_is_judged_from_the_database_alone(ingest: psycopg.Connect
         ("datos", "discrepante"),
     ]
     assert len(effective) == 1440
-    assert effective[day + timedelta(minutes=3)] == ("sin_explicar", "ausencia_no_verificable")
+    nobody = day + timedelta(minutes=5)  # nothing was recording it: S3 at the close
+    assert effective[nobody] == ("sin_explicar", "ausencia_no_verificable")
 
 
 def test_f2_a6_closing_a_day_from_the_database(ingest: psycopg.Connection) -> None:

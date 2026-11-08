@@ -113,3 +113,58 @@ def test_a5_a_stop_and_a_restart(ingest: psycopg.Connection) -> None:
         (symbol,),
     ).fetchall()
     assert snapshots == [(at(0), at(50), 1)]
+
+
+def test_a6_closing_a_day_from_the_database(ingest: psycopg.Connection) -> None:
+    """A6: every minute of the day gets exactly one terminal status, from the database alone;
+    closing again (as after a restart) changes nothing."""
+    from kbot.market.gaps import DataGap
+    from kbot.market.last_candles import FlowMinute, Ohlcv, decide
+    from kbot.market.mark_candles import FlowState
+    from kbot.market.store import close_day, write_flow, write_gap, write_last_candles
+
+    symbol = "D" + secrets.token_hex(5).upper() + "-USDT"
+    day = datetime(2026, 11, 7, tzinfo=UTC) + timedelta(days=secrets.randbelow(3000))
+    m = [day + timedelta(minutes=i) for i in range(5)]
+
+    def flow(minute: datetime, channel: str, state: FlowState, messages: int) -> FlowMinute:
+        return FlowMinute("SPOT", symbol, channel, minute, state, messages, 0, 0)
+
+    write_flow(
+        ingest,
+        [
+            flow(m[0], "trade", FlowState.S1, 4),
+            flow(m[0], "kline", FlowState.S1, 2),
+            flow(m[1], "trade", FlowState.S1, 0),
+            flow(m[1], "kline", FlowState.S1, 0),
+            flow(m[2], "trade", FlowState.S1, 3),
+            flow(m[2], "kline", FlowState.S1, 1),
+        ],
+    )
+    candle = Ohlcv(m[0], *(Decimal(v) for v in ("100", "101", "99", "100.5", "2", "201")))
+    trade_flow = flow(m[0], "trade", FlowState.S1, 4)
+    write_last_candles(ingest, [decide("SPOT", symbol, trade_flow, candle, candle, Decimal("0.1"))])
+    write_gap(
+        ingest,
+        DataGap(
+            "SPOT", "trade", symbol, m[3] + timedelta(seconds=5), m[4], GapCause.DESCONEXION, None
+        ),
+    )
+
+    assert close_day(ingest, "SPOT", symbol, day) == 1440
+    assert close_day(ingest, "SPOT", symbol, day) == 1440  # again: nothing changes
+
+    rows = ingest.execute(
+        "SELECT minute_start, status, candle_state, flow_state, gap_start"
+        " FROM market.minute_status WHERE symbol = %s ORDER BY minute_start",
+        (symbol,),
+    ).fetchall()
+    assert len(rows) == 1440
+    assert [r[1:] for r in rows[:5]] == [
+        ("datos", "cerrada_cruzada", "S1", None),
+        ("sin_operaciones_probable", "ausencia_sin_trades_probable", "S1", None),
+        ("sin_explicar", "pendiente_estabilizacion", "S1", None),
+        ("hueco", "ausencia_no_verificable", "S3", m[3] + timedelta(seconds=5)),
+        ("sin_explicar", "ausencia_no_verificable", "S3", None),
+    ]
+    assert {r[1] for r in rows[5:]} == {"sin_explicar"}, "nothing was recording: S3, no gap"

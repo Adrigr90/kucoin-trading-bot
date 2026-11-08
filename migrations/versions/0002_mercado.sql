@@ -74,6 +74,10 @@ CREATE TABLE market.candles (
     close numeric NOT NULL,
     volume numeric CHECK (volume >= 0),
     turnover numeric CHECK (turnover >= 0),
+    -- Volume and turnover of the WebSocket candle: kept, but not used to judge the candle
+    -- until D26 sets the tolerances (owner decision of 8 November 2026).
+    ws_volume numeric CHECK (ws_volume >= 0),
+    ws_turnover numeric CHECK (ws_turnover >= 0),
     state text NOT NULL
         CHECK (state IN ('cerrada_rest', 'cerrada_cruzada', 'discrepante', 'cerrada_propia')),
     evidence text NOT NULL CHECK (evidence IN (
@@ -93,13 +97,14 @@ CREATE TABLE market.candles (
         (series = 'last' AND volume IS NOT NULL AND turnover IS NOT NULL AND samples IS NULL
             AND flow_channel = 'trade' AND flow_state IS NOT NULL
             AND ((state = 'cerrada_cruzada' AND evidence = 'vela_cruzada_consistente'
-                    AND flow_state = 'S1')
+                    AND flow_state = 'S1' AND ws_volume IS NOT NULL AND ws_turnover IS NOT NULL)
                 OR (state = 'discrepante' AND evidence = 'vela_cruzada_discrepante'
                     AND flow_state = 'S1')
                 OR (state = 'cerrada_rest' AND evidence = 'vela_rest_suficiente'
-                    AND flow_state IN ('S2', 'S3'))))
+                    AND flow_state IN ('S2', 'S3') AND ws_volume IS NULL AND ws_turnover IS NULL)))
         OR (series IN ('mark', 'index') AND market = 'FUTURES' AND volume IS NULL
-            AND turnover IS NULL AND state = 'cerrada_propia' AND samples = 60
+            AND turnover IS NULL AND ws_volume IS NULL AND ws_turnover IS NULL
+            AND state = 'cerrada_propia' AND samples = 60
             AND ((evidence = 'construida_flujo' AND flow_channel = 'mark-price'
                     AND flow_state = 'S1')
                 OR (series = 'index' AND evidence = 'reconstruida_classic'

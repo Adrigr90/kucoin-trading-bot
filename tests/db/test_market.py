@@ -73,15 +73,18 @@ def candle(
 ) -> None:
     conn.execute(
         "INSERT INTO market.candles (series, market, symbol, open_time, open, high, low, close,"
-        " volume, turnover, state, evidence, samples, flow_channel, flow_state)"
-        " VALUES (%s, 'FUTURES', %s, %s, 100, 101, 99, 100.5, %s, %s, %s, %s, %s, %s, %s)"
-        + (" ON CONFLICT DO NOTHING" if conflict else ""),
+        " volume, turnover, ws_volume, ws_turnover, state, evidence, samples, flow_channel,"
+        " flow_state)"
+        " VALUES (%s, 'FUTURES', %s, %s, 100, 101, 99, 100.5, %s, %s, %s, %s, %s, %s, %s,"
+        " %s, %s)" + (" ON CONFLICT DO NOTHING" if conflict else ""),
         (
             series,
             symbol,
             minute,
             volume,
             "200" if volume is not None else None,
+            volume if state != "cerrada_rest" else None,
+            "200" if volume is not None and state != "cerrada_rest" else None,
             state,
             evidence,
             samples,

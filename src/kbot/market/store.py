@@ -7,6 +7,7 @@ order that the foreign keys require (slot status before its metrics and snapshot
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterable
 from datetime import datetime, timedelta
 
@@ -24,6 +25,7 @@ from kbot.market.last_candles import (
     state_without_candle,
 )
 from kbot.market.mark_candles import Evidence, FlowState, OwnCandle
+from kbot.market.reference import FundingRow, InstrumentRow, RiskTierRow, changed_instruments
 from kbot.market.universe import UniverseEntry
 
 
@@ -49,77 +51,76 @@ def write_depth(
     minutes: Iterable[MinuteSnapshot],
     gaps: Iterable[DataGap] = (),
 ) -> None:
-    with conn.transaction():
+    """Slots, their metrics and the minute snapshots, in batches (``executemany``), in the
+    order the foreign keys need: a slot status before its metrics and its snapshot."""
+    slots = list(slots)
+    with conn.transaction(), conn.cursor() as cur:
         for gap in gaps:
             write_gap(conn, gap)
-        for result in slots:
-            conn.execute(
-                "INSERT INTO market.depth_slot_status (market, symbol, depth, slot_start,"
-                " state, sequence, snapshot_age_ms) VALUES (%s, %s, %s, %s, %s, %s, %s)"
-                " ON CONFLICT DO NOTHING",
+        cur.executemany(
+            "INSERT INTO market.depth_slot_status (market, symbol, depth, slot_start,"
+            " state, sequence, snapshot_age_ms) VALUES (%s, %s, %s, %s, %s, %s, %s)"
+            " ON CONFLICT DO NOTHING",
+            [
+                (r.market, r.symbol, r.depth, r.slot_start, r.state.value, r.sequence, r.age_ms)
+                for r in slots
+            ],
+        )
+        cur.executemany(
+            "INSERT INTO market.depth_metrics (market, symbol, depth, slot_start, best_bid,"
+            " best_ask, mid, spread, bid_levels, ask_levels, bid_quantity, ask_quantity,"
+            " bid_notional, ask_notional, bid_notional_10bps, ask_notional_10bps,"
+            " bid_notional_50bps, ask_notional_50bps, bid_deepest_price, ask_deepest_price)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,"
+            " %s, %s, %s) ON CONFLICT DO NOTHING",
+            [
                 (
-                    result.market,
-                    result.symbol,
-                    result.depth,
-                    result.slot_start,
-                    result.state.value,
-                    result.sequence,
-                    result.age_ms,
-                ),
-            )
-            metrics = result.metrics
-            if metrics is None:
-                continue
-            conn.execute(
-                "INSERT INTO market.depth_metrics (market, symbol, depth, slot_start, best_bid,"
-                " best_ask, mid, spread, bid_levels, ask_levels, bid_quantity, ask_quantity,"
-                " bid_notional, ask_notional, bid_notional_10bps, ask_notional_10bps,"
-                " bid_notional_50bps, ask_notional_50bps, bid_deepest_price, ask_deepest_price)"
-                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,"
-                " %s, %s, %s) ON CONFLICT DO NOTHING",
-                (
-                    result.market,
-                    result.symbol,
-                    result.depth,
-                    result.slot_start,
-                    metrics.best_bid,
-                    metrics.best_ask,
-                    metrics.mid,
-                    metrics.spread,
-                    metrics.bid_levels,
-                    metrics.ask_levels,
-                    metrics.bid_quantity,
-                    metrics.ask_quantity,
-                    metrics.bid_notional,
-                    metrics.ask_notional,
-                    metrics.bid_notional_in_band[0],
-                    metrics.ask_notional_in_band[0],
-                    metrics.bid_notional_in_band[1],
-                    metrics.ask_notional_in_band[1],
-                    metrics.bid_deepest_price,
-                    metrics.ask_deepest_price,
-                ),
-            )
-        for minute in minutes:
-            snapshot = minute.snapshot
-            conn.execute(
-                "INSERT INTO market.depth_snapshots (market, symbol, depth, minute_start,"
-                " slot_start, sequence, published_at, exchange_ns, received_at, bids, asks)"
-                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
+                    r.market,
+                    r.symbol,
+                    r.depth,
+                    r.slot_start,
+                    m.best_bid,
+                    m.best_ask,
+                    m.mid,
+                    m.spread,
+                    m.bid_levels,
+                    m.ask_levels,
+                    m.bid_quantity,
+                    m.ask_quantity,
+                    m.bid_notional,
+                    m.ask_notional,
+                    m.bid_notional_in_band[0],
+                    m.ask_notional_in_band[0],
+                    m.bid_notional_in_band[1],
+                    m.ask_notional_in_band[1],
+                    m.bid_deepest_price,
+                    m.ask_deepest_price,
+                )
+                for r in slots
+                if (m := r.metrics) is not None
+            ],
+        )
+        cur.executemany(
+            "INSERT INTO market.depth_snapshots (market, symbol, depth, minute_start,"
+            " slot_start, sequence, published_at, exchange_ns, received_at, bids, asks)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
+            [
                 (
                     minute.market,
                     minute.symbol,
                     minute.depth,
                     minute.minute_start,
                     minute.slot_start,
-                    snapshot.sequence,
-                    snapshot.published_at,
-                    snapshot.exchange_ns,
-                    snapshot.received_at,
-                    Jsonb([[str(p), str(q)] for p, q in snapshot.bids]),
-                    Jsonb([[str(p), str(q)] for p, q in snapshot.asks]),
-                ),
-            )
+                    minute.snapshot.sequence,
+                    minute.snapshot.published_at,
+                    minute.snapshot.exchange_ns,
+                    minute.snapshot.received_at,
+                    Jsonb([[str(p), str(q)] for p, q in minute.snapshot.bids]),
+                    Jsonb([[str(p), str(q)] for p, q in minute.snapshot.asks]),
+                )
+                for minute in minutes
+            ],
+        )
 
 
 def write_gap(conn: psycopg.Connection, gap: DataGap) -> None:
@@ -317,3 +318,168 @@ def close_day(conn: psycopg.Connection, market: str, symbol: str, day: datetime)
         )
         write_minute_status(conn, statuses)
     return len(statuses)
+
+
+# --- resuming after a stop --------------------------------------------------------------
+
+
+def flow_resume_point(
+    conn: psycopg.Connection, market: str, symbol: str, channel: str
+) -> datetime | None:
+    """End of the last minute whose flow was recorded for this channel, or None."""
+    row = conn.execute(
+        "SELECT max(minute_start) FROM market.data_quality_minute"
+        " WHERE market = %s AND symbol = %s AND channel = %s",
+        (market, symbol, channel),
+    ).fetchone()
+    if row is None or row[0] is None:
+        return None
+    return row[0] + timedelta(minutes=1)
+
+
+def day_is_closed(conn: psycopg.Connection, market: str, symbol: str, day: datetime) -> bool:
+    row = conn.execute(
+        "SELECT count(*) FROM market.minute_status WHERE market = %s AND symbol = %s"
+        " AND minute_start >= %s AND minute_start < %s",
+        (market, symbol, day, day + timedelta(days=1)),
+    ).fetchone()
+    return row is not None and row[0] == 24 * 60
+
+
+# --- universe -----------------------------------------------------------------------------
+
+
+def load_universe(conn: psycopg.Connection, day: datetime) -> list[UniverseEntry]:
+    """The latest evaluation made during ``day``, or an empty list."""
+    rows = conn.execute(
+        "SELECT evaluated_at, market, symbol, rank, in_universe, l50_candidate,"
+        " quote_volume_24h, best_bid, best_ask, criteria_version"
+        " FROM market.universe_snapshots WHERE evaluated_at = ("
+        "   SELECT max(evaluated_at) FROM market.universe_snapshots"
+        "   WHERE evaluated_at >= %s AND evaluated_at < %s)"
+        " ORDER BY market, rank",
+        (day, day + timedelta(days=1)),
+    ).fetchall()
+    return [UniverseEntry(*row) for row in rows]
+
+
+def universe_members(conn: psycopg.Connection, day: datetime) -> set[tuple[str, str]]:
+    """Instruments in the universe at some moment of ``day``: the evaluation in force when
+    the day started and every evaluation made during it."""
+    rows = conn.execute(
+        "SELECT DISTINCT market, symbol FROM market.universe_snapshots"
+        " WHERE in_universe AND evaluated_at < %s AND evaluated_at >= coalesce("
+        "   (SELECT max(evaluated_at) FROM market.universe_snapshots WHERE evaluated_at <= %s),"
+        "   %s)",
+        (day + timedelta(days=1), day, day),
+    ).fetchall()
+    return {(row[0], row[1]) for row in rows}
+
+
+# --- reference data -------------------------------------------------------------------------
+
+
+def _json_dumps(value: object) -> str:
+    return json.dumps(value, default=str, separators=(",", ":"))
+
+
+def write_instruments(
+    conn: psycopg.Connection, rows: Iterable[InstrumentRow], observed_at: datetime
+) -> int:
+    """Insert the instruments whose business fields changed since the last stored row."""
+    rows = list(rows)
+    with conn.transaction():
+        latest = {
+            (row[0], row[1]): tuple(row[2:])
+            for row in conn.execute(
+                "SELECT DISTINCT ON (market, symbol) market, symbol, base_currency,"
+                " quote_currency, settle_currency, tick_size, quantity_step, multiplier,"
+                " min_quantity, min_funds, trading_status, is_trading"
+                " FROM market.instruments WHERE symbol = ANY(%s)"
+                " ORDER BY market, symbol, observed_at DESC",
+                ([row.symbol for row in rows],),
+            ).fetchall()
+        }
+        changed = changed_instruments(rows, latest)
+        for row in changed:
+            conn.execute(
+                "INSERT INTO market.instruments (market, symbol, observed_at, base_currency,"
+                " quote_currency, settle_currency, tick_size, quantity_step, multiplier,"
+                " min_quantity, min_funds, trading_status, is_trading, raw)"
+                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+                " ON CONFLICT DO NOTHING",
+                (
+                    row.market,
+                    row.symbol,
+                    observed_at,
+                    row.base_currency,
+                    row.quote_currency,
+                    row.settle_currency,
+                    row.tick_size,
+                    row.quantity_step,
+                    row.multiplier,
+                    row.min_quantity,
+                    row.min_funds,
+                    row.trading_status,
+                    row.is_trading,
+                    Jsonb(dict(row.raw), dumps=_json_dumps),
+                ),
+            )
+    return len(changed)
+
+
+def write_risk_tiers(
+    conn: psycopg.Connection, symbol: str, tiers: list[RiskTierRow], observed_at: datetime
+) -> bool:
+    """Insert the tiers of a contract when they differ from the last stored set."""
+    fields = [
+        (
+            t.level,
+            t.min_risk_limit,
+            t.max_risk_limit,
+            t.max_leverage,
+            t.initial_margin,
+            t.maintain_margin,
+        )
+        for t in tiers
+    ]
+    with conn.transaction():
+        stored = conn.execute(
+            "SELECT level, min_risk_limit, max_risk_limit, max_leverage, initial_margin,"
+            " maintain_margin FROM market.risk_tiers WHERE market = 'FUTURES' AND symbol = %s"
+            " AND observed_at = (SELECT max(observed_at) FROM market.risk_tiers"
+            "   WHERE market = 'FUTURES' AND symbol = %s) ORDER BY level",
+            (symbol, symbol),
+        ).fetchall()
+        if [tuple(row) for row in stored] == fields:
+            return False
+        with conn.cursor() as cur:
+            cur.executemany(
+                "INSERT INTO market.risk_tiers (market, symbol, observed_at, level,"
+                " min_risk_limit, max_risk_limit, max_leverage, initial_margin, maintain_margin)"
+                " VALUES ('FUTURES', %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
+                [(symbol, observed_at, *row) for row in fields],
+            )
+    return True
+
+
+def write_funding(conn: psycopg.Connection, rows: Iterable[FundingRow]) -> None:
+    with conn.transaction(), conn.cursor() as cur:
+        cur.executemany(
+            "INSERT INTO market.funding_rates (market, symbol, kind, funding_time, observed_at,"
+            " rate, granularity_ms, rate_cap, rate_floor)"
+            " VALUES ('FUTURES', %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
+            [
+                (
+                    r.symbol,
+                    r.kind,
+                    r.funding_time,
+                    r.observed_at,
+                    r.rate,
+                    r.granularity_ms,
+                    r.rate_cap,
+                    r.rate_floor,
+                )
+                for r in rows
+            ],
+        )

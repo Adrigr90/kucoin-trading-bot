@@ -141,6 +141,11 @@ class MarkCandleBuilder:
         self._minutes: dict[datetime, _Minute] = {}
         self._next_minute = floor_to(started_at, MINUTE)
 
+    @property
+    def next_minute(self) -> datetime:
+        """The first minute not closed yet."""
+        return self._next_minute
+
     def connection_up(self, at: datetime) -> None:
         at = as_utc(at, "at")
         if self._down and self._down[-1][1] is None:

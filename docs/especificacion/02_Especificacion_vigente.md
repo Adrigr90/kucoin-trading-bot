@@ -310,6 +310,18 @@ Este documento **sustituye, para leer y auditar**, al Informe V4 y a los anexos 
 
 **Universo provisional** (D12 sin aprobar): pares en USDT que cotizan, **sin monedas estables como moneda base** (USDC, USDE, FDUSD, DAI, TUSD, PYUSD) [decisión del propietario, 7 nov 2026], ordenados por volumen de 24 h en la moneda de cotización, los 20 primeros de Spot y de Futures; los 10 primeros de cada mercado son candidatos de nivel 50 (P3). Se reevalúa una vez al día y cada cambio queda en `universe_snapshots`.
 
+**El grabador (`svc-ingest`, etapa E2)** [R, pendiente de revisión]:
+- **Un núcleo sin reloj** (`kbot.ingest.core`) recibe los mensajes, los eventos de conexión y la hora, y devuelve lo que hay que guardar; una capa asíncrona (`kbot.ingest.service`) abre las dos conexiones públicas, llama al núcleo una vez por segundo y escribe en un hilo aparte, para que una escritura lenta nunca retrase los pings.
+- **El universo cambia solo a medianoche UTC:** el de mañana se evalúa a las 23:59 con los datos del día y rige desde las 00:00 (`evaluated_at` es el momento desde el que rige). Un instrumento que sale deja de grabarse a las 00:00 pero conserva sus velas REST pendientes; uno que entra empieza a las 00:00; si cambia el conjunto, se renuevan las suscripciones (hueco `rotacion_planificada` de unos segundos). Tras un reinicio dentro del día se reutiliza el universo en vigor; no se evalúa de nuevo. Así cada día tiene un conjunto fijo de instrumentos y el cierre del día cubre exactamente esos.
+- **Velas REST:** cada minuto se pide un rango por instrumento (como mucho 100 minutos por petición). Un minuto `pendiente_estabilizacion` o `ausencia_no_verificable` se vuelve a pedir una vez por minuto, como mucho 5 veces; una respuesta con alguna fila ilegible se descarta entera y se repite.
+- **Cierre del día:** desde las 00:00:15 UTC, en cuanto ningún minuto del día espera su vela REST, y como mucho a las 00:10.
+- **Tras una parada** el grabador continúa donde dice la base de datos, como mucho un día atrás (los minutos más antiguos reciben su fila S3 al cerrar su día; el hueco registra toda la parada). Las velas REST de la parada se piden también (histórico recuperable, 3.7).
+- **Índice desde Classic:** una petición trae hasta 400 valores por segundo [H, 7 nov 2026], así que se rehacen hasta 6 minutos por petición; se piden 2 minutos después del minuto, como mucho 30 peticiones por minuto y 3 intentos.
+- **Funding:** el previsto cada 10 minutos y el liquidado cada hora (últimas 24 h, sin duplicados). Instrumentos y tramos de riesgo, a diario y solo si cambian.
+- **La salud de la conexión hay que demostrarla, no suponerla:** una desconexión se registra desde el último mensaje recibido (la última prueba de vida), no desde que se detecta; y un vigilante comprueba cada segundo que el proceso avanza: si pasa más de 5 s sin ejecutarse (máquina suspendida, CPU agotada, una llamada bloqueada), ese tiempo es un hueco `proceso_detenido` y sus intervalos `desconectado`. Lo destapó la primera prueba en vivo (8 nov 2026): el PC se suspendió 17 minutos y, sin el vigilante, ese tiempo habría pasado por conexión sana.
+- **Si KuCoin no da los listados al arrancar, el servicio falla** y systemd lo vuelve a arrancar más tarde (§0, regla 1). Un instrumento cuyos datos no cumplen su contrato no se graba y queda en el registro.
+- **En un PC sin PostgreSQL** (`--sink file`) el grabador escribe en archivos JSON lo que guardaría, para comprobarlo contra KuCoin real.
+
 ## 4. Eventos y recuperación
 
 ### 4.1 Eventos (C01)

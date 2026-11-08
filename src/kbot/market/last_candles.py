@@ -155,6 +155,11 @@ class EventFlow:
         self._counts: dict[datetime, list[int]] = {}
         self._next = floor_to(started_at, MINUTE)
 
+    @property
+    def next_minute(self) -> datetime:
+        """The first minute not closed yet."""
+        return self._next
+
     def connection_up(self, at: datetime) -> None:
         at = as_utc(at, "at")
         if self._down and self._down[-1][1] is None:
@@ -165,16 +170,25 @@ class EventFlow:
         if not self._down or self._down[-1][1] is not None:
             self._down.append((at, None))
 
-    def message(self, received_at: datetime, *, valid: bool) -> None:
-        minute = floor_to(as_utc(received_at, "received_at"), MINUTE)
+    def message(
+        self, received_at: datetime, *, valid: bool, minute: datetime | None = None
+    ) -> None:
+        """Count a message in the minute it was received, or in ``minute`` when its content
+        names one (a candle counts in its own minute). A minute already closed is not
+        changed: the message is late and only adds to nothing."""
+        received_at = as_utc(received_at, "received_at")
+        minute = floor_to(received_at if minute is None else as_utc(minute, "minute"), MINUTE)
+        if minute < self._next:
+            return
         counts = self._counts.setdefault(minute, [0, 0])
         counts[0] += 1
         counts[1] += 0 if valid else 1
 
-    def close_until(self, now: datetime) -> list[FlowMinute]:
+    def close_until(self, now: datetime, lateness: timedelta = timedelta(0)) -> list[FlowMinute]:
+        """Close every minute whose end plus ``lateness`` is not after ``now``."""
         now = as_utc(now, "now")
         results = []
-        while self._next + MINUTE <= now:
+        while self._next + MINUTE + lateness <= now:
             minute, end = self._next, self._next + MINUTE
             messages, anomalies = self._counts.pop(minute, [0, 0])
             overlaps = [(s, e) for s, e in self._down if s < end and (e is None or e > minute)]

@@ -1,0 +1,488 @@
+"""The recorder's core: routes messages and connection events, and says what to store.
+
+It has no clock, no network and no database. Every time is an argument, so the whole
+recorder can be driven through simulated hours in a test. The asynchronous shell
+(``kbot.ingest.service``) feeds it from the two public WebSocket connections and the REST
+client, and writes what ``tick`` returns.
+
+Per instrument of the universe (02 §3.8):
+
+* depth channels of 5 levels, and of 50 for the candidates (``DepthChannel``);
+* the flow of the ``trade`` and ``kline`` channels minute by minute (``EventFlow``) and the
+  last WebSocket candle of each minute (``WsCandles``);
+* in Futures, the own mark and index candles (``MarkCandleBuilder``);
+* one gap tracker per channel (``GapTracker``).
+
+A minute of the last series waits for its REST candle (``candle_requests`` and
+``apply_rest_candles``); an index minute without a candle from the flow waits for its
+rebuild from Classic (``index_rebuilds`` in the tick output).
+
+The universe changes only at a UTC midnight (``apply_universe``): an instrument that
+leaves stops producing rows at that instant but keeps its pending REST candles until they
+are decided; one that enters starts at that instant. So each day has a fixed set of
+instruments, and the day close covers exactly them.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from decimal import Decimal
+from typing import Any
+
+from kbot.kucoin.ws import Subscription
+from kbot.market.depth import DepthChannel, MinuteSnapshot, SlotResult
+from kbot.market.gaps import DataGap, GapCause, GapTracker, cause_from_state_detail
+from kbot.market.last_candles import (
+    STABILIZATION,
+    CandleDecision,
+    CandleState,
+    EventFlow,
+    FlowMinute,
+    Ohlcv,
+    WsCandles,
+    decide,
+)
+from kbot.market.mark_candles import (
+    FlowState,
+    MarkCandleBuilder,
+    MinuteResult,
+    OwnCandle,
+    positive_price,
+)
+from kbot.market.timeutil import MINUTE, as_utc, floor_to, from_milliseconds, is_int
+
+MARKETS = ("SPOT", "FUTURES")
+LATENESS = timedelta(seconds=2)  # provisional until D26
+MAX_BACKFILL = timedelta(days=1)
+MAX_CANDLE_ATTEMPTS = 5  # a pending REST candle is asked for at most this many times
+MAX_MINUTES_PER_REQUEST = 100  # below the 200 candles per request of Futures (02 §3.2)
+# Without a REST candle yet, these may still get one: KuCoin warns that its REST candles
+# can be incomplete, so the minute is asked again before it is given up.
+RETRIED = frozenset({CandleState.PENDIENTE, CandleState.AUSENCIA_NO_VERIFICABLE})
+RETRY_INTERVAL = timedelta(minutes=1)
+
+
+@dataclass(frozen=True)
+class InstrumentSpec:
+    market: str
+    symbol: str
+    tick_size: Decimal
+    multiplier: Decimal
+    l50: bool
+    index_symbol: str | None = None  # Futures: the Classic index of the contract
+
+    def channels(self) -> tuple[str, ...]:
+        names = ["obu5", *(["obu50"] if self.l50 else []), "trade", "kline"]
+        if self.market == "FUTURES":
+            names.append("mark-price")
+        return tuple(names)
+
+
+@dataclass(frozen=True)
+class CandleRequest:
+    market: str
+    symbol: str
+    first: datetime  # first minute to decide
+    last: datetime  # last minute to decide
+
+
+@dataclass(frozen=True)
+class IndexRebuild:
+    symbol: str
+    index_symbol: str
+    minute: datetime
+
+
+@dataclass
+class TickOutput:
+    """What one tick closed, in the order the foreign keys need it written."""
+
+    flows: list[FlowMinute] = field(default_factory=list)
+    own_candles: list[OwnCandle] = field(default_factory=list)
+    slots: list[SlotResult] = field(default_factory=list)
+    minute_snapshots: list[MinuteSnapshot] = field(default_factory=list)
+    gaps: list[DataGap] = field(default_factory=list)
+    index_rebuilds: list[IndexRebuild] = field(default_factory=list)
+
+    def is_empty(self) -> bool:
+        return not (
+            self.flows
+            or self.own_candles
+            or self.slots
+            or self.minute_snapshots
+            or self.gaps
+            or self.index_rebuilds
+        )
+
+
+@dataclass
+class _Awaiting:
+    flow: FlowMinute
+    ws: Ohlcv | None
+    attempts: int = 0
+    next_try: datetime | None = None
+
+
+@dataclass
+class _Instrument:
+    spec: InstrumentSpec
+    depth: dict[int, DepthChannel]
+    trade: EventFlow
+    kline: EventFlow
+    ws_candles: WsCandles
+    mark: MarkCandleBuilder | None
+    gaps: dict[str, GapTracker]
+    awaiting: dict[datetime, _Awaiting] = field(default_factory=dict)
+    retired_at: datetime | None = None
+
+    def recorded_until(self) -> datetime:
+        """The earliest moment not closed yet by any of its trackers."""
+        moments = [d.next_slot for d in self.depth.values()]
+        moments += [self.trade.next_minute, self.kline.next_minute]
+        if self.mark is not None:
+            moments.append(self.mark.next_minute)
+        return min(moments)
+
+
+ResumePoints = Mapping[tuple[str, str, str], datetime | None]
+
+
+def _new_instrument(
+    spec: InstrumentSpec,
+    *,
+    started_at: datetime,
+    resume: ResumePoints,
+    resume_cause: GapCause,
+    max_backfill: timedelta,
+) -> _Instrument:
+    if spec.market not in MARKETS:
+        raise ValueError(f"unknown market: {spec.market!r}")
+    oldest = floor_to(started_at - max_backfill, MINUTE)
+
+    def point(channel: str) -> datetime | None:
+        value = resume.get((spec.market, spec.symbol, channel))
+        return as_utc(value, "resume") if value is not None else None
+
+    def start(channel: str) -> datetime:
+        value = point(channel)
+        if value is None or value >= started_at:
+            return started_at
+        return max(value, oldest)
+
+    depth = {
+        level: DepthChannel(
+            spec.market,
+            spec.symbol,
+            level,
+            multiplier=spec.multiplier,
+            started_at=start(f"obu{level}"),
+        )
+        for level in ((5, 50) if spec.l50 else (5,))
+    }
+    return _Instrument(
+        spec=spec,
+        depth=depth,
+        trade=EventFlow(spec.market, spec.symbol, "trade", started_at=start("trade")),
+        kline=EventFlow(spec.market, spec.symbol, "kline", started_at=start("kline")),
+        ws_candles=WsCandles(),
+        mark=(
+            MarkCandleBuilder(spec.symbol, started_at=start("mark-price"))
+            if spec.market == "FUTURES"
+            else None
+        ),
+        gaps={
+            channel: GapTracker(
+                spec.market,
+                channel,
+                spec.symbol,
+                started_at=started_at,
+                resumed_from=point(channel),
+                resume_cause=resume_cause,
+            )
+            for channel in spec.channels()
+        },
+    )
+
+
+class RecorderCore:
+    def __init__(
+        self,
+        specs: Iterable[InstrumentSpec],
+        *,
+        started_at: datetime,
+        resume: ResumePoints | None = None,
+        resume_cause: GapCause = GapCause.PROCESO_DETENIDO,
+        max_backfill: timedelta = MAX_BACKFILL,
+        lateness: timedelta = LATENESS,
+    ) -> None:
+        """``resume`` maps (market, symbol, channel) to where the previous run stopped
+        recording that channel; the trackers resume there, so the stop is closed as a gap
+        and its slots as ``desconectado``. Trackers go back at most ``max_backfill``: older
+        minutes get their S3 rows when their day is closed, and the gap row still covers
+        the whole stop."""
+        started_at = as_utc(started_at, "started_at")
+        self.lateness = lateness
+        self.max_backfill = max_backfill
+        self.anomalies = 0
+        self._instruments: dict[tuple[str, str], _Instrument] = {}
+        self._retired: list[_Instrument] = []
+        self._closed_gaps: list[DataGap] = []
+        for spec in specs:
+            key = (spec.market, spec.symbol)
+            if key in self._instruments:
+                raise ValueError(f"instrument listed twice: {key}")
+            self._instruments[key] = _new_instrument(
+                spec,
+                started_at=started_at,
+                resume=resume or {},
+                resume_cause=resume_cause,
+                max_backfill=max_backfill,
+            )
+
+    # --- what to record --------------------------------------------------------------------
+
+    @property
+    def specs(self) -> list[InstrumentSpec]:
+        return [instrument.spec for instrument in self._instruments.values()]
+
+    def subscriptions(self, market: str) -> list[Subscription]:
+        result: list[Subscription] = []
+        for instrument in self._instruments.values():
+            spec = instrument.spec
+            if spec.market != market:
+                continue
+            result.append(Subscription("obu", market, spec.symbol, (("depth", "5"),)))
+            if spec.l50:
+                result.append(Subscription("obu", market, spec.symbol, (("depth", "50"),)))
+            result.append(Subscription("trade", market, spec.symbol))
+            result.append(Subscription("kline", market, spec.symbol, (("interval", "1min"),)))
+            if market == "FUTURES":
+                result.append(Subscription("mark-price", market, spec.symbol))
+        return result
+
+    def apply_universe(self, specs: Iterable[InstrumentSpec], at: datetime) -> bool:
+        """Record exactly ``specs`` from ``at`` on (a UTC midnight). An instrument whose
+        spec changes (for example it becomes a depth-50 candidate) is retired and added
+        again. Returns whether anything changed, so the caller renews its subscriptions."""
+        at = as_utc(at, "at")
+        wanted = {(s.market, s.symbol): s for s in specs}
+        changed = False
+        for key, instrument in list(self._instruments.items()):
+            if wanted.get(key) == instrument.spec:
+                continue
+            changed = True
+            instrument.retired_at = at
+            for tracker in instrument.gaps.values():
+                gap = tracker.up(at)  # an open gap ends where recording ends
+                if gap is not None:
+                    self._closed_gaps.append(gap)
+            self._retired.append(instrument)
+            del self._instruments[key]
+        for key, spec in wanted.items():
+            if key not in self._instruments:
+                changed = True
+                self._instruments[key] = _new_instrument(
+                    spec,
+                    started_at=at,
+                    resume={},
+                    resume_cause=GapCause.DESCONEXION,
+                    max_backfill=self.max_backfill,
+                )
+        return changed
+
+    # --- events ----------------------------------------------------------------------------
+
+    def on_message(self, market: str, message: dict[str, Any], received_at: datetime) -> None:
+        topic = str(message.get("T", ""))
+        data = message.get("d")
+        symbol = data.get("s") if isinstance(data, dict) else None
+        instrument = self._instruments.get((market, symbol)) if isinstance(symbol, str) else None
+        if instrument is None or not isinstance(data, dict):
+            self.anomalies += 1
+            return
+        if topic == f"obu.{market}":
+            level = {"5": 5, "50": 50}.get(str(message.get("dp")))
+            depth = instrument.depth.get(level) if level is not None else None
+            if depth is None:
+                self.anomalies += 1
+                return
+            depth.on_message(message, received_at)
+        elif topic == f"trade.{market}":
+            instrument.trade.message(received_at, valid=_valid_trade(data))
+        elif topic == f"kline.{market}":
+            accepted = instrument.ws_candles.add(message)
+            opened = data.get("O")
+            minute = (
+                from_milliseconds(opened * 1000)
+                if accepted and is_int(opened)
+                else floor_to(received_at, MINUTE)
+            )
+            instrument.kline.message(received_at, valid=accepted, minute=minute)
+        elif topic == "mark-price" and instrument.mark is not None:
+            instrument.mark.on_message(message)
+        else:
+            self.anomalies += 1
+
+    def on_state(self, market: str, state: str, at: datetime, detail: str) -> None:
+        at = as_utc(at, "at")
+        instruments = [i for i in self._instruments.values() if i.spec.market == market]
+        if state == "connected":
+            for instrument in instruments:
+                for depth in instrument.depth.values():
+                    depth.connection_up(at)
+                instrument.trade.connection_up(at)
+                instrument.kline.connection_up(at)
+                if instrument.mark is not None:
+                    instrument.mark.connection_up(at)
+                for tracker in instrument.gaps.values():
+                    gap = tracker.up(at)
+                    if gap is not None:
+                        self._closed_gaps.append(gap)
+        elif state == "disconnected":
+            cause = cause_from_state_detail(detail)
+            for instrument in instruments:
+                for depth in instrument.depth.values():
+                    depth.connection_down(at)
+                instrument.trade.connection_down(at)
+                instrument.kline.connection_down(at)
+                if instrument.mark is not None:
+                    instrument.mark.connection_down(at)
+                for tracker in instrument.gaps.values():
+                    tracker.down(at, cause, detail[:200])
+        else:
+            self.anomalies += 1
+
+    # --- the passing of time -----------------------------------------------------------
+
+    def tick(self, now: datetime) -> TickOutput:
+        now = as_utc(now, "now")
+        out = TickOutput(gaps=self._closed_gaps)
+        self._closed_gaps = []
+        for instrument in [*self._instruments.values(), *self._retired]:
+            until = now
+            if instrument.retired_at is not None:
+                until = min(now, instrument.retired_at + self.lateness)
+            self._close(instrument, until, out)
+        self._retired = [
+            i
+            for i in self._retired
+            if i.awaiting or i.recorded_until() < i.retired_at  # type: ignore[operator]
+        ]
+        return out
+
+    def _close(self, instrument: _Instrument, now: datetime, out: TickOutput) -> None:
+        spec = instrument.spec
+        for depth in instrument.depth.values():
+            slots, minutes = depth.close_until(now, self.lateness)
+            out.slots += slots
+            out.minute_snapshots += minutes
+        out.flows += instrument.kline.close_until(now, self.lateness)
+        for flow in instrument.trade.close_until(now, self.lateness):
+            out.flows.append(flow)
+            instrument.awaiting[flow.minute] = _Awaiting(
+                flow, instrument.ws_candles.pop(flow.minute)
+            )
+        # A WebSocket candle of a minute whose flow is already closed can no longer be used.
+        closed = instrument.trade.next_minute
+        for minute in [m for m in instrument.ws_candles.latest if m < closed]:
+            instrument.ws_candles.pop(minute)
+        if instrument.mark is not None:
+            for result in instrument.mark.close_until(now, self.lateness):
+                out.flows.append(_mark_flow(spec, result))
+                if result.mark is not None and result.index is not None:
+                    out.own_candles += [result.mark, result.index]
+                elif spec.index_symbol is not None:
+                    out.index_rebuilds.append(
+                        IndexRebuild(spec.symbol, spec.index_symbol, result.minute)
+                    )
+
+    # --- REST candles of the last series ---------------------------------------------------
+
+    def candle_requests(self, now: datetime) -> list[CandleRequest]:
+        """One request per instrument (and per ``MAX_MINUTES_PER_REQUEST`` minutes) for the
+        minutes whose stabilization margin has passed."""
+        now = as_utc(now, "now")
+        requests = []
+        for instrument in [*self._instruments.values(), *self._retired]:
+            due = sorted(
+                m
+                for m, a in instrument.awaiting.items()
+                if m + MINUTE + STABILIZATION <= now and (a.next_try is None or a.next_try <= now)
+            )
+            spec = instrument.spec
+            for start in range(0, len(due), MAX_MINUTES_PER_REQUEST):
+                chunk = due[start : start + MAX_MINUTES_PER_REQUEST]
+                requests.append(CandleRequest(spec.market, spec.symbol, chunk[0], chunk[-1]))
+        return requests
+
+    def apply_rest_candles(
+        self, request: CandleRequest, rows: list[Ohlcv] | None, now: datetime
+    ) -> list[CandleDecision]:
+        """Decide the awaiting minutes of ``request``. ``rows`` is the full REST answer for
+        the requested range, or None if the request failed (the minutes are asked again,
+        at most ``MAX_CANDLE_ATTEMPTS`` times; then the day close says why they lack a
+        candle). A minute that is still ``pendiente_estabilizacion`` is asked again too."""
+        now = as_utc(now, "now")
+        key = (request.market, request.symbol)
+        owners = [i for i in [self._instruments.get(key), *self._retired] if i is not None]
+        decisions: list[CandleDecision] = []
+        by_minute = {row.open_time: row for row in rows} if rows is not None else {}
+        for instrument in owners:
+            if (instrument.spec.market, instrument.spec.symbol) != key:
+                continue
+            minutes = [m for m in sorted(instrument.awaiting) if request.first <= m <= request.last]
+            for minute in minutes:
+                awaiting = instrument.awaiting[minute]
+                awaiting.attempts += 1
+                awaiting.next_try = now + RETRY_INTERVAL
+                if rows is None:
+                    if awaiting.attempts >= MAX_CANDLE_ATTEMPTS:
+                        del instrument.awaiting[minute]
+                    continue
+                decision = decide(
+                    request.market,
+                    request.symbol,
+                    awaiting.flow,
+                    by_minute.get(minute),
+                    awaiting.ws,
+                    instrument.spec.tick_size,
+                )
+                if decision.state in RETRIED and awaiting.attempts < MAX_CANDLE_ATTEMPTS:
+                    continue
+                del instrument.awaiting[minute]
+                decisions.append(decision)
+        return decisions
+
+    def awaiting_until(self, moment: datetime) -> int:
+        """Minutes before ``moment`` still waiting for their REST candle."""
+        return sum(
+            1
+            for instrument in [*self._instruments.values(), *self._retired]
+            for minute in instrument.awaiting
+            if minute < moment
+        )
+
+
+def _valid_trade(data: dict[str, Any]) -> bool:
+    return (
+        positive_price(data.get("p")) is not None
+        and positive_price(data.get("q")) is not None
+        and data.get("S") in ("buy", "sell")
+        and is_int(data.get("M"))
+    )
+
+
+def _mark_flow(spec: InstrumentSpec, result: MinuteResult) -> FlowMinute:
+    clean = result.flow_state is FlowState.S1
+    return FlowMinute(
+        market=spec.market,
+        symbol=spec.symbol,
+        channel="mark-price",
+        minute=result.minute,
+        flow_state=result.flow_state,
+        messages=result.samples + result.anomalies,
+        anomalies=result.anomalies,
+        reconnections=0 if clean or not result.disconnected else 1,
+    )

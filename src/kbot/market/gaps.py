@@ -39,6 +39,8 @@ def cause_from_state_detail(detail: str) -> GapCause:
     """The cause of a ``disconnected`` event of PublicStream, from its detail text."""
     if detail.startswith("SessionRotation"):
         return GapCause.ROTACION_PLANIFICADA
+    if detail.startswith("Stall"):
+        return GapCause.PROCESO_DETENIDO  # the process itself did not run (02 §3.8)
     if "no pong" in detail:
         return GapCause.SIN_PONG
     if "subscription refused" in detail:
@@ -59,8 +61,10 @@ class GapTracker:
         *,
         started_at: datetime,
         resumed_from: datetime | None,
+        resume_cause: GapCause = GapCause.PROCESO_DETENIDO,
     ) -> None:
-        """``resumed_from`` is where the previous run stopped recording (None on a first run).
+        """``resumed_from`` is where the previous run stopped recording (None on a first run);
+        ``resume_cause`` says why it stopped (a planned restart is ``rotacion_planificada``).
 
         Until the first subscription is confirmed nothing is recorded, so a gap is open
         from the resume point (after a stop) or from the start (first run).
@@ -72,7 +76,7 @@ class GapTracker:
         if resumed_from is not None and as_utc(resumed_from, "resumed_from") < started_at:
             self._open: tuple[datetime, GapCause, str | None] | None = (
                 as_utc(resumed_from),
-                GapCause.PROCESO_DETENIDO,
+                resume_cause,
                 None,
             )
         else:

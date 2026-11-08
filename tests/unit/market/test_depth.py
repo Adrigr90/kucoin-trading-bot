@@ -67,8 +67,8 @@ def test_valid_book_and_silence_keep_the_slot_valid() -> None:
     slots, _ = ch.close_until(at(40), NO_LATENESS)
     # First slot [0, 10) had no healthy connection at 0..0.5: desconectado.
     assert states(slots) == ["desconectado", "valida", "valida", "valida"]
-    # The book did not change for 30 s: still valid, with its age (02 §3.3).
-    assert [r.age_ms for r in slots[1:]] == [18_900, 28_900, 38_900]
+    # The book did not change for 30 s: still valid, with its age since KuCoin published it.
+    assert [r.age_ms for r in slots[1:]] == [19_000, 29_000, 39_000]
     assert all(r.sequence == 1 for r in slots[1:])
 
 
@@ -147,14 +147,36 @@ def test_a_sequence_that_goes_back_is_inconsistent_and_a_duplicate_is_ignored() 
     assert states(third) == ["valida"]
 
 
-def test_a_snapshot_that_arrives_after_its_slot_makes_it_late() -> None:
+def test_ordinary_latency_never_makes_a_slot_late() -> None:
+    """Live run of 8 November 2026: a book published just before the end of a slot and
+    received just after it is on time; it is the book in force of its slot."""
     ch = channel()
     ch.connection_up(at(0))
     ch.on_message(book(1, at(1)), at(1))
-    ch.on_message(book(2, at(9.5)), at(10.4))  # published in [0, 10), received after 10
-    slots, _ = ch.close_until(at(11), timedelta(seconds=1))
+    ch.on_message(book(2, at(9.95)), at(10.08))  # 130 ms on the way, within the margin
+    slots, _ = ch.close_until(at(12), timedelta(seconds=2))
+    assert states(slots) == ["valida"]
+    assert slots[0].sequence == 2
+
+
+def test_a_snapshot_that_arrives_after_the_deadline_makes_its_slot_late() -> None:
+    ch = channel()
+    ch.connection_up(at(0))
+    ch.on_message(book(1, at(1)), at(1))
+    ch.on_message(book(2, at(9.5)), at(11.5))  # published in [0, 10), 1.5 s after 10 + 1
+    slots, _ = ch.close_until(at(12), timedelta(seconds=1))
     assert states(slots) == ["fuera_de_plazo"]
-    assert slots[0].sequence == 1, "the book in force at the end of the slot was older"
+    assert slots[0].sequence == 1, "the book in force at the deadline was older"
+
+
+def test_a_book_published_after_the_end_belongs_to_the_next_slot() -> None:
+    ch = channel()
+    ch.connection_up(at(0))
+    ch.on_message(book(1, at(1)), at(1))
+    ch.on_message(book(2, at(10.2)), at(10.3))
+    slots, _ = ch.close_until(at(22), timedelta(seconds=2))
+    assert [s.sequence for s in slots] == [1, 2]
+    assert states(slots) == ["valida", "valida"]
 
 
 def test_slots_close_only_after_the_lateness_margin() -> None:

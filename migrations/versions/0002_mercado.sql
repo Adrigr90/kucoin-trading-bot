@@ -97,7 +97,11 @@ CREATE TABLE market.candles (
         (series = 'last' AND volume IS NOT NULL AND turnover IS NOT NULL AND samples IS NULL
             AND flow_channel = 'trade' AND flow_state IS NOT NULL
             AND ((state = 'cerrada_cruzada' AND evidence = 'vela_cruzada_consistente'
-                    AND flow_state = 'S1' AND ws_volume IS NOT NULL AND ws_turnover IS NOT NULL)
+                    AND flow_state = 'S1'
+                    AND ((ws_volume IS NOT NULL AND ws_turnover IS NOT NULL)
+                        -- Spot: a zero-volume KuCoin candle and a flow that saw no trades.
+                        OR (volume = 0 AND turnover = 0 AND ws_volume IS NULL
+                            AND ws_turnover IS NULL)))
                 OR (state = 'discrepante' AND evidence = 'vela_cruzada_discrepante'
                     AND flow_state = 'S1')
                 OR (state = 'cerrada_rest' AND evidence = 'vela_rest_suficiente'

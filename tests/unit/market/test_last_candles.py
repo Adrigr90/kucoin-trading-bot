@@ -11,6 +11,7 @@ import pytest
 
 from kbot.kucoin.jsonparse import loads
 from kbot.market.last_candles import (
+    CandleEvidence,
     CandleState,
     EventFlow,
     FlowMinute,
@@ -253,3 +254,31 @@ def test_a_minute_without_candle_is_rebuilt_from_what_was_recorded(
     flow_state: FlowState, klines: int, expected: CandleState
 ) -> None:
     assert state_without_candle(flow_state, klines) is expected
+
+
+def flat(price: str = "100.5") -> Ohlcv:
+    value = Decimal(price)
+    return Ohlcv(T0, value, value, value, value, Decimal(0), Decimal(0))
+
+
+def test_a_zero_volume_spot_candle_agrees_with_a_flow_without_trades() -> None:
+    """Spot: KuCoin publishes a flat zero-volume candle for a minute without trades
+    (measured on 8 November 2026); Futures publishes nothing."""
+    quiet = decide("SPOT", "BNB-USDT", flow(FlowState.S1), flat(), None, TICK)
+    assert quiet.state is CandleState.CERRADA_CRUZADA
+    assert quiet.evidence is CandleEvidence.CRUZADA_CONSISTENTE and quiet.ws is None
+    traded = decide(
+        "SPOT",
+        "BNB-USDT",
+        flow(FlowState.S1),
+        flat(),
+        candle(o="100.5", h="100.5", low="100.5", c="100.5"),
+        TICK,
+    )
+    assert traded.state is CandleState.DISCREPANTE
+    assert traded.differences == ("volumen_rest_cero",)
+    degraded = decide("SPOT", "BNB-USDT", flow(FlowState.S2), flat(), None, TICK)
+    assert degraded.state is CandleState.CERRADA_REST
+    assert rest_kline([T0_S, "130.678", "130.678", "130.678", "130.678", "0", "0"]) == Ohlcv(
+        T0, *(Decimal(v) for v in ("130.678",) * 4), Decimal(0), Decimal(0)
+    )

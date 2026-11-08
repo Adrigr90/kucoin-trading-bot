@@ -517,3 +517,22 @@ def test_universe_evaluations_are_written_once(ingest: psycopg.Connection, symbo
             " VALUES (%s, 'SPOT', 'Z-USDT', 99, false, true, 1, 'x')",
             (moment,),
         )
+
+
+def test_a_zero_volume_spot_candle_is_cross_checked_without_a_websocket_candle(
+    ingest: psycopg.Connection, symbol: str
+) -> None:
+    """Spot publishes a flat zero-volume candle for a minute without trades (measured on
+    8 November 2026): with a continuous flow that saw nothing, it is cross-checked."""
+    insert = (
+        "INSERT INTO market.candles (series, market, symbol, open_time, open, high, low, close,"
+        " volume, turnover, ws_volume, ws_turnover, state, evidence, flow_channel, flow_state)"
+        " VALUES ('last', 'FUTURES', %s, %s, 130.678, 130.678, 130.678, 130.678, %s, %s,"
+        " NULL, NULL, 'cerrada_cruzada', 'vela_cruzada_consistente', 'trade', 'S1')"
+    )
+    quality(ingest, symbol, "trade", T0, "S1")
+    ingest.execute(insert, (symbol, T0, 0, 0))
+    later = T0 + timedelta(minutes=1)
+    quality(ingest, symbol, "trade", later, "S1")
+    with pytest.raises(errors.CheckViolation):
+        ingest.execute(insert, (symbol, later, 2, 200))  # trades but no WebSocket candle

@@ -8,13 +8,17 @@ with **exactly one** terminal state:
 * ``no_recibida``: healthy connection, but no snapshot since the last subscription;
 * ``libro_inconsistente``: the snapshot in force at the end of the slot is inconsistent
   (crossed, unordered, non-positive, or its sequence ``C`` went back);
-* ``fuera_de_plazo``: a snapshot published during the slot arrived after the slot ended,
-  so the book in force at its end was not up to date;
+* ``fuera_de_plazo``: a snapshot published during the slot arrived after the slot's
+  deadline (its end plus the lateness margin), so the book in force at the deadline was
+  not up to date;
 * ``valida``: otherwise. KuCoin sends nothing while the book does not change, so silence
   on a healthy connection keeps the last snapshot in force, with its age.
 
-Duplicates (same ``C``) are ignored and never create slots. Metrics are computed only for
-``valida`` slots and contain exact values only: no ratio, so nothing is rounded (§0 rule 5).
+A snapshot belongs to the slot in which KuCoin published it (``P``); it counts if it arrives
+before the deadline, so ordinary network latency never makes a slot late (live run of 8
+November 2026). Duplicates (same ``C``) are ignored and never create slots. Metrics are
+computed only for ``valida`` slots and contain exact values only: no ratio, so nothing is
+rounded (§0 rule 5).
 """
 
 from __future__ import annotations
@@ -262,7 +266,7 @@ class DepthChannel:
         step = timedelta(seconds=SLOT_SECONDS)
         while self._next_slot + step + lateness <= now:
             start = self._next_slot
-            result = self._close(start, start + step)
+            result = self._close(start, start + step, lateness)
             slots.append(result)
             if result.state is SlotState.VALIDA:
                 self._minute_had_valid = True
@@ -292,22 +296,21 @@ class DepthChannel:
             self._forget_before(end)
         return slots, minutes
 
-    def _close(self, start: datetime, end: datetime) -> SlotResult:
+    def _close(self, start: datetime, end: datetime, lateness: timedelta) -> SlotResult:
         if self._disconnected_during(start, end):
             return self._result(start, SlotState.DESCONECTADO, None, end)
         epoch = max((at for at in self._subscribed_at if at <= start), default=None)
+        deadline = end + lateness
+        current = [s for s in self._snapshots if epoch is not None and s.received_at >= epoch]
         in_force = None
-        for snapshot in self._snapshots:
-            if epoch is not None and epoch <= snapshot.received_at < end:
+        for snapshot in current:  # one connection keeps the order in which KuCoin sent them
+            if _event_time(snapshot) < end and snapshot.received_at <= deadline:
                 in_force = snapshot
         if in_force is None:
             return self._result(start, SlotState.NO_RECIBIDA, None, end)
         if not in_force.consistent:
             return self._result(start, SlotState.LIBRO_INCONSISTENTE, in_force, end)
-        late = any(
-            s.published_at is not None and start <= s.published_at < end and s.received_at >= end
-            for s in self._snapshots
-        )
+        late = any(start <= _event_time(s) < end and s.received_at > deadline for s in current)
         if late:
             return self._result(start, SlotState.FUERA_DE_PLAZO, in_force, end)
         return self._result(start, SlotState.VALIDA, in_force, end)
@@ -320,7 +323,8 @@ class DepthChannel:
             metrics = compute_metrics(snapshot, self._multiplier)
         age_ms = None
         if snapshot is not None:
-            age_ms = (end - snapshot.received_at) // timedelta(milliseconds=1)
+            # Age at the end of the slot, from the moment KuCoin published the book.
+            age_ms = max(0, (end - _event_time(snapshot)) // timedelta(milliseconds=1))
         return SlotResult(
             market=self.market,
             symbol=self.symbol,
@@ -347,6 +351,11 @@ class DepthChannel:
         earlier = [at for at in self._subscribed_at if at <= moment]
         if len(earlier) > 1:
             self._subscribed_at = self._subscribed_at[len(earlier) - 1 :]
+
+
+def _event_time(snapshot: Snapshot) -> datetime:
+    """When KuCoin published the book (``P``); the arrival time for a malformed message."""
+    return snapshot.published_at if snapshot.published_at is not None else snapshot.received_at
 
 
 def _levels(raw: Any) -> tuple[tuple[Level, ...], str | None]:

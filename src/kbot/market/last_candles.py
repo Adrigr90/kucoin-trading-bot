@@ -268,11 +268,18 @@ def decide(
         if state_of_flow is not FlowState.S1:
             state, evidence = CandleState.CERRADA_REST, CandleEvidence.REST_SUFICIENTE
             ws = None
+        elif ws is None and rest.volume == 0 and rest.turnover == 0:
+            # Spot: KuCoin publishes a flat zero-volume candle for a minute without trades
+            # [H, measured 8 Nov 2026]; a continuous flow that saw no trades agrees with it.
+            state, evidence = CandleState.CERRADA_CRUZADA, CandleEvidence.CRUZADA_CONSISTENTE
         elif ws is None:
             state, evidence = CandleState.DISCREPANTE, CandleEvidence.CRUZADA_DISCREPANTE
             differences = ("websocket_sin_vela",)
         else:
             differences = price_differences(rest, ws, tick)
+            if rest.volume == 0 and ws.volume > 0:
+                # Not a tolerance (D26): KuCoin says no trade happened, the flow saw some.
+                differences = (*differences, "volumen_rest_cero")
             if differences:
                 state, evidence = CandleState.DISCREPANTE, CandleEvidence.CRUZADA_DISCREPANTE
             else:

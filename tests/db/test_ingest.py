@@ -591,13 +591,13 @@ def test_a_late_book_is_stored_and_its_slot_never_counts_as_valid(
 def test_trading_seen_late_is_stored_and_never_left_as_a_probable_absence(
     connect: Connect, test_client: Factory
 ) -> None:
-    """Review of E2, fourth round, in PostgreSQL. Nothing is traded on the WebSocket from
-    23:58 on, so 23:58 and 23:59 close as S1 with neither a trade nor a candle. KuCoin's
-    REST gives a flat zero-volume candle in Spot and none in Futures, as it does without
-    trades [H, 8 Nov 2026]. A trade of 23:58 arrives in Spot before its candle is decided:
-    the candle is discrepante. A candle of 23:59 arrives in Spot, and a trade of 23:59 in
-    Futures, after the day was closed: the rows stay as written, and they count as
-    discrepante and sin_explicar."""
+    """Reviews of E2, fourth and fifth rounds, in PostgreSQL. Nothing is traded on the
+    WebSocket from 23:58 on, so 23:58 and 23:59 close as S1 with neither a trade nor a
+    candle. KuCoin's REST gives a flat zero-volume candle in Spot and none in Futures, as it
+    does without trades [H, 8 Nov 2026]. A trade of 23:58 arrives in Spot before its candle
+    is decided: the candle is discrepante. A candle of 23:59 arrives in Spot, and a trade of
+    23:59 in Futures, after the day was closed: they are kept, the rows stay as written, and
+    the minutes count as discrepante and sin_explicar."""
     day = datetime(2020, 1, 1, tzinfo=UTC) + timedelta(days=secrets.randbelow(2000))
     midnight = day + timedelta(days=1)
     start = midnight - timedelta(minutes=2, seconds=30)
@@ -638,11 +638,16 @@ def test_trading_seen_late_is_stored_and_never_left_as_a_probable_absence(
 
         asyncio.run(scenario())
         seen = conn.execute(
-            "SELECT symbol, minute_start, channel FROM market.trading_seen_late"
+            "SELECT symbol, minute_start FROM market.trading_seen_late"
             " WHERE symbol IN (%s, %s) ORDER BY symbol, minute_start",
             (spot, futures),
         ).fetchall()
-        assert seen == [(futures, m59, "trade"), (spot, m58, "trade"), (spot, m59, "kline")]
+        assert seen == [(futures, m59), (spot, m58)]
+        late_candles = conn.execute(
+            "SELECT symbol, open_time FROM market.late_ws_candles WHERE symbol IN (%s, %s)",
+            (spot, futures),
+        ).fetchall()
+        assert late_candles == [(spot, m59)]
         written = dict(
             conn.execute(
                 "SELECT symbol || ' ' || to_char(minute_start AT TIME ZONE 'UTC', 'HH24:MI'),"
@@ -664,3 +669,114 @@ def test_trading_seen_late_is_stored_and_never_left_as_a_probable_absence(
         assert (spot_day[m58], spot_day[m59]) == (("datos", "discrepante"),) * 2
         assert futures_day[m58] == ("sin_operaciones_probable", "ausencia_sin_trades_probable")
         assert futures_day[m59] == ("sin_explicar", "pendiente_estabilizacion")
+
+
+LATE_STEPS = [timedelta(minutes=k, seconds=16) for k in range(5)]  # 00:00:16 to 00:04:16
+
+
+def late_evidence_run(
+    connect: Connect, test_client: Factory, channel: str, rest: str, when: str, restart: bool
+) -> tuple[object, ...]:
+    """23:59 closes as S1 with neither a trade nor a candle at 00:00:02. A trade or a candle
+    of 23:59 arrives before its REST candle is decided (00:00:07) or after the day was
+    closed (00:05:00), on the same connection or on the one opened after a restart just
+    before. KuCoin's REST answers with no candle (``empty``) or with a flat one of volume 0
+    (``zero``) in Spot; the contract always gets its candles. Returns what 23:59 counts as
+    and the late rows kept for it."""
+    day = datetime(2020, 1, 1, tzinfo=UTC) + timedelta(days=secrets.randbelow(2000))
+    midnight = day + timedelta(days=1)
+    minute = midnight - timedelta(minutes=1)
+    spot = "S" + secrets.token_hex(4).upper() + "-USDT"
+    futures = "F" + secrets.token_hex(4).upper() + "USDTM"
+
+    def answer(market: str, symbol: str, begin: int, end: int) -> list[list[object]]:
+        wanted = range(end - end % 60, begin - begin % 60, -60)
+        minutes = [s for s in wanted if s < seconds(midnight)]
+        if market == "FUTURES":
+            return [rest_row(datetime.fromtimestamp(s, UTC)) for s in minutes]
+        if rest == "zero":
+            return [[s, "100", "100", "100", "100", "0", "0"] for s in minutes]
+        return []
+
+    fake = FakeKucoin(spot=[spot], futures=[futures], candles=answer)
+    late_at = midnight + (timedelta(seconds=7) if when == "before" else timedelta(minutes=5))
+    message = (
+        trade("SPOT", spot, minute + timedelta(seconds=59.5))
+        if channel == "trade"
+        else kline("SPOT", spot, minute, late_at)
+    )
+
+    with connect("kbot_ingest") as conn:
+        sink = DatabaseSink(conn)
+        rest_client = test_client(fake, RestRateLimiter(pool_weight=10**6))
+        recorder = Recorder(sink, rest=rest_client)
+
+        def connect_both(moment: datetime) -> None:
+            assert recorder.core is not None
+            for market in ("SPOT", "FUTURES"):
+                recorder.core.on_state(market, "connected", moment, "wss://")
+
+        async def start(moment: datetime) -> None:
+            nonlocal recorder
+            recorder = Recorder(sink, rest=rest_client)
+            await recorder.startup(moment)
+            connect_both(moment + timedelta(seconds=1))
+
+        def deliver() -> None:
+            assert recorder.core is not None
+            recorder.core.on_message("SPOT", message, late_at)
+
+        async def scenario() -> None:
+            await start(midnight - timedelta(seconds=90))
+            await beat(recorder, minute)
+            await beat(recorder, midnight + timedelta(seconds=2))  # 23:59 closed: nothing seen
+            if when == "before":
+                if restart:
+                    await start(midnight + timedelta(seconds=5))
+                deliver()
+            for step in LATE_STEPS:  # the day is closed by the last one
+                await beat(recorder, midnight + step)
+            if when == "after":
+                if restart:
+                    await start(midnight + timedelta(minutes=4, seconds=30))
+                deliver()
+                await beat(recorder, late_at + timedelta(seconds=1))
+
+        asyncio.run(scenario())
+        assert day_statuses(conn, spot, day) == (1440,)
+
+        def count(table: str, column: str) -> object:
+            return conn.execute(
+                f"SELECT count(*) FROM market.{table} WHERE symbol = %s AND {column} = %s",
+                (spot, minute),
+            ).fetchone()
+
+        return (
+            store.minute_statuses(conn, "SPOT", spot, day)[minute],
+            count("trading_seen_late", "minute_start"),
+            count("late_ws_candles", "open_time"),
+        )
+
+
+@pytest.mark.parametrize("when", ["before", "after"])
+@pytest.mark.parametrize("rest", ["empty", "zero"])
+@pytest.mark.parametrize("channel", ["trade", "kline"])
+def test_late_evidence_counts_the_same_after_a_restart(
+    connect: Connect, test_client: Factory, channel: str, rest: str, when: str
+) -> None:
+    """Review of E2, fifth round (R5-E2-01), in PostgreSQL: a trade or a candle of a minute
+    closed as S1 with nothing seen, received after a restart, before the REST decision or
+    after the day close, with no REST candle or a zero-volume one. What it changes is judged
+    from the database, so the minute counts the same as without the restart: sin_explicar
+    (still pending) without a REST candle, discrepante against a zero-volume one."""
+    results = [
+        late_evidence_run(connect, test_client, channel, rest, when, restart)
+        for restart in (False, True)
+    ]
+    assert results[0] == results[1], "the same with and without the restart"
+    effective, trades, candles = results[0]
+    assert (trades, candles) == (((1,), (0,)) if channel == "trade" else ((0,), (1,)))
+    expected = (
+        ("datos", "discrepante") if rest == "zero" else ("sin_explicar", "pendiente_estabilizacion")
+    )
+    assert effective == expected

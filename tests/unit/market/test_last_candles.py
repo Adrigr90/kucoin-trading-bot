@@ -17,10 +17,12 @@ from kbot.market.last_candles import (
     FlowMinute,
     Ohlcv,
     WsCandles,
+    candle_changes,
     day_close,
     decide,
     rest_kline,
     state_without_candle,
+    trade_changes,
     ws_kline,
 )
 from kbot.market.mark_candles import FlowState
@@ -300,3 +302,20 @@ def test_a_trade_without_a_websocket_candle_still_counts_as_trading() -> None:
     assert rest_kline([T0_S, "130.678", "130.678", "130.678", "130.678", "0", "0"]) == Ohlcv(
         T0, *(Decimal(v) for v in ("130.678",) * 4), Decimal(0), Decimal(0)
     )
+
+
+def test_what_late_evidence_changes() -> None:
+    """Review of E2, fifth round: the rules the database applies to a trade or a candle that
+    arrives after its minute closed (store.write_late_minutes runs the same ones in SQL)."""
+    quiet, traded, degraded = flow(FlowState.S1), flow(FlowState.S1, trades=1), flow(FlowState.S2)
+    assert trade_changes(quiet, None)
+    assert trade_changes(quiet, flat()), "a candle of volume 0 is no trading (R5-E2-02)"
+    assert not trade_changes(quiet, candle()), "the candle already showed trading"
+    assert not trade_changes(traded, None), "a trade already arrived in time"
+    assert not trade_changes(degraded, None), "on S2 the WebSocket decides nothing"
+
+    assert candle_changes(quiet, None, None, candle(), at(70)), "the first candle of the minute"
+    assert candle_changes(quiet, candle(), at(30), candle(c="100.9"), at(70)), "newer, different"
+    assert not candle_changes(quiet, candle(), at(30), candle(), at(70)), "the same, sent again"
+    assert not candle_changes(quiet, candle(), at(30), candle(c="100.9"), at(20)), "older"
+    assert not candle_changes(degraded, None, None, candle(), at(70))

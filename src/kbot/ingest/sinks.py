@@ -20,7 +20,17 @@ import psycopg
 
 from kbot.ingest.core import InstrumentSpec, ResumePoints, TickOutput
 from kbot.market import store
-from kbot.market.last_candles import CandleDecision, PendingCandle
+from kbot.market.last_candles import (
+    CandleDecision,
+    FlowMinute,
+    LateEvidence,
+    LateTrade,
+    LateWsCandle,
+    Ohlcv,
+    PendingCandle,
+    candle_changes,
+    trade_changes,
+)
 from kbot.market.mark_candles import FlowState, IndexMinute, OwnCandle
 from kbot.market.reference import FundingRow, InstrumentRow, RiskTierRow
 from kbot.market.timeutil import floor_to
@@ -58,7 +68,7 @@ def write_tick_to(conn: psycopg.Connection, output: TickOutput) -> None:
         store.write_own_candles(conn, "FUTURES", output.own_candles)
         store.write_depth(conn, output.slots, output.minute_snapshots, output.gaps)
         store.write_late_books(conn, output.late_books)
-        store.write_late_trading(conn, output.late_trading)
+        store.write_late_minutes(conn, output.late_minutes)
 
 
 class DatabaseSink:
@@ -142,21 +152,68 @@ class MemorySink:
         self.index_candles: list[OwnCandle] = []
         self.exhausted_index: list[tuple[IndexMinute, int]] = []
         self.closed_days: list[tuple[str, str, datetime]] = []
+        # The late evidence kept, as ``store.write_late_minutes`` keeps it (same rules).
+        self.late_trades: list[LateTrade] = []
+        self.late_ws_candles: list[LateWsCandle] = []
 
     def resume_points(self, specs: Iterable[InstrumentSpec]) -> ResumePoints:
         return dict(self.resume)
+
+    def _trade_flow(self, market: str, symbol: str, minute: datetime) -> FlowMinute | None:
+        for tick in self.ticks:
+            for flow in tick.flows:
+                if flow.channel == "trade" and (flow.market, flow.symbol, flow.minute) == (
+                    market,
+                    symbol,
+                    minute,
+                ):
+                    return flow
+        return None
+
+    def _latest_ws(
+        self, market: str, symbol: str, minute: datetime
+    ) -> tuple[Ohlcv | None, datetime | None]:
+        key = (market, symbol, minute)
+        known = [
+            (w.published_at, w.candle)
+            for tick in self.ticks
+            for w in tick.ws_candles
+            if (w.market, w.symbol, w.candle.open_time) == key
+        ]
+        known += [
+            (c.published_at, c.candle)
+            for c in self.late_ws_candles
+            if (c.market, c.symbol, c.candle.open_time) == key
+        ]
+        if not known:
+            return None, None
+        published, candle = max(known, key=lambda item: item[0])
+        return candle, published
+
+    def _keep_late(self, item: LateEvidence) -> None:
+        if isinstance(item, LateTrade):
+            flow = self._trade_flow(item.market, item.symbol, item.minute)
+            ws, _published = self._latest_ws(item.market, item.symbol, item.minute)
+            kept = {(t.market, t.symbol, t.minute) for t in self.late_trades}
+            if (
+                flow is not None
+                and trade_changes(flow, ws)
+                and (item.market, item.symbol, item.minute) not in kept
+            ):
+                self.late_trades.append(item)
+            return
+        minute = item.candle.open_time
+        flow = self._trade_flow(item.market, item.symbol, minute)
+        ws, published = self._latest_ws(item.market, item.symbol, minute)
+        if flow is not None and candle_changes(flow, ws, published, item.candle, item.published_at):
+            self.late_ws_candles.append(item)
 
     def pending_candles(self, since: datetime) -> list[PendingCandle]:
         """What ``store.pending_candles`` finds, from the lists (same rules)."""
         decided = {(d.market, d.symbol, d.minute) for d in self.last_candles if d.has_candle}
         closed = set(self.closed_days)
-        ws = {
-            (w.market, w.symbol, w.candle.open_time): w.candle
-            for tick in self.ticks
-            for w in tick.ws_candles
-        }
         tick_size = {(row.market, row.symbol): row.tick_size for row in self.instruments}
-        late = {(t.market, t.symbol, t.minute) for tick in self.ticks for t in tick.late_trading}
+        late = {(t.market, t.symbol, t.minute) for t in self.late_trades}
         pending = []
         for tick in self.ticks:
             for flow in tick.flows:
@@ -169,12 +226,14 @@ class MemorySink:
                     or (flow.market, flow.symbol) not in tick_size
                 ):
                     continue
+                ws, published = self._latest_ws(*key)
                 pending.append(
                     PendingCandle(
                         flow,
-                        ws.get(key),
+                        ws,
                         tick_size[(flow.market, flow.symbol)],
                         seen_late=key in late,
+                        ws_published=published,
                     )
                 )
         return pending
@@ -245,6 +304,8 @@ class MemorySink:
     def write_tick(self, output: TickOutput) -> None:
         if not output.is_empty():
             self.ticks.append(output)
+        for item in output.late_minutes:  # after the rows they refer to, in arrival order
+            self._keep_late(item)
 
     def write_last_candles(self, decisions: list[CandleDecision]) -> None:
         self.last_candles += decisions
@@ -312,9 +373,9 @@ class FileSink(MemorySink):
             ),
         )
         self._append("late_books", output.late_books)
-        self._append("late_trading", output.late_trading)
+        self._append("late_minutes", output.late_minutes)  # before the database's filter
         self.counts.update("late_book" for _ in output.late_books)
-        self.counts.update("late_trading" for _ in output.late_trading)
+        self.counts.update(f"late:{type(m).__name__}" for m in output.late_minutes)
         self.counts.update(f"slot:{s.state.value}" for s in output.slots)
         self.counts.update(f"flow:{f.channel}:{f.flow_state.value}" for f in output.flows)
         self.counts.update(f"own:{c.series}" for c in output.own_candles)

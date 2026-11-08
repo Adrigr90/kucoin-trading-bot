@@ -323,16 +323,19 @@ CREATE TABLE market.depth_late_books (
     CHECK (published_at >= slot_start AND last_slot_start >= slot_start)
 );
 
--- A minute of the last series closed as S1 with neither a trade nor a WebSocket candle, in
--- which the WebSocket saw trading afterwards: a trade with its match time M, or a candle with
--- its opening time O, in the minute. It rules out a probable absence of trades: the day close
--- writes sin_explicar, and a zero-volume REST candle decided before it arrived counts as
--- discrepante. The foreign key ties it to the S1 trade flow of its minute.
+-- Late evidence of the minutes of the last series (review of E2, fifth round). The recorder
+-- hands every trade and WebSocket candle of a closed minute to the database, and the insert
+-- keeps it only if it changes what the minute can be decided as, judged from these tables
+-- (market/store.py, write_late_minutes): the answer is the same after a restart. Both tie
+-- to the S1 trade flow of their minute: on S2 or S3 the WebSocket decides nothing.
+
+-- A trade, by its match time M, of a minute in which the WebSocket had seen no trading: no
+-- trade in time and, if any, a latest WebSocket candle of volume 0. It rules out a probable
+-- absence of trades and contradicts a zero-volume REST candle.
 CREATE TABLE market.trading_seen_late (
     market text NOT NULL CHECK (market IN ('SPOT', 'FUTURES')),
     symbol text NOT NULL,
     minute_start timestamptz NOT NULL,
-    channel text NOT NULL CHECK (channel IN ('trade', 'kline')),
     received_at timestamptz NOT NULL,
     flow_channel text NOT NULL DEFAULT 'trade' CHECK (flow_channel = 'trade'),
     flow_state text NOT NULL DEFAULT 'S1' CHECK (flow_state = 'S1'),
@@ -340,6 +343,31 @@ CREATE TABLE market.trading_seen_late (
     PRIMARY KEY (market, symbol, minute_start),
     FOREIGN KEY (market, symbol, flow_channel, minute_start, flow_state)
         REFERENCES market.data_quality_minute (market, symbol, channel, minute_start, flow_state)
+);
+
+-- A WebSocket candle received after its minute closed, newer (P) than and different from the
+-- latest one held for the minute. The WebSocket candle of a minute is the latest by P of
+-- ws_candles and this table; a candle sent again (KuCoin Futures repeats the closing candle
+-- of a minute with the first trade of the next one) is not kept.
+CREATE TABLE market.late_ws_candles (
+    market text NOT NULL CHECK (market IN ('SPOT', 'FUTURES')),
+    symbol text NOT NULL,
+    open_time timestamptz NOT NULL,
+    published_at timestamptz NOT NULL,
+    open numeric NOT NULL,
+    high numeric NOT NULL,
+    low numeric NOT NULL CHECK (low > 0),
+    close numeric NOT NULL,
+    volume numeric NOT NULL CHECK (volume >= 0),
+    turnover numeric NOT NULL CHECK (turnover >= 0),
+    received_at timestamptz NOT NULL,
+    flow_channel text NOT NULL DEFAULT 'trade' CHECK (flow_channel = 'trade'),
+    flow_state text NOT NULL DEFAULT 'S1' CHECK (flow_state = 'S1'),
+    recorded_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (market, symbol, open_time, published_at),
+    FOREIGN KEY (market, symbol, flow_channel, open_time, flow_state)
+        REFERENCES market.data_quality_minute (market, symbol, channel, minute_start, flow_state),
+    CHECK (low <= open AND low <= close AND open <= high AND close <= high)
 );
 
 -- Settled rates are observed once (observed_at = funding_time); predicted rates
@@ -388,5 +416,5 @@ GRANT SELECT, INSERT ON TABLE
     market.ws_candles, market.exhausted_index_rebuilds, market.data_gaps,
     market.minute_status, market.depth_slot_status, market.depth_metrics,
     market.depth_snapshots, market.depth_late_books, market.trading_seen_late,
-    market.funding_rates, market.universe_snapshots
+    market.late_ws_candles, market.funding_rates, market.universe_snapshots
     TO kbot_ingest;

@@ -506,30 +506,46 @@ def test_a_late_book_names_slots_already_written_and_changes_none(
 
 def seen_late(conn: psycopg.Connection, symbol: str, minute: datetime) -> None:
     conn.execute(
-        "INSERT INTO market.trading_seen_late (market, symbol, minute_start, channel,"
-        " received_at) VALUES ('FUTURES', %s, %s, 'kline', %s)",
+        "INSERT INTO market.trading_seen_late (market, symbol, minute_start, received_at)"
+        " VALUES ('FUTURES', %s, %s, %s)",
         (symbol, minute, minute + timedelta(seconds=75)),
     )
 
 
-def test_trading_seen_late_belongs_to_a_minute_closed_as_s1(
+def late_candle(conn: psycopg.Connection, symbol: str, minute: datetime, low: str = "99") -> None:
+    conn.execute(
+        "INSERT INTO market.late_ws_candles (market, symbol, open_time, published_at, open,"
+        " high, low, close, volume, turnover, received_at)"
+        " VALUES ('FUTURES', %s, %s, %s, 100, 101, %s, 100.5, 2, 201, %s)",
+        (symbol, minute, minute + timedelta(seconds=70), low, minute + timedelta(seconds=71)),
+    )
+
+
+def test_late_evidence_belongs_to_a_minute_closed_as_s1(
     ingest: psycopg.Connection, symbol: str
 ) -> None:
-    """Review of E2, fourth round: only a minute whose trade flow was S1 can have claimed that
-    the WebSocket saw no trading, so only such a minute can be contradicted; once."""
-    with pytest.raises(errors.ForeignKeyViolation):
-        seen_late(ingest, symbol, T0)  # no flow row
+    """Reviews of E2, fourth and fifth rounds: only a minute whose trade flow was S1 can be
+    decided from the WebSocket, so only such a minute keeps a late trade or a late candle;
+    a trade once, a candle once per publication time, and with a consistent candle."""
+    for insert in (seen_late, late_candle):
+        with pytest.raises(errors.ForeignKeyViolation):
+            insert(ingest, symbol, T0)  # no flow row
     quality(ingest, symbol, "kline", T0, "S1")
-    with pytest.raises(errors.ForeignKeyViolation):
-        seen_late(ingest, symbol, T0)  # it belongs to the trade flow of its minute
+    for insert in (seen_late, late_candle):
+        with pytest.raises(errors.ForeignKeyViolation):
+            insert(ingest, symbol, T0)  # they belong to the trade flow of their minute
     quality(ingest, symbol, "trade", T0, "S2")
-    with pytest.raises(errors.ForeignKeyViolation):
-        seen_late(ingest, symbol, T0)  # a degraded flow claimed nothing
+    for insert in (seen_late, late_candle):
+        with pytest.raises(errors.ForeignKeyViolation):
+            insert(ingest, symbol, T0)  # on a degraded flow the WebSocket decides nothing
     minute = T0 + timedelta(minutes=1)
     quality(ingest, symbol, "trade", minute, "S1")
-    seen_late(ingest, symbol, minute)
-    with pytest.raises(errors.UniqueViolation):
-        seen_late(ingest, symbol, minute)  # one per minute
+    with pytest.raises(errors.CheckViolation):
+        late_candle(ingest, symbol, minute, low="100.6")  # low above the close
+    for insert in (seen_late, late_candle):
+        insert(ingest, symbol, minute)
+        with pytest.raises(errors.UniqueViolation):
+            insert(ingest, symbol, minute)
 
 
 def test_pending_work_is_found_from_the_database_alone(

@@ -8,12 +8,14 @@ from decimal import Decimal
 import pytest
 
 from kbot.ingest.core import MAX_CANDLE_ATTEMPTS, InstrumentSpec, RecorderCore, TickOutput
+from kbot.ingest.sinks import MemorySink
 from kbot.market.depth import SlotState, effective_state
 from kbot.market.gaps import GapCause
 from kbot.market.last_candles import (
     CandleState,
     FlowMinute,
-    LateTrading,
+    LateTrade,
+    LateWsCandle,
     PendingCandle,
     rest_kline,
     ws_kline,
@@ -228,11 +230,21 @@ def test_a_late_book_leaves_a_lasting_record_even_if_a_correct_one_follows() -> 
     assert tick(recorder, at(32)).late_books == [], "stored once"
 
 
-def test_trading_seen_after_a_quiet_minute_closed_is_stored_and_decides_it() -> None:
+def zero_kline(minute: datetime, received: datetime) -> dict[str, object]:
+    """A flat WebSocket candle of volume 0 (the parser accepts it; not seen from KuCoin)."""
+    message = kline("SPOT", "BTC-USDT", minute, received)
+    message["d"].update(o="100", h="100", l="100", c="100", v="0", a="0")
+    return message
+
+
+ZERO_REST = rest_kline([seconds(at(0)), "100", "100", "100", "100", "0", "0"])
+
+
+def test_a_late_trade_goes_to_the_database_and_decides_its_minute() -> None:
     """Review of E2, fourth round: [0, 60) closes as S1 with neither a trade nor a candle,
-    and a trade executed at 59.5 s arrives at 63 s. It is stored, and the minute is decided
-    with it: a zero-volume REST candle now contradicts the WebSocket, and without a REST
-    candle the minute waits instead of being a probable absence of trades."""
+    and a trade executed at 59.5 s arrives at 63 s. It goes to the database with the next
+    tick, and the minute is decided with it: without a REST candle it waits instead of being
+    a probable absence of trades, and a zero-volume REST candle contradicts it."""
     recorder = core(SPOT)
     connect(recorder, at(0))
     out = tick(recorder, at(62))
@@ -241,16 +253,55 @@ def test_trading_seen_after_a_quiet_minute_closed_is_stored_and_decides_it() -> 
         ("trade", FlowState.S1, 0),
     ]
     recorder.on_message("SPOT", trade("SPOT", "BTC-USDT", at(59.5)), at(63))
-    assert tick(recorder, at(64)).late_trading == [
-        LateTrading("SPOT", "BTC-USDT", at(0), "trade", at(63))
-    ]
+    assert tick(recorder, at(64)).late_minutes == [LateTrade("SPOT", "BTC-USDT", at(0), at(63))]
     (request,) = recorder.candle_requests(at(75))
     assert recorder.apply_rest_candles(request, [], at(75)) == [], "pending, not an absence"
     (again,) = recorder.candle_requests(at(135))
-    zero = rest_kline([seconds(at(0)), "100", "100", "100", "100", "0", "0"])
-    (decision,) = recorder.apply_rest_candles(again, [zero], at(135))  # type: ignore[arg-type]
+    (decision,) = recorder.apply_rest_candles(again, [ZERO_REST], at(135))  # type: ignore[list-item]
     assert decision.state is CandleState.DISCREPANTE
     assert decision.differences == ("websocket_sin_vela", "volumen_rest_cero")
+
+
+def test_a_late_trade_contradicts_a_websocket_candle_of_volume_zero() -> None:
+    """Review of E2, fifth round (R5-E2-02): the minute had a WebSocket candle of volume 0,
+    which is no trading. A trade of it that arrives late contradicts a zero-volume REST
+    candle all the same."""
+    recorder = core(SPOT)
+    connect(recorder, at(0))
+    recorder.on_message("SPOT", zero_kline(at(0), at(30)), at(30))
+    tick(recorder, at(62))
+    recorder.on_message("SPOT", trade("SPOT", "BTC-USDT", at(59.5)), at(63))
+    (request,) = recorder.candle_requests(at(75))
+    (decision,) = recorder.apply_rest_candles(request, [ZERO_REST], at(75))  # type: ignore[list-item]
+    assert decision.state is CandleState.DISCREPANTE
+    assert decision.differences == ("volumen_rest_cero",)
+
+    without = core(SPOT)  # the same minute without the late trade: both say no trading
+    connect(without, at(0))
+    without.on_message("SPOT", zero_kline(at(0), at(30)), at(30))
+    tick(without, at(62))
+    (request,) = without.candle_requests(at(75))
+    (decision,) = without.apply_rest_candles(request, [ZERO_REST], at(75))  # type: ignore[list-item]
+    assert decision.state is CandleState.CERRADA_CRUZADA
+
+
+def test_a_late_candle_that_changes_the_minute_decides_it() -> None:
+    """A WebSocket candle of [0, 60) published and received at 70 s, after the minute closed,
+    with another close: the minute is decided with it, the latest one KuCoin published."""
+    recorder = core(SPOT)
+    connect(recorder, at(0))
+    recorder.on_message("SPOT", kline("SPOT", "BTC-USDT", at(0), at(30)), at(30))
+    tick(recorder, at(62))
+    later = kline("SPOT", "BTC-USDT", at(0), at(70))
+    later["d"]["c"] = "100.9"
+    recorder.on_message("SPOT", later, at(70))
+    (late,) = tick(recorder, at(71)).late_minutes
+    assert isinstance(late, LateWsCandle) and late.candle.close == Decimal("100.9")
+    (request,) = recorder.candle_requests(at(75))
+    rows = [rest_kline(rest_row(at(0)))]  # close 100.5: 0.4 from the latest candle
+    (decision,) = recorder.apply_rest_candles(request, rows, at(75))  # type: ignore[arg-type]
+    assert decision.state is CandleState.DISCREPANTE and decision.differences == ("close",)
+    assert decision.ws is not None and decision.ws.close == Decimal("100.9")
 
 
 def test_a_trade_counts_in_the_minute_in_which_it_was_executed() -> None:
@@ -267,32 +318,57 @@ def test_a_trade_counts_in_the_minute_in_which_it_was_executed() -> None:
     assert [(f.minute, f.messages, f.anomalies) for f in flows] == [(at(0), 1, 0), (at(60), 1, 1)]
 
 
-def test_trading_seen_after_the_decision_is_still_stored_once() -> None:
-    recorder = core(SPOT)
+def written(recorder: RecorderCore, sink: MemorySink, *moments: float) -> TickOutput:
+    """Tick at each moment and write the output, as the service does; the last output."""
+    out = TickOutput()
+    for moment in moments:
+        out = tick(recorder, at(moment))
+        sink.write_tick(out)
+    return out
+
+
+def test_late_evidence_is_kept_once_and_only_while_it_changes_the_minute() -> None:
+    """Every late trade and candle goes to the database, which keeps it only while it
+    changes what the minute can be decided as (here, the same rules in memory): two late
+    trades of a minute decided as a probable absence are kept once; once a late candle with
+    volume is kept, a late trade changes nothing more."""
+    recorder, sink = core(SPOT), MemorySink()
     connect(recorder, at(0))
-    tick(recorder, at(62))
+    written(recorder, sink, 62)
     (request,) = recorder.candle_requests(at(75))
     (decision,) = recorder.apply_rest_candles(request, [], at(75))
     assert decision.state is CandleState.AUSENCIA_SIN_TRADES
-    recorder.on_message("SPOT", kline("SPOT", "BTC-USDT", at(0), at(80)), at(80))
-    assert tick(recorder, at(81)).late_trading == [
-        LateTrading("SPOT", "BTC-USDT", at(0), "kline", at(80))
-    ]
-    recorder.on_message("SPOT", trade("SPOT", "BTC-USDT", at(59)), at(82))
-    assert tick(recorder, at(83)).late_trading == [], "one per minute"
+    for moment in (80, 81):  # two trades of the minute, after it was decided
+        recorder.on_message("SPOT", trade("SPOT", "BTC-USDT", at(59)), at(moment))
+    assert len(written(recorder, sink, 82).late_minutes) == 2, "both go to the database"
+    assert sink.late_trades == [LateTrade("SPOT", "BTC-USDT", at(0), at(80))], "kept once"
+
+    recorder, sink = core(SPOT), MemorySink()
+    connect(recorder, at(0))
+    written(recorder, sink, 62)
+    recorder.on_message("SPOT", kline("SPOT", "BTC-USDT", at(0), at(63)), at(63))
+    recorder.on_message("SPOT", trade("SPOT", "BTC-USDT", at(59)), at(64))
+    written(recorder, sink, 65)
+    assert [c.received_at for c in sink.late_ws_candles] == [at(63)]
+    assert sink.late_trades == [], "the late candle had volume: the trade changes nothing"
 
 
-def test_a_closing_candle_sent_again_contradicts_nothing() -> None:
+def test_a_closing_candle_sent_again_is_not_kept() -> None:
     """KuCoin Futures sends the closing candle of a minute again with the first trade of the
-    next one [H, E1 recording]. The minute had trading, so nothing is stored."""
-    recorder = core(FUT)
+    next one [H, E1 recording]. The same candle, and a late trade of a minute that already
+    had trading, change nothing and are not kept (review of E2, fifth round)."""
+    recorder, sink = core(FUT), MemorySink()
     connect(recorder, at(0))
     recorder.on_message("FUTURES", trade("FUTURES", "XBTUSDTM", at(30)), at(30))
     recorder.on_message("FUTURES", kline("FUTURES", "XBTUSDTM", at(0), at(30)), at(30))
-    tick(recorder, at(62))
-    recorder.on_message("FUTURES", kline("FUTURES", "XBTUSDTM", at(0), at(88)), at(88))
-    recorder.on_message("FUTURES", trade("FUTURES", "XBTUSDTM", at(88)), at(88))
-    assert tick(recorder, at(89)).late_trading == []
+    written(recorder, sink, 62)
+    again = kline("FUTURES", "XBTUSDTM", at(0), at(30))  # the same candle, sent at 88 s
+    again["P"] = kline("FUTURES", "XBTUSDTM", at(0), at(88))["P"]
+    recorder.on_message("FUTURES", again, at(88))
+    recorder.on_message("FUTURES", trade("FUTURES", "XBTUSDTM", at(59)), at(88))
+    out = written(recorder, sink, 89)
+    assert len(out.late_minutes) == 2
+    assert sink.late_ws_candles == [] and sink.late_trades == []
 
 
 def test_trading_seen_late_survives_a_restart() -> None:

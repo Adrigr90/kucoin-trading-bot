@@ -549,6 +549,78 @@ def test_the_day_waits_for_the_proof_of_life_of_its_last_minute(
     assert len(sink.closed_days) == 2, "nothing is closed twice"
 
 
+def late_scenario(
+    test_client: Factory, channel: str, rest: str, *, restart: bool
+) -> tuple[Recorder, MemorySink]:
+    """23:59 closes as S1 with neither a trade nor a candle at 00:00:02; a trade or a candle
+    of 23:59 arrives at 00:00:07, on the same connection or on the one opened after a
+    restart at 00:00:05; its REST candle is asked for at 00:00:16, and KuCoin answers with
+    none (``empty``) or with a flat one of volume 0 (``zero``)."""
+    minute = MIDNIGHT - timedelta(minutes=1)
+
+    def answer(market: str, symbol: str, start: int, end: int) -> list[list[object]]:
+        if rest == "empty" or market != "SPOT":
+            return []
+        flat = ["100", "100", "100", "100", "0", "0"]
+        return [[s, *flat] for s in range(end - end % 60, start - start % 60, -60)]
+
+    fake = FakeKucoin(spot=["BTC-USDT"], futures=["XBTUSDTM"], candles=answer)
+    sink = MemorySink()
+    rest_client = test_client(fake, RestRateLimiter(pool_weight=10**6))
+    recorder = Recorder(sink, rest=rest_client)
+    late_at = MIDNIGHT + timedelta(seconds=7)
+    message = (
+        trade("SPOT", "BTC-USDT", minute + timedelta(seconds=59.5))
+        if channel == "trade"
+        else kline("SPOT", "BTC-USDT", minute, late_at)
+    )
+
+    async def scenario() -> None:
+        nonlocal recorder
+        await recorder.startup(START)
+        connect_both(recorder, START + timedelta(seconds=1))
+        await beat(recorder, minute)
+        await beat(recorder, MIDNIGHT + timedelta(seconds=2))  # 23:59 closed, nothing seen
+        if restart:
+            recorder = Recorder(sink, rest=rest_client)
+            await recorder.startup(MIDNIGHT + timedelta(seconds=5))
+            connect_both(recorder, MIDNIGHT + timedelta(seconds=6))
+        assert recorder.core is not None
+        recorder.core.on_message("SPOT", message, late_at)
+        await beat(recorder, MIDNIGHT + timedelta(seconds=16))
+
+    run(scenario())
+    return recorder, sink
+
+
+@pytest.mark.parametrize("channel", ["trade", "kline"])
+@pytest.mark.parametrize("rest", ["empty", "zero"])
+def test_late_evidence_after_a_restart_counts_as_without_one(
+    test_client: Factory, channel: str, rest: str
+) -> None:
+    """Review of E2, fifth round (R5-E2-01): what a late trade or candle changes is judged
+    from what the database holds, so a restart in between changes nothing. Without a REST
+    candle 23:59 keeps waiting for one instead of being a probable absence of trades; a
+    zero-volume REST candle is a discrepancy."""
+    minute = MIDNIGHT - timedelta(minutes=1)
+    outcomes = []
+    for restart in (False, True):
+        recorder, sink = late_scenario(test_client, channel, rest, restart=restart)
+        assert recorder.core is not None
+        waiting = minute in recorder.core.awaiting_minutes("SPOT", "BTC-USDT")
+        decided = [(d.state, d.differences) for d in sink.last_candles if d.minute == minute]
+        kept = (len(sink.late_trades), len(sink.late_ws_candles))
+        outcomes.append((waiting, decided, kept))
+    assert outcomes[0] == outcomes[1], "the same with and without the restart"
+    waiting, decided, kept = outcomes[0]
+    assert kept == ((1, 0) if channel == "trade" else (0, 1))
+    if rest == "empty":
+        assert waiting and decided == [], "pending: KuCoin may still give its candle"
+    else:
+        assert not waiting
+        assert [state for state, _ in decided] == [CandleState.DISCREPANTE]
+
+
 def test_a_minute_settled_without_its_candle_is_final_once_its_day_is_closed(
     setup: tuple[Recorder, MemorySink, FakeKucoin],
 ) -> None:

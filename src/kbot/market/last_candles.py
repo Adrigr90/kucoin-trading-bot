@@ -9,9 +9,9 @@ Spec 02 §3.4 and §3.5, and the owner decision of 8 November 2026 (provisional 
 * with a degraded flow (S2 or S3) the REST candle stands alone (``cerrada_rest``);
 * without a REST candle, the minute is ``ausencia_sin_trades_probable`` only on S1 with
   neither a WebSocket candle nor a trade, not even one that arrived after the minute was
-  closed (``LateTrading``), ``ausencia_no_verificable`` on S2 or S3, and stays pending
-  (``pendiente_estabilizacion``) on S1 when the WebSocket saw trading: KuCoin warns that
-  its REST candles may be incomplete, so the bot waits and never builds the candle.
+  closed (``LateTrade``, ``LateWsCandle``), ``ausencia_no_verificable`` on S2 or S3, and
+  stays pending (``pendiente_estabilizacion``) on S1 when the WebSocket saw trading: KuCoin
+  warns that its REST candles may be incomplete, so the bot waits and never builds it.
 
 ``day_close`` turns the decisions of a day into the terminal ``minute_status`` of §3.5.
 """
@@ -95,17 +95,59 @@ class WsCandle:
 
 
 @dataclass(frozen=True)
-class LateTrading:
-    """The WebSocket saw trading in a minute only after the minute was closed as S1 without
-    any trade or candle (``trading_seen_late``, review of E2, fourth round): a trade whose
-    match time ``M``, or a candle whose opening ``O``, falls in it. It rules out a probable
-    absence of trades, which the closed minute could otherwise have been given."""
+class LateTrade:
+    """A trade of a minute (by its match time ``M``) received after the minute was closed.
+
+    The recorder hands every one to the database, which keeps it (``trading_seen_late``)
+    only if it changes what the minute can be decided as (``trade_changes``), from what the
+    database holds: the same answer after a restart (reviews of E2, fourth and fifth)."""
 
     market: str
     symbol: str
     minute: datetime
-    channel: str  # "trade" or "kline": the message that showed it
     received_at: datetime
+
+
+@dataclass(frozen=True)
+class LateWsCandle:
+    """A WebSocket candle of a minute received after the minute was closed. The database
+    keeps it (``late_ws_candles``) only if it is newer than, and different from, the latest
+    candle it holds for the minute (``candle_changes``)."""
+
+    market: str
+    symbol: str
+    candle: Ohlcv
+    published_at: datetime  # P of the message that carried it
+    received_at: datetime
+
+
+LateEvidence = LateTrade | LateWsCandle
+
+
+def trade_changes(flow: FlowMinute, ws: Ohlcv | None) -> bool:
+    """Whether a trade seen after its minute was closed changes what the minute can be
+    decided as: the flow was S1, no trade of the minute arrived in time, and the latest
+    WebSocket candle of the minute, if any, has volume 0. Otherwise the WebSocket had
+    already seen trading (review of E2, fifth round: a candle of volume 0 is no trading)."""
+    return flow.flow_state is FlowState.S1 and flow.messages == 0 and (ws is None or ws.volume == 0)
+
+
+def candle_changes(
+    flow: FlowMinute,
+    ws: Ohlcv | None,
+    ws_published: datetime | None,
+    candle: Ohlcv,
+    published: datetime,
+) -> bool:
+    """Whether a WebSocket candle seen after its minute was closed changes the latest one
+    known: the flow was S1 (the WebSocket only counts on S1) and there was none, or this
+    one is newer and different. KuCoin Futures sends the closing candle of a minute again
+    with the first trade of the next one [H, E1 recording]: the same candle changes nothing."""
+    if flow.flow_state is not FlowState.S1:
+        return False
+    if ws is None or ws_published is None:
+        return True
+    return published > ws_published and candle != ws
 
 
 @dataclass(frozen=True)
@@ -113,9 +155,10 @@ class PendingCandle:
     """A closed minute that still waits for its REST candle, as the database holds it."""
 
     flow: FlowMinute
-    ws: Ohlcv | None
+    ws: Ohlcv | None  # the latest WebSocket candle of the minute, in time or late
     tick_size: Decimal
-    seen_late: bool = False  # trading seen after the minute was closed (LateTrading)
+    seen_late: bool = False  # a trade kept in trading_seen_late
+    ws_published: datetime | None = None  # P of ``ws``
 
 
 @dataclass(frozen=True)
@@ -212,7 +255,7 @@ class EventFlow:
         """Count a message in the minute it was received, or in ``minute`` when its content
         names one (a candle counts in its own minute, a trade in that of its match time). A
         minute already closed is not changed (its row is written); what a late message
-        shows is looked at by the recorder (``RecorderCore``, ``LateTrading``)."""
+        shows is handed to the database by the recorder (``LateTrade``, ``LateWsCandle``)."""
         received_at = as_utc(received_at, "received_at")
         minute = floor_to(received_at if minute is None else as_utc(minute, "minute"), MINUTE)
         if minute < self._next:

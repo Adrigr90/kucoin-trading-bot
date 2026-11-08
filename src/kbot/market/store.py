@@ -12,6 +12,7 @@ from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 
 import psycopg
+from psycopg import sql
 from psycopg.types.json import Jsonb
 
 from kbot.market.depth import SLOT_SECONDS, LateBook, MinuteSnapshot, SlotResult
@@ -20,12 +21,14 @@ from kbot.market.last_candles import (
     CandleDecision,
     CandleState,
     FlowMinute,
-    LateTrading,
+    LateEvidence,
+    LateTrade,
     MinuteStatus,
     Ohlcv,
     PendingCandle,
     WsCandle,
     day_close,
+    decide,
     state_without_candle,
 )
 from kbot.market.mark_candles import Evidence, FlowState, IndexMinute, OwnCandle
@@ -151,14 +154,92 @@ def write_late_books(conn: psycopg.Connection, books: Iterable[LateBook]) -> Non
         )
 
 
-def write_late_trading(conn: psycopg.Connection, items: Iterable[LateTrading]) -> None:
-    """Trading seen in a minute closed as S1 without any (review of E2, fourth round)."""
-    with conn.transaction(), conn.cursor() as cur:
-        cur.executemany(
-            "INSERT INTO market.trading_seen_late (market, symbol, minute_start, channel,"
-            " received_at) VALUES (%s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
-            [(t.market, t.symbol, t.minute, t.channel, t.received_at) for t in items],
-        )
+# The WebSocket candle of the minute of ``q`` (a trade row of data_quality_minute): the
+# latest by P of the one stored with its flow and those that arrived after it closed.
+# Constant SQL composed with psycopg.sql, never with text from outside.
+_LATEST_WS = sql.SQL(
+    "SELECT x.open, x.high, x.low, x.close, x.volume, x.turnover, x.published_at FROM ("
+    " SELECT w.open, w.high, w.low, w.close, w.volume, w.turnover, w.published_at"
+    " FROM market.ws_candles AS w WHERE w.market = q.market AND w.symbol = q.symbol"
+    " AND w.open_time = q.minute_start"
+    " UNION ALL"
+    " SELECT l.open, l.high, l.low, l.close, l.volume, l.turnover, l.published_at"
+    " FROM market.late_ws_candles AS l WHERE l.market = q.market AND l.symbol = q.symbol"
+    " AND l.open_time = q.minute_start"
+    ") AS x ORDER BY x.published_at DESC LIMIT 1"
+)
+_TRADE_MINUTE = sql.SQL(
+    " FROM market.data_quality_minute AS q"
+    " LEFT JOIN LATERAL ({latest}) AS w ON true"
+    " WHERE q.market = %(market)s AND q.symbol = %(symbol)s AND q.channel = 'trade'"
+    " AND q.minute_start = %(minute)s AND q.flow_state = 'S1'"
+).format(latest=_LATEST_WS)
+_KEEP_LATE_TRADE = (
+    sql.SQL(
+        "INSERT INTO market.trading_seen_late (market, symbol, minute_start, received_at)"
+        " SELECT q.market, q.symbol, q.minute_start, %(received)s"
+    )
+    + _TRADE_MINUTE
+    + sql.SQL(" AND q.messages = 0 AND coalesce(w.volume, 0) = 0 ON CONFLICT DO NOTHING")
+)
+_KEEP_LATE_CANDLE = (
+    sql.SQL(
+        "INSERT INTO market.late_ws_candles (market, symbol, open_time, published_at,"
+        " open, high, low, close, volume, turnover, received_at)"
+        " SELECT q.market, q.symbol, q.minute_start, %(published)s, %(open)s, %(high)s,"
+        " %(low)s, %(close)s, %(volume)s, %(turnover)s, %(received)s"
+    )
+    + _TRADE_MINUTE
+    + sql.SQL(
+        " AND (w.published_at IS NULL OR (w.published_at < %(published)s"
+        " AND (w.open, w.high, w.low, w.close, w.volume, w.turnover)"
+        " <> (%(open)s, %(high)s, %(low)s, %(close)s, %(volume)s, %(turnover)s)))"
+        " ON CONFLICT DO NOTHING"
+    )
+)
+
+
+def write_late_minutes(conn: psycopg.Connection, items: Iterable[LateEvidence]) -> None:
+    """Trades and WebSocket candles of minutes already closed, in the order they arrived
+    (review of E2, fourth and fifth rounds). Each one is kept only if it changes what its
+    minute can be decided as, judged here from what the database holds, so a restart gives
+    the same answer as a run without one (``last_candles.trade_changes`` and
+    ``candle_changes``, the same rules in Python):
+
+    * a trade, if the trade flow of its minute is S1 with no trade in time and the latest
+      WebSocket candle of the minute, if any, has volume 0;
+    * a candle, if that flow is S1 and the minute has no WebSocket candle yet, or this one is
+      newer than the latest and different from it. A candle sent again changes nothing."""
+    with conn.transaction():
+        for item in items:
+            if isinstance(item, LateTrade):
+                conn.execute(
+                    _KEEP_LATE_TRADE,
+                    {
+                        "market": item.market,
+                        "symbol": item.symbol,
+                        "minute": item.minute,
+                        "received": item.received_at,
+                    },
+                )
+                continue
+            c = item.candle
+            conn.execute(
+                _KEEP_LATE_CANDLE,
+                {
+                    "market": item.market,
+                    "symbol": item.symbol,
+                    "minute": c.open_time,
+                    "published": item.published_at,
+                    "open": c.open,
+                    "high": c.high,
+                    "low": c.low,
+                    "close": c.close,
+                    "volume": c.volume,
+                    "turnover": c.turnover,
+                    "received": item.received_at,
+                },
+            )
 
 
 def slot_states(
@@ -392,14 +473,7 @@ def close_day(conn: psycopg.Connection, market: str, symbol: str, day: datetime)
         flows = {m: FlowState(state) for channel, m, state, _ in rows if channel == "trade"}
         trades = {m: messages for channel, m, _, messages in rows if channel == "trade"}
         klines = {m: messages for channel, m, _, messages in rows if channel == "kline"}
-        late = {
-            row[0]
-            for row in conn.execute(
-                "SELECT minute_start FROM market.trading_seen_late WHERE market = %s"
-                " AND symbol = %s AND minute_start >= %s AND minute_start < %s",
-                (market, symbol, day, end),
-            ).fetchall()
-        }
+        late = _late_minutes(conn, market, symbol, day, end)  # the WebSocket saw them late
         states = {
             row[0]: CandleState(row[1])
             for row in conn.execute(
@@ -420,33 +494,93 @@ def close_day(conn: psycopg.Connection, market: str, symbol: str, day: datetime)
     return len(statuses)
 
 
+def _late_minutes(
+    conn: psycopg.Connection, market: str, symbol: str, start: datetime, end: datetime
+) -> set[datetime]:
+    """Minutes in [start, end) with a trade or a WebSocket candle kept after they closed."""
+    rows = conn.execute(
+        "SELECT minute_start FROM market.trading_seen_late WHERE market = %s AND symbol = %s"
+        " AND minute_start >= %s AND minute_start < %s"
+        " UNION SELECT open_time FROM market.late_ws_candles WHERE market = %s AND symbol = %s"
+        " AND open_time >= %s AND open_time < %s",
+        (market, symbol, start, end, market, symbol, start, end),
+    ).fetchall()
+    return {row[0] for row in rows}
+
+
+# What a minute is decided from, as the database holds it: its trade flow, its REST candle
+# if it has one, its latest WebSocket candle (in time or late), whether a late trade was
+# kept, and the tick size in force when it ended.
+_EVIDENCE = sql.SQL(
+    "SELECT q.flow_state, q.messages, q.anomalies, q.reconnections,"
+    " c.open, c.high, c.low, c.close, c.volume, c.turnover,"
+    " w.open, w.high, w.low, w.close, w.volume, w.turnover, w.published_at,"
+    " EXISTS (SELECT 1 FROM market.trading_seen_late AS t WHERE t.market = q.market"
+    "   AND t.symbol = q.symbol AND t.minute_start = q.minute_start),"
+    " i.tick_size, q.market, q.symbol, q.minute_start"
+    " FROM market.data_quality_minute AS q"
+    " LEFT JOIN market.candles AS c ON c.series = 'last' AND c.market = q.market"
+    "   AND c.symbol = q.symbol AND c.open_time = q.minute_start"
+    " LEFT JOIN LATERAL ({latest}) AS w ON true"
+    " LEFT JOIN LATERAL (SELECT n.tick_size FROM market.instruments AS n"
+    "   WHERE n.market = q.market AND n.symbol = q.symbol"
+    "   ORDER BY n.observed_at < q.minute_start + interval '1 minute' DESC,"
+    "   n.observed_at DESC LIMIT 1) AS i ON true"
+    " WHERE q.channel = 'trade'"
+).format(latest=_LATEST_WS)
+_EVIDENCE_OF_MINUTE = _EVIDENCE + sql.SQL(
+    " AND q.market = %s AND q.symbol = %s AND q.minute_start = %s"
+)
+_PENDING = _EVIDENCE + sql.SQL(
+    " AND q.minute_start >= %s AND c.open_time IS NULL"
+    " AND NOT EXISTS (SELECT 1 FROM market.minute_status AS s WHERE s.market = q.market"
+    "   AND s.symbol = q.symbol AND s.minute_start = q.minute_start)"
+    " ORDER BY q.market, q.symbol, q.minute_start"
+)
+
+
+def _evidence(row: tuple) -> tuple[FlowMinute, Ohlcv | None, Ohlcv | None, datetime | None]:
+    state, messages, anomalies, reconnections = row[:4]
+    market, symbol, minute = row[19:22]
+    flow = FlowMinute(
+        market, symbol, "trade", minute, FlowState(state), messages, anomalies, reconnections
+    )
+    rest = Ohlcv(minute, *row[4:10]) if row[4] is not None else None
+    ws = Ohlcv(minute, *row[10:16]) if row[10] is not None else None
+    return flow, rest, ws, row[16]
+
+
 def minute_statuses(
     conn: psycopg.Connection, market: str, symbol: str, day: datetime
 ) -> dict[datetime, tuple[str, str]]:
     """What each minute of a closed day counts as (02 §3.5): its terminal status and candle
-    state, except where the WebSocket saw trading only after the minute was closed and
-    after it was decided (``trading_seen_late``): a probable absence of trades counts as
-    ``sin_explicar`` (still pending), and a zero-volume REST candle that agreed with a
-    WebSocket that had seen nothing counts as ``discrepante``. Readers use this, never
-    ``minute_status`` alone."""
-    rows = conn.execute(
-        "SELECT s.minute_start,"
-        " CASE WHEN l.minute_start IS NOT NULL AND s.status = 'sin_operaciones_probable'"
-        "   THEN 'sin_explicar' ELSE s.status END,"
-        " CASE WHEN l.minute_start IS NOT NULL AND s.status = 'sin_operaciones_probable'"
-        "   THEN 'pendiente_estabilizacion'"
-        "   WHEN l.minute_start IS NOT NULL AND c.state = 'cerrada_cruzada'"
-        "   AND c.ws_volume IS NULL THEN 'discrepante' ELSE s.candle_state END"
-        " FROM market.minute_status AS s"
-        " LEFT JOIN market.trading_seen_late AS l ON l.market = s.market"
-        "   AND l.symbol = s.symbol AND l.minute_start = s.minute_start"
-        " LEFT JOIN market.candles AS c ON c.series = 'last' AND c.market = s.market"
-        "   AND c.symbol = s.symbol AND c.open_time = s.minute_start"
-        " WHERE s.market = %s AND s.symbol = %s AND s.minute_start >= %s"
-        " AND s.minute_start < %s ORDER BY s.minute_start",
-        (market, symbol, day, day + timedelta(days=1)),
-    ).fetchall()
-    return {row[0]: (row[1], row[2]) for row in rows}
+    state, as written, except for a minute in which the WebSocket saw a trade or a candle
+    after it was closed. Such a minute is decided again with everything the database holds
+    (the late trade and the latest WebSocket candle) and counts as the worse of the two
+    results (02 §3.6): a discrepancy found by either stands, and a probable absence of
+    trades that the WebSocket contradicts is ``sin_explicar``, still pending (reviews of
+    E2, fourth and fifth rounds). Readers use this, never ``minute_status`` alone."""
+    end = day + timedelta(days=1)
+    statuses = {
+        row[0]: (row[1], row[2])
+        for row in conn.execute(
+            "SELECT minute_start, status, candle_state FROM market.minute_status"
+            " WHERE market = %s AND symbol = %s AND minute_start >= %s AND minute_start < %s",
+            (market, symbol, day, end),
+        ).fetchall()
+    }
+    for minute in sorted(_late_minutes(conn, market, symbol, day, end) & set(statuses)):
+        row = conn.execute(_EVIDENCE_OF_MINUTE, (market, symbol, minute)).fetchone()
+        if row is None or row[18] is None:
+            continue  # no flow row or no tick size: nothing to decide it again with
+        flow, rest, ws, _published = _evidence(row)
+        again = decide(market, symbol, flow, rest, ws, row[18], seen_late=row[17])
+        status, candle_state = statuses[minute]
+        if again.has_candle and CandleState.DISCREPANTE.value in (candle_state, again.state):
+            statuses[minute] = (status, CandleState.DISCREPANTE.value)
+        elif again.state is CandleState.PENDIENTE and status == "sin_operaciones_probable":
+            statuses[minute] = ("sin_explicar", CandleState.PENDIENTE.value)
+    return statuses
 
 
 # --- resuming after a stop --------------------------------------------------------------
@@ -468,40 +602,20 @@ def flow_resume_point(
 
 def pending_candles(conn: psycopg.Connection, since: datetime) -> list[PendingCandle]:
     """Minutes of the last series that still wait for their REST candle (audit E2-01): a
-    trade flow row since ``since`` with neither a candle nor a terminal status, with the
-    WebSocket candle stored with it, the tick size in force when the minute ended and
-    whether trading was seen in it after it was closed (review of E2, fourth round)."""
-    rows = conn.execute(
-        "SELECT q.market, q.symbol, q.minute_start, q.flow_state, q.messages, q.anomalies,"
-        " q.reconnections, w.open, w.high, w.low, w.close, w.volume, w.turnover, i.tick_size,"
-        " EXISTS (SELECT 1 FROM market.trading_seen_late AS l WHERE l.market = q.market"
-        "   AND l.symbol = q.symbol AND l.minute_start = q.minute_start)"
-        " FROM market.data_quality_minute AS q"
-        " LEFT JOIN market.ws_candles AS w ON w.market = q.market AND w.symbol = q.symbol"
-        "   AND w.open_time = q.minute_start"
-        " LEFT JOIN LATERAL (SELECT n.tick_size FROM market.instruments AS n"
-        "   WHERE n.market = q.market AND n.symbol = q.symbol"
-        "   ORDER BY n.observed_at < q.minute_start + interval '1 minute' DESC,"
-        "   n.observed_at DESC LIMIT 1) AS i ON true"
-        " WHERE q.channel = 'trade' AND q.minute_start >= %s"
-        " AND NOT EXISTS (SELECT 1 FROM market.candles AS c WHERE c.series = 'last'"
-        "   AND c.market = q.market AND c.symbol = q.symbol AND c.open_time = q.minute_start)"
-        " AND NOT EXISTS (SELECT 1 FROM market.minute_status AS s WHERE s.market = q.market"
-        "   AND s.symbol = q.symbol AND s.minute_start = q.minute_start)"
-        " ORDER BY q.market, q.symbol, q.minute_start",
-        (since,),
-    ).fetchall()
+    trade flow row since ``since`` with neither a candle nor a terminal status, with its
+    latest WebSocket candle (stored with it or arrived after it closed), whether a late
+    trade was kept and the tick size in force when the minute ended (reviews of E2, fourth
+    and fifth rounds)."""
+    rows = conn.execute(_PENDING, (since,)).fetchall()
     pending = []
     for row in rows:
-        market, symbol, minute, state, messages, anomalies, reconnections = row[:7]
-        o, h, low, c, volume, turnover, tick_size, seen_late = row[7:]
+        tick_size = row[18]
         if tick_size is None:
             continue  # never recorded: the recorder stores the reference data first
-        flow = FlowMinute(
-            market, symbol, "trade", minute, FlowState(state), messages, anomalies, reconnections
+        flow, _rest, ws, ws_published = _evidence(row)
+        pending.append(
+            PendingCandle(flow, ws, tick_size, seen_late=row[17], ws_published=ws_published)
         )
-        ws = Ohlcv(minute, o, h, low, c, volume, turnover) if o is not None else None
-        pending.append(PendingCandle(flow, ws, tick_size, seen_late=seen_late))
     return pending
 
 

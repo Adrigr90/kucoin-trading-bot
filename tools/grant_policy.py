@@ -52,6 +52,7 @@ MARKET_TABLES = (
     "market.depth_snapshots",
     "market.depth_late_books",
     "market.trading_seen_late",
+    "market.late_ws_candles",
     "market.funding_rates",
     "market.universe_snapshots",
 )

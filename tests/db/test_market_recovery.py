@@ -154,57 +154,125 @@ def test_a_late_book_is_kept_and_its_slots_count_as_late(ingest: psycopg.Connect
     assert late == [(at(10), at(20), 2, at(19.5), at(33))]
 
 
-def test_trading_seen_late_rules_out_a_probable_absence(ingest: psycopg.Connection) -> None:
-    """Review of E2, fourth round, from the database: three minutes closed as S1 with neither
-    a trade nor a candle. In minute 0 trading was seen before the day was closed: the close
-    writes sin_explicar. In minute 1 a zero-volume REST candle was cross-checked before it
-    was seen, and in minute 2 the day was closed before: their rows stay, and they count as
-    discrepante and sin_explicar. Closing again changes nothing."""
-    from kbot.market.last_candles import CandleState, FlowMinute, LateTrading, Ohlcv, decide
+def test_late_evidence_is_judged_from_the_database_alone(ingest: psycopg.Connection) -> None:
+    """Reviews of E2, fourth and fifth rounds, from the database: five minutes closed as S1
+    with no trade in time. Late trades of minutes 0 to 4 and two late candles of minute 4
+    are handed to the database, which keeps what changes each minute:
+
+    0. no candle: the trade is kept before the close, which writes sin_explicar;
+    1. a zero-volume REST candle cross-checked without a WebSocket candle: kept, it counts
+       as discrepante;
+    2. the day closed first as a probable absence: kept after the close, it counts as
+       sin_explicar;
+    3. a WebSocket candle of volume 0 and a zero-volume REST candle (R5-E2-02): kept, it
+       counts as discrepante;
+    4. a WebSocket candle with volume: the trade changes nothing, the closing candle sent
+       again neither; a later candle with another close is kept, and against the REST candle
+       the minute counts as discrepante.
+
+    The rows written stay as they are, and closing again changes nothing."""
+    from dataclasses import replace
+
+    from kbot.market.last_candles import (
+        CandleState,
+        FlowMinute,
+        LateTrade,
+        LateWsCandle,
+        Ohlcv,
+        WsCandle,
+        decide,
+    )
     from kbot.market.mark_candles import FlowState
     from kbot.market.store import (
         close_day,
         minute_statuses,
         write_flow,
         write_last_candles,
-        write_late_trading,
+        write_late_minutes,
+        write_ws_candles,
     )
 
     symbol = "Q" + secrets.token_hex(5).upper() + "-USDT"
     day = datetime(2026, 11, 7, tzinfo=UTC) + timedelta(days=secrets.randbelow(3000))
-    m = [day + timedelta(minutes=i) for i in range(3)]
+    m = [day + timedelta(minutes=i) for i in range(5)]
+    tick = Decimal("0.1")
+    ingest.execute(  # the tick size in force, which deciding a minute again needs
+        "INSERT INTO market.instruments (market, symbol, observed_at, base_currency,"
+        " quote_currency, settle_currency, tick_size, quantity_step, multiplier, min_quantity,"
+        " min_funds, trading_status, is_trading, raw) VALUES ('SPOT', %s, %s, 'Q', 'USDT',"
+        " NULL, 0.1, 0.0001, 1, 0.0001, 0.1, 'Trading', true, '{}')",
+        (symbol, day - timedelta(days=1)),
+    )
 
-    def flow(minute: datetime, channel: str) -> FlowMinute:
+    def flow(minute: datetime, channel: str = "trade") -> FlowMinute:
         return FlowMinute("SPOT", symbol, channel, minute, FlowState.S1, 0, 0, 0)
 
-    def seen(minute: datetime) -> LateTrading:
-        return LateTrading("SPOT", symbol, minute, "kline", minute + timedelta(seconds=70))
+    def ohlcv(minute: datetime, *values: str) -> Ohlcv:
+        return Ohlcv(minute, *(Decimal(v) for v in values))
+
+    def late(minute: datetime) -> LateTrade:
+        return LateTrade("SPOT", symbol, minute, minute + timedelta(seconds=70))
 
     write_flow(ingest, [flow(minute, channel) for minute in m for channel in ("trade", "kline")])
-    write_late_trading(ingest, [seen(m[0])])
-    zero = Ohlcv(m[1], *(Decimal(v) for v in ("100", "100", "100", "100", "0", "0")))
-    decision = decide("SPOT", symbol, flow(m[1], "trade"), zero, None, Decimal("0.1"))
-    assert decision.state is CandleState.CERRADA_CRUZADA, "both sources saw no trades then"
-    write_last_candles(ingest, [decision])
-    write_late_trading(ingest, [seen(m[1])])
+    zero_ws = ohlcv(m[3], "100", "100", "100", "100", "0", "0")
+    traded_ws = ohlcv(m[4], "100", "101", "99", "100.5", "2", "201")
+    write_ws_candles(
+        ingest,
+        [
+            WsCandle("SPOT", symbol, zero_ws, m[3] + timedelta(seconds=30)),
+            WsCandle("SPOT", symbol, traded_ws, m[4] + timedelta(seconds=30)),
+        ],
+    )
+    decisions = [
+        decide("SPOT", symbol, flow(m[1]), ohlcv(m[1], *("100",) * 4, "0", "0"), None, tick),
+        decide("SPOT", symbol, flow(m[3]), ohlcv(m[3], *("100",) * 4, "0", "0"), zero_ws, tick),
+        decide("SPOT", symbol, flow(m[4]), replace(traded_ws), traded_ws, tick),
+    ]
+    assert [d.state for d in decisions] == [CandleState.CERRADA_CRUZADA] * 3, "before them"
+    write_last_candles(ingest, decisions)
+    again = m[4] + timedelta(seconds=88)  # the same closing candle, sent again
+    later = m[4] + timedelta(seconds=89)
+    write_late_minutes(
+        ingest,
+        [
+            late(m[0]),
+            late(m[1]),
+            late(m[3]),
+            late(m[4]),
+            LateWsCandle("SPOT", symbol, traded_ws, again, again),
+            LateWsCandle("SPOT", symbol, replace(traded_ws, close=Decimal("100.9")), later, later),
+        ],
+    )
     close_day(ingest, "SPOT", symbol, day)
-    write_late_trading(ingest, [seen(m[2])])
+    write_late_minutes(ingest, [late(m[2])])
     close_day(ingest, "SPOT", symbol, day)  # again, as after a restart
+
+    def rows(query: str) -> list[object]:
+        return [row[0] for row in ingest.execute(query, (symbol,)).fetchall()]
+
+    assert rows(
+        "SELECT minute_start FROM market.trading_seen_late WHERE symbol = %s ORDER BY 1"
+    ) == [m[0], m[1], m[2], m[3]]
+    assert rows("SELECT published_at FROM market.late_ws_candles WHERE symbol = %s") == [later]
     written = ingest.execute(
         "SELECT status, candle_state FROM market.minute_status WHERE symbol = %s"
-        " ORDER BY minute_start LIMIT 3",
+        " ORDER BY minute_start LIMIT 5",
         (symbol,),
     ).fetchall()
     assert written == [
         ("sin_explicar", "pendiente_estabilizacion"),
         ("datos", "cerrada_cruzada"),
         ("sin_operaciones_probable", "ausencia_sin_trades_probable"),
+        ("datos", "cerrada_cruzada"),
+        ("datos", "cerrada_cruzada"),
     ]
     effective = minute_statuses(ingest, "SPOT", symbol, day)
     assert [effective[minute] for minute in m] == [
         ("sin_explicar", "pendiente_estabilizacion"),
         ("datos", "discrepante"),
         ("sin_explicar", "pendiente_estabilizacion"),
+        ("datos", "discrepante"),
+        ("datos", "discrepante"),
     ]
     assert len(effective) == 1440
     assert effective[day + timedelta(minutes=3)] == ("sin_explicar", "ausencia_no_verificable")

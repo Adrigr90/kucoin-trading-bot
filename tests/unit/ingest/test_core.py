@@ -162,7 +162,7 @@ def test_a_malformed_trade_degrades_its_minute() -> None:
     assert trade_flow.flow_state is FlowState.S2 and trade_flow.anomalies == 1
 
 
-def test_failed_rest_requests_are_retried_a_limited_number_of_times() -> None:
+def test_answers_without_the_candle_are_limited_attempts() -> None:
     recorder = core(SPOT)
     connect(recorder, at(0))
     feed_minute(recorder, at(0))
@@ -170,12 +170,49 @@ def test_failed_rest_requests_are_retried_a_limited_number_of_times() -> None:
     moment = at(75)
     for attempt in range(MAX_CANDLE_ATTEMPTS):
         (request,) = recorder.candle_requests(moment)
-        assert recorder.apply_rest_candles(request, None, moment) == []
+        decisions = recorder.apply_rest_candles(request, [], moment)
         assert recorder.candle_requests(moment) == [], "not again within the same minute"
         moment += timedelta(minutes=1)
         if attempt < MAX_CANDLE_ATTEMPTS - 1:
-            assert recorder.awaiting_until(at(3600)) == 1
-    assert recorder.awaiting_until(at(3600)) == 0, "given up: the day close says why"
+            assert decisions == [] and recorder.awaiting_until(at(3600)) == 1
+    assert [d.state for d in decisions] == [CandleState.PENDIENTE], "decided without a candle"
+    assert recorder.awaiting_until(at(3600)) == 0
+
+
+def test_failed_requests_never_use_up_the_attempts() -> None:
+    """Review of E2, second round: a failed request (network or KuCoin error) is not an
+    answer. The minute is asked again after 1, 2, 4 and 8 minutes, then every 15, and stays
+    pending; the candle is decided as soon as KuCoin answers."""
+    recorder = core(SPOT)
+    connect(recorder, at(0))
+    feed_minute(recorder, at(0))
+    recorder.tick(at(62))
+    moment = at(75)
+    for pause in (1, 2, 4, 8, 15, 15, 15):
+        (request,) = recorder.candle_requests(moment)
+        assert recorder.apply_rest_candles(request, None, moment) == []
+        moment += timedelta(minutes=pause)
+        assert recorder.candle_requests(moment - timedelta(seconds=1)) == []
+    assert recorder.awaiting_until(at(86_400)) == 1, "seven failures: still pending"
+    (request,) = recorder.candle_requests(moment)
+    rows = [rest_kline(rest_row(at(0)))]
+    (decision,) = recorder.apply_rest_candles(request, rows, moment)  # type: ignore[arg-type]
+    assert decision.state is CandleState.CERRADA_CRUZADA
+
+
+def test_a_minute_never_answered_is_given_up_after_48_hours() -> None:
+    recorder = core(SPOT)
+    connect(recorder, at(0))
+    feed_minute(recorder, at(0))
+    recorder.tick(at(62))
+    for moment in (at(75), at(48 * 3600 - 200)):  # the second one, 200 s before 48 h
+        (request,) = recorder.candle_requests(moment)
+        recorder.apply_rest_candles(request, None, moment)
+        assert recorder.awaiting_until(at(10**6)) == 1
+    last = at(48 * 3600 + 100)
+    (request,) = recorder.candle_requests(last)
+    recorder.apply_rest_candles(request, None, last)
+    assert recorder.awaiting_until(at(10**6)) == 0, "given up: its day closes as it is"
 
 
 def test_a_minute_seen_on_the_websocket_waits_for_its_rest_candle() -> None:

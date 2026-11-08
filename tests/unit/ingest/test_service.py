@@ -14,6 +14,7 @@ from decimal import Decimal
 
 import pytest
 
+from kbot.ingest.core import MAX_CANDLE_ATTEMPTS
 from kbot.ingest.service import EVALUATION_TIME, INDEX_ATTEMPTS, INDEX_DELAY, Recorder
 from kbot.ingest.sinks import MemorySink
 from kbot.kucoin.ratelimit import RestRateLimiter
@@ -411,6 +412,134 @@ def test_a_restart_before_midnight_reuses_tomorrows_evaluation(
     assert restarted.core is not None
     assert [s.symbol for s in restarted.core.specs] == ["BTC-USDT", "XBTUSDTM"]
     assert restarted.restart_streams is False
+
+
+def test_a_candle_that_can_still_be_recovered_keeps_its_day_open(
+    setup: tuple[Recorder, MemorySink, FakeKucoin],
+) -> None:
+    """Review of E2, second round: KuCoin's REST does not answer for XBTUSDTM (network
+    errors) six times in a row. Its day stays open while its candles can be recovered;
+    after a restart within 48 h REST answers, the candles are decided from the stored
+    evidence and only then is the day closed. BTC-USDT closes on time; nothing twice."""
+    recorder, sink, fake = setup
+    fake.unreachable = {"XBTUSDTM"}
+    minute = MIDNIGHT - timedelta(minutes=2)  # 23:58
+    # 23:58 is first asked at 00:00:02, then again 1, 2, 4, 8 and 15 minutes later.
+    steps = [minute + timedelta(seconds=62), MIDNIGHT + timedelta(seconds=2)]
+    steps += [MIDNIGHT + timedelta(seconds=16)]
+    steps += [MIDNIGHT + timedelta(minutes=m, seconds=2) for m in (1, 3, 7, 15, 30)]
+
+    async def first_run() -> None:
+        await recorder.startup(START)
+        connect_both(recorder, START + timedelta(seconds=1))
+        feed(recorder, minute)
+        feed(recorder, minute + timedelta(minutes=1))
+        for moment in steps:
+            await recorder.step(moment)
+
+    run(first_run())
+    assert sink.closed_days == [("SPOT", "BTC-USDT", DAY)], "XBTUSDTM can still be recovered"
+    core = recorder.core
+    assert core is not None
+    waiting = [m for m in core.awaiting_minutes("FUTURES", "XBTUSDTM") if m < MIDNIGHT]
+    assert waiting == [minute - timedelta(minutes=1), minute, minute + timedelta(minutes=1)]
+
+    fake.unreachable = set()  # the network is back
+    restarted = Recorder(sink, rest=recorder._rest)
+
+    async def second_run() -> None:
+        await restarted.startup(MIDNIGHT + timedelta(hours=9))
+        await restarted.step(MIDNIGHT + timedelta(hours=9, seconds=1))
+
+    run(second_run())
+    decided = {d.minute: d.state for d in sink.last_candles if d.symbol == "XBTUSDTM"}
+    assert decided == {
+        minute - timedelta(minutes=1): CandleState.CERRADA_REST,  # started half-way: S2
+        minute: CandleState.CERRADA_CRUZADA,  # with the WebSocket candle kept from 23:58
+        minute + timedelta(minutes=1): CandleState.CERRADA_CRUZADA,
+    }
+    assert sorted(sink.closed_days) == [("FUTURES", "XBTUSDTM", DAY), ("SPOT", "BTC-USDT", DAY)]
+
+    again = Recorder(sink, rest=recorder._rest)
+    run(again.startup(MIDNIGHT + timedelta(hours=9, minutes=5)))
+    run(again.step(MIDNIGHT + timedelta(hours=9, minutes=5, seconds=1)))
+    assert again.core is not None
+    assert [m for m in again.core.awaiting_minutes("FUTURES", "XBTUSDTM") if m < MIDNIGHT] == []
+    assert len(sink.closed_days) == 2, "no day is closed twice"
+
+
+def test_a_minute_settled_without_its_candle_is_final_once_its_day_is_closed(
+    setup: tuple[Recorder, MemorySink, FakeKucoin],
+) -> None:
+    """KuCoin answers five times without the candle of 23:59, which the WebSocket saw: the
+    minute is decided without a candle, the day is closed, and a later restart does not
+    ask for it again. What is closed never changes."""
+    recorder, sink, fake = setup
+    minute = MIDNIGHT - timedelta(minutes=1)
+
+    def without_it(market: str, symbol: str, start: int, end: int) -> list[list[object]]:
+        return [row for row in candles(market, symbol, start, end) if row[0] != seconds(minute)]
+
+    fake.candles = without_it
+
+    async def scenario() -> None:
+        await recorder.startup(START)
+        connect_both(recorder, START + timedelta(seconds=1))
+        feed(recorder, minute)
+        for answers in range(MAX_CANDLE_ATTEMPTS + 2):  # 23:59 is first asked at 00:01:02
+            await recorder.step(MIDNIGHT + timedelta(minutes=answers, seconds=2))
+            assert (len(sink.closed_days) == 2) is (answers >= MAX_CANDLE_ATTEMPTS)
+
+    run(scenario())
+    assert sorted(sink.closed_days) == [("FUTURES", "XBTUSDTM", DAY), ("SPOT", "BTC-USDT", DAY)]
+    assert not any(d.minute == minute and d.has_candle for d in sink.last_candles)
+    restarted = Recorder(sink, rest=recorder._rest)
+    run(restarted.startup(MIDNIGHT + timedelta(hours=1)))
+    assert restarted.core is not None
+    for market, symbol in (("SPOT", "BTC-USDT"), ("FUTURES", "XBTUSDTM")):
+        assert minute not in restarted.core.awaiting_minutes(market, symbol)
+
+
+def test_incomplete_listings_are_evaluated_again_soon(
+    setup: tuple[Recorder, MemorySink, FakeKucoin],
+) -> None:
+    """Review of E2, second round: with incomplete listings at 23:59 nothing is stored and
+    the evaluation is tried again 30 s later, still for midnight; the current universe
+    stays in force meanwhile."""
+    recorder, sink, fake = setup
+    run(recorder.startup(START))
+    fake.futures = []  # KuCoin lists no contract at 23:59
+    run(recorder.step(MIDNIGHT - timedelta(minutes=1)))
+    assert {e.evaluated_at for e in sink.universe} == {START}
+    assert recorder._next_evaluation == MIDNIGHT - timedelta(seconds=30)
+    fake.futures = ["XBTUSDTM"]
+    run(recorder.step(MIDNIGHT - timedelta(seconds=30)))
+    assert {e.evaluated_at for e in sink.universe} == {START, MIDNIGHT}, "on time, for midnight"
+    assert recorder._next_evaluation == MIDNIGHT + EVALUATION_TIME
+
+
+def test_listings_missing_until_after_midnight_give_a_late_evaluation(
+    setup: tuple[Recorder, MemorySink, FakeKucoin],
+) -> None:
+    recorder, sink, fake = setup
+    late = MIDNIGHT + timedelta(seconds=30)
+
+    async def scenario() -> None:
+        await recorder.startup(START)
+        fake.futures = []
+        for moment in (MIDNIGHT - timedelta(minutes=1), MIDNIGHT - timedelta(seconds=30), MIDNIGHT):
+            await recorder.step(moment)
+        assert {e.evaluated_at for e in sink.universe} == {START}, "never a partial universe"
+        fake.futures = ["XBTUSDTM"]
+        fake.spot = ["BTC-USDT", "ETH-USDT"]
+        await recorder.step(late)
+
+    run(scenario())
+    assert {e.evaluated_at for e in sink.universe} == {START, late}
+    assert recorder.restart_streams is True
+    assert recorder.core is not None
+    assert [s.symbol for s in recorder.core.specs] == ["BTC-USDT", "XBTUSDTM", "ETH-USDT"]
+    assert recorder._next_evaluation == MIDNIGHT + EVALUATION_TIME
 
 
 def test_a_stall_is_an_outage_never_a_healthy_connection(

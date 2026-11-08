@@ -285,3 +285,79 @@ def test_pending_work_survives_restarts(connect: Connect, test_client: Factory) 
         for market, symbol in (("SPOT", spot), ("FUTURES", futures)):
             assert [m for m in third.core.awaiting_minutes(market, symbol) if m <= minute] == []
         assert [m for _, m in third._index if m <= minute] == [], "nothing is asked twice"
+
+
+def test_a_recoverable_candle_keeps_its_day_open(connect: Connect, test_client: Factory) -> None:
+    """Review of E2, second round, in PostgreSQL: KuCoin's REST does not answer for the
+    contract six times in a row (network errors). The spot day is closed on time; the
+    contract's day gets no terminal status while its candles can be recovered. After a
+    restart within 48 h REST answers: the candle of 23:58 is cross-checked with the stored
+    WebSocket candle, the day is closed with it, and a third start changes nothing."""
+    day = datetime(2020, 1, 1, tzinfo=UTC) + timedelta(days=secrets.randbelow(2000))
+    midnight = day + timedelta(days=1)
+    start = midnight - timedelta(minutes=2, seconds=30)
+    minute = midnight - timedelta(minutes=2)
+    spot = "S" + secrets.token_hex(4).upper() + "-USDT"
+    futures = "F" + secrets.token_hex(4).upper() + "USDTM"
+    fake = FakeKucoin(
+        spot=[spot], futures=[futures], candles=rest_candles_until(midnight + timedelta(hours=1))
+    )
+    fake.unreachable = {futures}
+    # 23:58 is first asked at 00:00:02, then again 1, 2, 4, 8 and 15 minutes later.
+    steps = [minute + timedelta(seconds=62), midnight + timedelta(seconds=2)]
+    steps += [midnight + timedelta(seconds=16)]
+    steps += [midnight + timedelta(minutes=m, seconds=2) for m in (1, 3, 7, 15, 30)]
+
+    with connect("kbot_ingest") as conn:
+        sink = DatabaseSink(conn)
+        rest = test_client(fake, RestRateLimiter(pool_weight=10**6))
+
+        def statuses(symbol: str) -> object:
+            return conn.execute(
+                "SELECT count(*) FROM market.minute_status WHERE symbol = %s"
+                " AND minute_start >= %s AND minute_start < %s",
+                (symbol, day, midnight),
+            ).fetchone()
+
+        first = Recorder(sink, rest=rest)
+
+        async def first_run() -> None:
+            await first.startup(start)
+            assert first.core is not None
+            for market in ("SPOT", "FUTURES"):
+                first.core.on_state(market, "connected", start + timedelta(seconds=1), "wss://")
+            feed_minute(first.core, minute, spot, futures)
+            for moment in steps:
+                await first.step(moment)
+
+        asyncio.run(first_run())
+        assert statuses(spot) == (1440,)
+        assert statuses(futures) == (0,), "no terminal status while it can be recovered"
+
+        fake.unreachable = set()  # the network is back
+        second = Recorder(sink, rest=rest)
+
+        async def second_run() -> None:
+            await second.startup(midnight + timedelta(hours=9))
+            await second.step(midnight + timedelta(hours=9, seconds=1))
+
+        asyncio.run(second_run())
+        assert conn.execute(
+            "SELECT c.state, c.ws_volume, s.status FROM market.candles c"
+            " JOIN market.minute_status s ON s.market = c.market AND s.symbol = c.symbol"
+            " AND s.minute_start = c.open_time"
+            " WHERE c.series = 'last' AND c.symbol = %s AND c.open_time = %s",
+            (futures, minute),
+        ).fetchall() == [("cerrada_cruzada", Decimal(2), "datos")]
+        assert statuses(futures) == (1440,)
+
+        third = Recorder(sink, rest=rest)
+
+        async def third_run() -> None:
+            await third.startup(midnight + timedelta(hours=9, minutes=5))
+            await third.step(midnight + timedelta(hours=9, minutes=5, seconds=1))
+
+        asyncio.run(third_run())
+        assert third.core is not None
+        assert [m for m in third.core.awaiting_minutes("FUTURES", futures) if m < midnight] == []
+        assert (statuses(spot), statuses(futures)) == ((1440,), (1440,))

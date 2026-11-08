@@ -8,14 +8,16 @@ second. ``step`` does everything that depends on the clock, from the time it is 
 * index minutes without a candle from the flow: rebuild them from Classic, a few requests
   a minute;
 * every 10 min the predicted funding, every hour the settled funding;
-* at 23:59 UTC: evaluate tomorrow's universe and refresh the reference data;
-* at 00:00 UTC: switch to that universe (the streams are renewed if it changed) and, once
-  no minute of the day waits for its REST candle (at most 10 min), close the day.
+* at 23:59 UTC: evaluate tomorrow's universe and refresh the reference data (again 30 s
+  later if KuCoin's listings are incomplete);
+* at 00:00 UTC: switch to that universe (the streams are renewed if it changed); from
+  00:00:15, close the day of each instrument once none of its minutes waits for a REST
+  candle that can still be recovered (``RECOVERY_HORIZON``).
 
-At start-up the recorder resumes from the database what the previous run left pending:
-the REST candles of closed minutes and the index rebuilds (audit E2-01 and E2-02). If it
-was stopped or suspended across midnight and missed the 23:59 evaluation, the universe of
-the day already started is evaluated as soon as it runs again (audit E2-04).
+At start-up the recorder resumes from the database what the previous run left pending in
+the last 48 h: the REST candles of closed minutes and the index rebuilds (audit E2-01 and
+E2-02). If it was stopped or suspended across midnight and missed the 23:59 evaluation,
+the universe of the day already started is evaluated as soon as it runs again (E2-04).
 
 Every database write runs in a worker thread, so a slow write never stops the WebSocket
 connections from answering their pings. Every REST call goes through the guarded client
@@ -31,11 +33,13 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
+import httpx
 import structlog
 
 from kbot.core.clock import Clock, SystemClock
 from kbot.ingest.core import (
     MARKETS,
+    RECOVERY_HORIZON,
     CandleRequest,
     IndexRebuild,
     InstrumentSpec,
@@ -61,7 +65,7 @@ log = structlog.get_logger("kbot.ingest")
 
 DAY = timedelta(days=1)
 EVALUATION_TIME = timedelta(hours=23, minutes=59)  # tomorrow's universe, from today's data
-DAY_CLOSE_LIMIT = timedelta(minutes=10)  # the close waits for pending candles at most this
+EVALUATION_RETRY = timedelta(seconds=30)  # after incomplete listings
 FUNDING_EVERY = timedelta(minutes=10)
 SETTLED_EVERY = timedelta(hours=1)
 INDEX_DELAY = timedelta(minutes=2)  # Classic history of a minute, asked this long after it
@@ -87,16 +91,17 @@ class Recorder:
         self._rest = rest
         self.core: RecorderCore | None = None
         self.restart_streams = False
-        self._started_at: datetime | None = None
         self._index: dict[tuple[str, datetime], _IndexTask] = {}
         self._index_symbols: dict[str, str] = {}  # contract -> its Classic index
         self._index_budget: tuple[datetime, int] | None = None
         self._next_funding: datetime | None = None
         self._next_settled: datetime | None = None
         self._next_evaluation: datetime | None = None
+        self._evaluation_for: datetime | None = None  # the midnight it is for
         self._next_midnight: datetime | None = None
         self._tomorrow: tuple[datetime, list[InstrumentSpec]] | None = None
         self._days_to_close: set[datetime] = set()
+        self._closing: dict[datetime, set[tuple[str, str]]] = {}  # members still to close
         self._last_beat: datetime | None = None  # set by run(); None in step-driven tests
 
     # --- start ------------------------------------------------------------------------------
@@ -119,10 +124,9 @@ class Recorder:
         resume = await self._db(self.sink.resume_points, specs)
         core = RecorderCore(specs, started_at=now, resume=resume)
         self.core = core
-        self._started_at = now
         self._days_to_close = {day - DAY, day - 2 * DAY}
-        # What the previous run left pending in the days this run may still close.
-        oldest = day - 2 * DAY
+        # What the previous run left pending and can still be recovered.
+        oldest = floor_to(now - RECOVERY_HORIZON, MINUTE)
         candles = core.restore_awaiting(await self._db(self.sink.pending_candles, oldest))
         rebuilds = 0
         for minute in await self._db(self.sink.pending_index_rebuilds, oldest):
@@ -139,6 +143,7 @@ class Recorder:
         self._next_midnight = day + DAY
         evaluation = day + EVALUATION_TIME
         self._next_evaluation = evaluation if now < evaluation else now
+        self._evaluation_for = day + DAY
         log.info(
             "recorder_started",
             instruments=len(specs),
@@ -188,19 +193,24 @@ class Recorder:
         self._next_midnight = midnight + DAY
 
     async def _close_days(self, now: datetime) -> None:
+        """Close the day of each instrument once none of its minutes waits for a REST candle.
+
+        What the close writes is terminal and never changes, so a minute whose candle can
+        still be recovered keeps its instrument's day open: answers without the candle end
+        within minutes, and a minute KuCoin never answered for is given up after
+        ``RECOVERY_HORIZON`` (review of E2, second round). The other instruments close on
+        time."""
         core = self._require_core()
         for day in sorted(self._days_to_close):
             end = day + DAY
             if now < end + STABILIZATION:
                 continue
-            # The close waits for the last REST candles of the day at most 10 minutes,
-            # counted from the start of this run when it began after the end of the day: a
-            # restart gives the minutes it resumed the same chance (audit E2-01).
-            limit = max(end, self._started_at or end) + DAY_CLOSE_LIMIT
-            if core.awaiting_until(end) and now < limit:
-                continue
-            members = await self._db(self.sink.universe_members, day)
-            for market, symbol in sorted(members):
+            if day not in self._closing:
+                self._closing[day] = set(await self._db(self.sink.universe_members, day))
+            remaining = self._closing[day]
+            for market, symbol in sorted(remaining):
+                if any(day <= m < end for m in core.awaiting_minutes(market, symbol)):
+                    continue
                 if not await self._db(self.sink.day_is_closed, market, symbol, day):
                     minutes = await self._db(self.sink.close_day, market, symbol, day)
                     log.info(
@@ -210,7 +220,10 @@ class Recorder:
                         day=day.date().isoformat(),
                         minutes=minutes,
                     )
-            self._days_to_close.discard(day)
+                remaining.discard((market, symbol))
+            if not remaining:
+                self._days_to_close.discard(day)
+                del self._closing[day]
 
     # --- REST ------------------------------------------------------------------------------
 
@@ -220,8 +233,10 @@ class Recorder:
             raise RuntimeError("the recorder has not started")
         try:
             return (await rest.get(route, **kwargs)).data
-        except KucoinApiError as exc:
-            log.warning("rest_error", route=route, error=str(exc))
+        except (KucoinApiError, httpx.HTTPError) as exc:
+            # A failed request is not an answer, and a network error never stops the
+            # recorder: whoever asked tries again later.
+            log.warning("rest_error", route=route, error=f"{type(exc).__name__}: {exc}")
             return None
 
     async def _rest_candles(self, request: CandleRequest) -> list[Ohlcv] | None:
@@ -442,14 +457,24 @@ class Recorder:
         already started is evaluated now, stored with the real time of the evaluation and
         applied at once, renewing the subscriptions. A day never runs on a universe that
         was evaluated for another day.
+
+        With incomplete listings nothing is stored, the current universe stays in force
+        and the evaluation is tried again ``EVALUATION_RETRY`` later (review of E2, second
+        round); once past the midnight, the retry is a late evaluation as above.
         """
-        scheduled = self._next_evaluation or now
-        target = floor_to(scheduled, DAY) + DAY  # the midnight this evaluation is for
-        self._next_evaluation = max(target, floor_to(now, DAY)) + EVALUATION_TIME
+        target = self._evaluation_for or floor_to(now, DAY) + DAY
         listings = await self._listings()
         if not all(listings[m][0] and listings[m][1] for m in MARKETS):
-            log.warning("universe_not_evaluated", reason="incomplete listings")
-            return  # the current universe stays in force
+            self._next_evaluation = now + EVALUATION_RETRY
+            log.warning(
+                "universe_not_evaluated",
+                reason="incomplete listings",
+                retry_at=self._next_evaluation.isoformat(),
+            )
+            return
+        following = max(target, floor_to(now, DAY)) + DAY
+        self._evaluation_for = following
+        self._next_evaluation = following - DAY + EVALUATION_TIME
         if now < target:
             stored = await self._db(self.sink.load_universe, target)
             entries = [e for e in stored if e.evaluated_at == target]
@@ -459,7 +484,9 @@ class Recorder:
             self._tomorrow = (target, await self._reference(entries, listings, now))
             return
         log.warning(
-            "universe_evaluation_missed", due=scheduled.isoformat(), evaluated_at=now.isoformat()
+            "universe_evaluation_missed",
+            for_midnight=target.isoformat(),
+            evaluated_at=now.isoformat(),
         )
         entries = self._evaluate(listings, evaluated_at=now)
         await self._db(self.sink.write_universe, entries)

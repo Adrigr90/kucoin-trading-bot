@@ -61,7 +61,7 @@ from kbot.market.timeutil import MINUTE, as_utc, floor_to, from_milliseconds, is
 MARKETS = ("SPOT", "FUTURES")
 LATENESS = timedelta(seconds=2)  # provisional until D26
 MAX_BACKFILL = timedelta(days=1)
-MAX_CANDLE_ATTEMPTS = 5  # a pending REST candle is asked for at most this many times
+MAX_CANDLE_ATTEMPTS = 5  # answers from KuCoin without the candle, at most
 # Minutes from the first to the last of one REST request. The window asked for is one
 # minute wider on each side, so at most 102 candles: below the 200 of Futures (02 §3.2).
 MAX_MINUTES_PER_REQUEST = 100
@@ -69,6 +69,11 @@ MAX_MINUTES_PER_REQUEST = 100
 # can be incomplete, so the minute is asked again before it is given up.
 RETRIED = frozenset({CandleState.PENDIENTE, CandleState.AUSENCIA_NO_VERIFICABLE})
 RETRY_INTERVAL = timedelta(minutes=1)
+# A failed request (network, KuCoin error or an unreadable answer) is not an answer and
+# never uses up an attempt: the candle is recoverable history (02 §3.7). It is asked again
+# with a growing pause, and the minute stays pending for this long after it.
+RECOVERY_HORIZON = timedelta(hours=48)
+MAX_FAILURE_PAUSE = timedelta(minutes=15)
 
 
 @dataclass(frozen=True)
@@ -132,7 +137,8 @@ class _Awaiting:
     flow: FlowMinute
     ws: Ohlcv | None
     tick_size: Decimal  # of the instrument when the minute was recorded
-    attempts: int = 0
+    attempts: int = 0  # answers without the candle
+    failures: int = 0  # requests without an answer
     next_try: datetime | None = None
 
 
@@ -463,9 +469,15 @@ class RecorderCore:
         self, request: CandleRequest, rows: list[Ohlcv] | None, now: datetime
     ) -> list[CandleDecision]:
         """Decide the awaiting minutes of ``request``. ``rows`` is the full REST answer for
-        the requested range, or None if the request failed (the minutes are asked again,
-        at most ``MAX_CANDLE_ATTEMPTS`` times; then the day close says why they lack a
-        candle). A minute that is still ``pendiente_estabilizacion`` is asked again too."""
+        the requested range, or None if the request failed.
+
+        An answer without the candle of a minute that may still get one
+        (``pendiente_estabilizacion`` or ``ausencia_no_verificable``) is an attempt: the
+        minute is asked again a minute later, and after ``MAX_CANDLE_ATTEMPTS`` answers it
+        is decided without a candle. A failed request is not an answer: the minutes are
+        asked again after a growing pause (1, 2, 4 and 8 minutes, then every 15), for up to
+        ``RECOVERY_HORIZON`` after each minute, and only then given up. Meanwhile they stay
+        pending, so their day is not closed (``kbot.ingest.service``)."""
         now = as_utc(now, "now")
         key = (request.market, request.symbol)
         pending = self._awaiting.get(key, {})
@@ -473,12 +485,15 @@ class RecorderCore:
         by_minute = {row.open_time: row for row in rows} if rows is not None else {}
         for minute in [m for m in sorted(pending) if request.first <= m <= request.last]:
             awaiting = pending[minute]
+            if rows is None:
+                awaiting.failures += 1
+                pause = RETRY_INTERVAL * 2 ** min(awaiting.failures - 1, 4)
+                awaiting.next_try = now + min(pause, MAX_FAILURE_PAUSE)
+                if now - minute >= RECOVERY_HORIZON:
+                    del pending[minute]  # no answer in 48 h: its day closes as it is
+                continue
             awaiting.attempts += 1
             awaiting.next_try = now + RETRY_INTERVAL
-            if rows is None:
-                if awaiting.attempts >= MAX_CANDLE_ATTEMPTS:
-                    del pending[minute]
-                continue
             decision = decide(
                 request.market,
                 request.symbol,

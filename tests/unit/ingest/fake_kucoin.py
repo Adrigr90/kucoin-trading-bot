@@ -69,12 +69,15 @@ class FakeKucoin(httpx.AsyncBaseTransport):
     futures: list[str]
     candles: Rows = field(default=lambda market, symbol, start, end: [])
     index_value: Callable[[int], object] = field(default=lambda ms: 75000)
+    unreachable: set[str] = field(default_factory=set)  # symbols whose candles never arrive
     requests: list[str] = field(default_factory=list)
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
         q = dict(request.url.params)
         self.requests.append(path)
+        if path.endswith("/market/kline") and q.get("symbol") in self.unreachable:
+            raise httpx.ConnectError("network unreachable (simulated)", request=request)
         data: Any
         if path.endswith("/market/instrument"):
             names = self.spot if q["tradeType"] == "SPOT" else self.futures

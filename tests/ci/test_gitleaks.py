@@ -1,6 +1,6 @@
-"""Secret scanning (spec 02 §9) and the second case of acceptance test A8.
+"""Secret scanning (spec 02 §9) and the second case of acceptance test F1-A8.
 
-A8 (case 2): the CI rejects a test secret. The fake token is generated at run time inside
+F1-A8 (case 2): the CI rejects a test secret. The fake token is generated at run time inside
 a temporary folder, so no secret-looking string is ever committed.
 """
 
@@ -32,7 +32,7 @@ def _scan(binary: str, folder: Path) -> subprocess.CompletedProcess[str]:
     )
 
 
-def test_a8_a_planted_token_is_detected(gitleaks: str, tmp_path: Path) -> None:
+def test_f1_a8_a_planted_token_is_detected(gitleaks: str, tmp_path: Path) -> None:
     alphabet = string.ascii_letters + string.digits
     fake_token = "ghp_" + "".join(secrets.choice(alphabet) for _ in range(36))
     (tmp_path / "settings.py").write_text(f'GITHUB_TOKEN = "{fake_token}"\n', encoding="utf-8")

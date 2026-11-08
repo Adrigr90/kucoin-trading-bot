@@ -1,6 +1,6 @@
-"""SQL whitelist analyzer (spec 02 §9, B20) and the first case of acceptance test A8.
+"""SQL whitelist analyzer (spec 02 §9, B20) and the first case of acceptance test F1-A8.
 
-A8 (case 1): the CI rejects a statement outside the whitelist.
+F1-A8 (case 1): the CI rejects a statement outside the whitelist.
 B20: a pglast version with the PostgreSQL 18 grammar parses every migration.
 """
 

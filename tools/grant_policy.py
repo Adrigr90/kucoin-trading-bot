@@ -43,6 +43,8 @@ MARKET_TABLES = (
     "market.risk_tiers",
     "market.data_quality_minute",
     "market.candles",
+    "market.ws_candles",
+    "market.exhausted_index_rebuilds",
     "market.data_gaps",
     "market.minute_status",
     "market.depth_slot_status",

@@ -12,6 +12,11 @@ second. ``step`` does everything that depends on the clock, from the time it is 
 * at 00:00 UTC: switch to that universe (the streams are renewed if it changed) and, once
   no minute of the day waits for its REST candle (at most 10 min), close the day.
 
+At start-up the recorder resumes from the database what the previous run left pending:
+the REST candles of closed minutes and the index rebuilds (audit E2-01 and E2-02). If it
+was stopped or suspended across midnight and missed the 23:59 evaluation, the universe of
+the day already started is evaluated as soon as it runs again (audit E2-04).
+
 Every database write runs in a worker thread, so a slow write never stops the WebSocket
 connections from answering their pings. Every REST call goes through the guarded client
 of E1, inside the machine-wide budget.
@@ -40,7 +45,7 @@ from kbot.ingest.sinks import Sink
 from kbot.kucoin.rest import KucoinApiError, KucoinRestClient
 from kbot.kucoin.ws import ConnectionPacer, PublicStream
 from kbot.market.last_candles import STABILIZATION, Ohlcv, rest_kline
-from kbot.market.mark_candles import index_candle_from_points
+from kbot.market.mark_candles import IndexMinute, index_candle_from_points
 from kbot.market.reference import (
     InstrumentRow,
     index_points,
@@ -73,6 +78,7 @@ class _IndexTask:
     rebuild: IndexRebuild
     due: datetime
     attempts: int = 0
+    answered: bool = False  # Classic answered at least once, without a complete minute
 
 
 class Recorder:
@@ -81,7 +87,9 @@ class Recorder:
         self._rest = rest
         self.core: RecorderCore | None = None
         self.restart_streams = False
+        self._started_at: datetime | None = None
         self._index: dict[tuple[str, datetime], _IndexTask] = {}
+        self._index_symbols: dict[str, str] = {}  # contract -> its Classic index
         self._index_budget: tuple[datetime, int] | None = None
         self._next_funding: datetime | None = None
         self._next_settled: datetime | None = None
@@ -109,8 +117,23 @@ class Recorder:
             await self._db(self.sink.write_universe, entries)
         specs = await self._reference(entries, listings, now)
         resume = await self._db(self.sink.resume_points, specs)
-        self.core = RecorderCore(specs, started_at=now, resume=resume)
+        core = RecorderCore(specs, started_at=now, resume=resume)
+        self.core = core
+        self._started_at = now
         self._days_to_close = {day - DAY, day - 2 * DAY}
+        # What the previous run left pending in the days this run may still close.
+        oldest = day - 2 * DAY
+        candles = core.restore_awaiting(await self._db(self.sink.pending_candles, oldest))
+        rebuilds = 0
+        for minute in await self._db(self.sink.pending_index_rebuilds, oldest):
+            index_symbol = self._index_symbols.get(minute.symbol)
+            if index_symbol is None:
+                log.warning("pending_index_without_contract", symbol=minute.symbol)
+                continue
+            self._add_index_task(
+                IndexRebuild(minute.symbol, index_symbol, minute.minute, minute.flow_state)
+            )
+            rebuilds += 1
         self._next_funding = now
         self._next_settled = now
         self._next_midnight = day + DAY
@@ -121,6 +144,8 @@ class Recorder:
             instruments=len(specs),
             spot=sum(s.market == "SPOT" for s in specs),
             futures=sum(s.market == "FUTURES" for s in specs),
+            pending_candles=candles,
+            pending_index_rebuilds=rebuilds,
         )
 
     # --- one step of the clock -------------------------------------------------------------
@@ -129,13 +154,15 @@ class Recorder:
         now = as_utc(now, "now")
         core = self._require_core()
         self._check_stall(now)
+        # Midnight before anything is closed: after a stall across it, the instruments that
+        # leave stop exactly at midnight and the ones that enter start there (audit E2-04).
+        while self._next_midnight is not None and now >= self._next_midnight:
+            self._switch_day(self._next_midnight)
         output = core.tick(now)
         if not output.is_empty():
             await self._db(self.sink.write_tick, output)
         for rebuild in output.index_rebuilds:
-            self._index[(rebuild.symbol, rebuild.minute)] = _IndexTask(
-                rebuild, rebuild.minute + MINUTE + INDEX_DELAY
-            )
+            self._add_index_task(rebuild)
         for request in core.candle_requests(now):
             rows = await self._rest_candles(request)
             decisions = core.apply_rest_candles(request, rows, now)
@@ -145,17 +172,18 @@ class Recorder:
         await self._rebuild_index(now)
         await self._funding(now)
         if self._next_evaluation is not None and now >= self._next_evaluation:
-            await self._evaluate_tomorrow(now)
-        if self._next_midnight is not None and now >= self._next_midnight:
-            self._switch_day(self._next_midnight)
+            await self._evaluate_universe(now)
         await self._close_days(now)
 
     def _switch_day(self, midnight: datetime) -> None:
         core = self._require_core()
-        if self._tomorrow is not None and self._tomorrow[0] == midnight:
-            self.restart_streams = core.apply_universe(self._tomorrow[1], midnight)
-            log.info("universe_switched", at=midnight.isoformat(), changed=self.restart_streams)
-        self._tomorrow = None
+        tomorrow = self._tomorrow
+        if tomorrow is not None and tomorrow[0] <= midnight:
+            if tomorrow[0] == midnight:
+                changed = core.apply_universe(tomorrow[1], midnight)
+                self.restart_streams = self.restart_streams or changed
+                log.info("universe_switched", at=midnight.isoformat(), changed=changed)
+            self._tomorrow = None
         self._days_to_close.add(midnight - DAY)
         self._next_midnight = midnight + DAY
 
@@ -165,8 +193,12 @@ class Recorder:
             end = day + DAY
             if now < end + STABILIZATION:
                 continue
-            if core.awaiting_until(end) and now < end + DAY_CLOSE_LIMIT:
-                continue  # wait for the last REST candles of the day, at most 10 minutes
+            # The close waits for the last REST candles of the day at most 10 minutes,
+            # counted from the start of this run when it began after the end of the day: a
+            # restart gives the minutes it resumed the same chance (audit E2-01).
+            limit = max(end, self._started_at or end) + DAY_CLOSE_LIMIT
+            if core.awaiting_until(end) and now < limit:
+                continue
             members = await self._db(self.sink.universe_members, day)
             for market, symbol in sorted(members):
                 if not await self._db(self.sink.day_is_closed, market, symbol, day):
@@ -251,6 +283,7 @@ class Recorder:
         )
         points = index_points(data, rebuild.index_symbol) if data is not None else None
         candles = []
+        exhausted: list[tuple[IndexMinute, int]] = []
         for task in chunk:
             candle = (
                 index_candle_from_points(rebuild.symbol, task.rebuild.minute, points)
@@ -263,11 +296,30 @@ class Recorder:
                 del self._index[key]
                 continue
             task.attempts += 1
+            task.answered = task.answered or points is not None
             task.due = now + INDEX_DELAY
-            if task.attempts >= INDEX_ATTEMPTS:
-                del self._index[key]  # Classic has no complete minute: it stays a gap
+            if task.attempts < INDEX_ATTEMPTS:
+                continue
+            del self._index[key]
+            r = task.rebuild
+            if task.answered:
+                # Classic has no complete minute: it stays a gap, and the database says so,
+                # so no restart asks for it again (audit E2-02).
+                exhausted.append((IndexMinute(r.symbol, r.minute, r.flow_state), task.attempts))
+            else:
+                # Classic never answered: still pending, the next start-up asks again.
+                log.warning(
+                    "index_rebuild_unanswered", symbol=r.symbol, minute=r.minute.isoformat()
+                )
         if candles:
             await self._db(self.sink.write_index_candles, candles)
+        if exhausted:
+            await self._db(self.sink.write_exhausted_index, exhausted)
+
+    def _add_index_task(self, rebuild: IndexRebuild) -> None:
+        key = (rebuild.symbol, rebuild.minute)
+        if key not in self._index:
+            self._index[key] = _IndexTask(rebuild, rebuild.minute + MINUTE + INDEX_DELAY)
 
     async def _funding(self, now: datetime) -> None:
         futures = [s for s in self._require_core().specs if s.market == "FUTURES"]
@@ -343,6 +395,9 @@ class Recorder:
             for c in _list_of(contracts)
             if isinstance(c, dict)
         }
+        self._index_symbols.update(
+            {s: i for s, i in index_of.items() if isinstance(s, str) and isinstance(i, str)}
+        )
         specs: list[InstrumentSpec] = []
         for entry in members:
             row = rows.get((entry.market, entry.symbol))
@@ -378,16 +433,40 @@ class Recorder:
                 log.warning("risk_tiers_unreadable", symbol=spec.symbol)
         return specs
 
-    async def _evaluate_tomorrow(self, now: datetime) -> None:
-        midnight = floor_to(now, DAY) + DAY
-        self._next_evaluation = midnight + EVALUATION_TIME
+    async def _evaluate_universe(self, now: datetime) -> None:
+        """The universe for the midnight that follows the scheduled evaluation (audit E2-04).
+
+        On time (from 23:59 to that midnight) it takes effect at the midnight, and a restart
+        in between reuses the evaluation already stored for it. If the recorder was stopped
+        or suspended across the midnight, the window was missed: the universe of the day
+        already started is evaluated now, stored with the real time of the evaluation and
+        applied at once, renewing the subscriptions. A day never runs on a universe that
+        was evaluated for another day.
+        """
+        scheduled = self._next_evaluation or now
+        target = floor_to(scheduled, DAY) + DAY  # the midnight this evaluation is for
+        self._next_evaluation = max(target, floor_to(now, DAY)) + EVALUATION_TIME
         listings = await self._listings()
         if not all(listings[m][0] and listings[m][1] for m in MARKETS):
             log.warning("universe_not_evaluated", reason="incomplete listings")
             return  # the current universe stays in force
-        entries = self._evaluate(listings, evaluated_at=midnight)
+        if now < target:
+            stored = await self._db(self.sink.load_universe, target)
+            entries = [e for e in stored if e.evaluated_at == target]
+            if not entries:
+                entries = self._evaluate(listings, evaluated_at=target)
+                await self._db(self.sink.write_universe, entries)
+            self._tomorrow = (target, await self._reference(entries, listings, now))
+            return
+        log.warning(
+            "universe_evaluation_missed", due=scheduled.isoformat(), evaluated_at=now.isoformat()
+        )
+        entries = self._evaluate(listings, evaluated_at=now)
         await self._db(self.sink.write_universe, entries)
-        self._tomorrow = (midnight, await self._reference(entries, listings, now))
+        specs = await self._reference(entries, listings, now)
+        changed = self._require_core().apply_universe(specs, now)
+        self.restart_streams = self.restart_streams or changed
+        log.info("universe_switched", at=now.isoformat(), changed=changed)
 
     # --- helpers ---------------------------------------------------------------------------
 

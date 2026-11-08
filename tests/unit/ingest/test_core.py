@@ -10,7 +10,13 @@ import pytest
 from kbot.ingest.core import MAX_CANDLE_ATTEMPTS, InstrumentSpec, RecorderCore
 from kbot.market.depth import SlotState
 from kbot.market.gaps import GapCause
-from kbot.market.last_candles import CandleState, rest_kline
+from kbot.market.last_candles import (
+    CandleState,
+    FlowMinute,
+    PendingCandle,
+    rest_kline,
+    ws_kline,
+)
 from kbot.market.mark_candles import Evidence, FlowState
 from tests.unit.ingest.messages import book, kline, mark, rest_row, trade
 
@@ -183,6 +189,62 @@ def test_a_minute_seen_on_the_websocket_waits_for_its_rest_candle() -> None:
     rows = [rest_kline(rest_row(at(0)))]
     (decision,) = recorder.apply_rest_candles(again, rows, at(135))  # type: ignore[arg-type]
     assert decision.state is CandleState.CERRADA_CRUZADA
+
+
+def test_the_websocket_candle_leaves_memory_with_its_flow() -> None:
+    """Audit E2-01: the WebSocket candle of a closed minute goes to the database with the
+    trade flow of that minute, with the time KuCoin published it."""
+    recorder = core(SPOT)
+    connect(recorder, at(0))
+    feed_minute(recorder, at(0))
+    out = recorder.tick(at(62))
+    (ws,) = out.ws_candles
+    assert (ws.market, ws.symbol, ws.candle.open_time) == ("SPOT", "BTC-USDT", at(0))
+    assert ws.published_at == at(30) and ws.candle.volume == Decimal(2)
+    assert any(f.channel == "trade" and f.minute == at(0) for f in out.flows)
+
+
+def test_a_restored_minute_is_decided_from_the_stored_evidence() -> None:
+    """Audit E2-01: after a restart a minute is decided from the flow and the WebSocket
+    candle that the database holds. Without that candle the same REST candle would be
+    taken for a discrepancy."""
+    minute = at(-120)  # closed by the previous run
+    flow = FlowMinute("SPOT", "BTC-USDT", "trade", minute, FlowState.S1, 3, 0, 0)
+    ws = ws_kline(kline("SPOT", "BTC-USDT", minute, minute + timedelta(seconds=30)))
+    rows = [rest_kline(rest_row(minute))]
+
+    recorder = core(SPOT)
+    assert recorder.restore_awaiting([PendingCandle(flow, ws, Decimal("0.1"))]) == 1
+    assert recorder.restore_awaiting([PendingCandle(flow, None, Decimal("0.1"))]) == 0
+    (request,) = recorder.candle_requests(at(0))
+    (decision,) = recorder.apply_rest_candles(request, rows, at(0))  # type: ignore[arg-type]
+    assert decision.state is CandleState.CERRADA_CRUZADA and decision.ws == ws
+    assert recorder.awaiting_until(at(3600)) == 0
+
+    blind = core(SPOT)
+    blind.restore_awaiting([PendingCandle(flow, None, Decimal("0.1"))])
+    (request,) = blind.candle_requests(at(0))
+    (decision,) = blind.apply_rest_candles(request, rows, at(0))  # type: ignore[arg-type]
+    assert decision.state is CandleState.DISCREPANTE, "what the audit warned about"
+
+
+def test_a_request_never_spans_more_than_a_hundred_minutes() -> None:
+    """Minutes far apart (resumed after a restart) never widen the REST window beyond 102
+    candles: a request covers at most 100 minutes from its first to its last."""
+    recorder = core(SPOT)
+    minutes = [at(-86_400), at(-86_400 + 99 * 60), at(-86_400 + 100 * 60), at(-600)]
+    recorder.restore_awaiting(
+        PendingCandle(
+            FlowMinute("SPOT", "BTC-USDT", "trade", m, FlowState.S3, 0, 0, 0), None, Decimal(1)
+        )
+        for m in minutes
+    )
+    requests = recorder.candle_requests(at(0))
+    assert [(r.first, r.last) for r in requests] == [
+        (minutes[0], minutes[1]),
+        (minutes[2], minutes[2]),
+        (minutes[3], minutes[3]),
+    ]
 
 
 def test_a_restart_resumes_where_the_database_says() -> None:

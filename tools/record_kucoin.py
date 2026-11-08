@@ -1,4 +1,4 @@
-"""Record real public KuCoin responses as fixtures for the contract tests (07 §2 E1, A4).
+"""Record real public KuCoin responses as fixtures for the contract tests (07 §2 E1, F2-A4).
 
 Usage, from the repository root:  uv run python -m tools.record_kucoin
 

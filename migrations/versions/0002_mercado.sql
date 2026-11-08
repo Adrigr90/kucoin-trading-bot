@@ -116,6 +116,46 @@ CREATE TABLE market.candles (
     )
 );
 
+-- The last labelled WebSocket candle of each minute of the last series, written with the
+-- trade flow of its minute. The REST candle is decided about 15 s later; after a restart in
+-- between, the minute is decided from this row, never as if the WebSocket had seen nothing
+-- (audit E2-01). It is also the evidence behind cerrada_cruzada and discrepante.
+CREATE TABLE market.ws_candles (
+    market text NOT NULL CHECK (market IN ('SPOT', 'FUTURES')),
+    symbol text NOT NULL,
+    open_time timestamptz NOT NULL,
+    open numeric NOT NULL,
+    high numeric NOT NULL,
+    low numeric NOT NULL CHECK (low > 0),
+    close numeric NOT NULL,
+    volume numeric NOT NULL CHECK (volume >= 0),
+    turnover numeric NOT NULL CHECK (turnover >= 0),
+    published_at timestamptz NOT NULL,
+    flow_channel text NOT NULL DEFAULT 'trade' CHECK (flow_channel = 'trade'),
+    recorded_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (market, symbol, open_time),
+    FOREIGN KEY (market, symbol, flow_channel, open_time)
+        REFERENCES market.data_quality_minute (market, symbol, channel, minute_start),
+    CHECK (low <= open AND low <= close AND open <= high AND close <= high)
+);
+
+-- An index minute given up: its mark-price flow could not build it (S2 or S3) and Classic
+-- had no complete minute after every attempt (02 §3.7). A mark-price minute that is not
+-- S1, has no index candle and has no row here is still pending, so a restart resumes its
+-- rebuild (audit E2-02).
+CREATE TABLE market.exhausted_index_rebuilds (
+    market text NOT NULL CHECK (market = 'FUTURES'),
+    symbol text NOT NULL,
+    minute_start timestamptz NOT NULL,
+    attempts int2 NOT NULL CHECK (attempts > 0),
+    flow_channel text NOT NULL DEFAULT 'mark-price' CHECK (flow_channel = 'mark-price'),
+    flow_state text NOT NULL CHECK (flow_state IN ('S2', 'S3')),
+    recorded_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (market, symbol, minute_start),
+    FOREIGN KEY (market, symbol, flow_channel, minute_start, flow_state)
+        REFERENCES market.data_quality_minute (market, symbol, channel, minute_start, flow_state)
+);
+
 CREATE TABLE market.data_gaps (
     market text NOT NULL CHECK (market IN ('SPOT', 'FUTURES')),
     channel text NOT NULL
@@ -290,6 +330,7 @@ COMMENT ON SCHEMA market IS
 GRANT USAGE ON SCHEMA market TO kbot_ingest;
 GRANT SELECT, INSERT ON TABLE
     market.instruments, market.risk_tiers, market.data_quality_minute, market.candles,
-    market.data_gaps, market.minute_status, market.depth_slot_status, market.depth_metrics,
+    market.ws_candles, market.exhausted_index_rebuilds, market.data_gaps,
+    market.minute_status, market.depth_slot_status, market.depth_metrics,
     market.depth_snapshots, market.funding_rates, market.universe_snapshots
     TO kbot_ingest;

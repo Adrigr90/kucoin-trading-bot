@@ -1,4 +1,4 @@
-"""Acceptance A2 (07 §2 E1): only whitelisted public GETs ever reach the network."""
+"""Acceptance F2-A2 (07 §2 E1): only whitelisted public GETs ever reach the network."""
 
 from __future__ import annotations
 

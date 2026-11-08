@@ -1,6 +1,6 @@
 """Migration limits against the DM, without a database (spec 02 §6.1).
 
-A8 (case 3): the CI rejects a limit that differs from the DM.
+F1-A8 (case 3): the CI rejects a limit that differs from the DM.
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ def test_repository_migration_matches_the_dm(dm_text: str, migration_sql: list[s
         ("    'isolated',\n    true,\n", "    'isolated',\n    false,\n"),
     ],
 )
-def test_a8_a_limit_different_from_the_dm_is_rejected(
+def test_f1_a8_a_limit_different_from_the_dm_is_rejected(
     dm_text: str, migration_sql: list[str], column_value: str, changed: str
 ) -> None:
     original = "\n".join(migration_sql)

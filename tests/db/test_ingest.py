@@ -2,7 +2,7 @@
 
 The scenario of tests/unit/ingest/test_service.py, with every write going through the
 foreign keys and CHECK constraints of migration 0002, and then a restart that resumes
-from what the database says (phase 2 acceptance A5, A6 and A8 together).
+from what the database says (acceptance F2-A5, F2-A6 and F2-A8 together).
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ import asyncio
 import secrets
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 import psycopg
 import pytest
@@ -72,7 +73,7 @@ def test_the_recorder_writes_a_consistent_day_and_resumes(
         def rows(sql: str, *args: object) -> list[tuple[object, ...]]:
             return conn.execute(sql, args).fetchall()
 
-        # A8: one terminal state per slot, contiguous, from the start to the last closed.
+        # F2-A8: one terminal state per slot, contiguous, from the start to the last closed.
         slots = rows(
             "SELECT slot_start, state FROM market.depth_slot_status"
             " WHERE symbol = %s AND depth = 5 ORDER BY slot_start",
@@ -118,7 +119,7 @@ def test_the_recorder_writes_a_consistent_day_and_resumes(
             ("index", "23:59", "reconstruida_classic", 60),
         ]
 
-        # A6: the day is closed, 1,440 minutes per instrument, from the database alone.
+        # F2-A6: the day is closed, 1,440 minutes per instrument, from the database alone.
         statuses = rows(
             "SELECT symbol, status, count(*) FROM market.minute_status"
             " WHERE minute_start >= %s AND minute_start < %s AND symbol IN (%s, %s)"
@@ -155,7 +156,7 @@ def test_the_recorder_writes_a_consistent_day_and_resumes(
             futures,
         ) == [("liquidado",), ("previsto",)]
 
-        # A5: the process stops after 00:02:01 and starts again at 00:05:00.
+        # F2-A5: the process stops after 00:02:01 and starts again at 00:05:00.
         restarted = Recorder(sink, rest=recorder._rest)
         restart = midnight + timedelta(minutes=5)
 
@@ -188,3 +189,99 @@ def test_the_recorder_writes_a_consistent_day_and_resumes(
             "desconectado",
             "no_recibida",
         }
+
+
+def test_pending_work_survives_restarts(connect: Connect, test_client: Factory) -> None:
+    """Audit E2-01 and E2-02 in PostgreSQL: the process stops after minute 23:58 is written,
+    before its REST candle and its index rebuild are asked for. The next run resumes both
+    from the database alone, decides the candle from the stored WebSocket candle and
+    rebuilds the index from Classic; a third run finds nothing of them left to do."""
+    day = datetime(2020, 1, 1, tzinfo=UTC) + timedelta(days=secrets.randbelow(2000))
+    midnight = day + timedelta(days=1)
+    start = midnight - timedelta(minutes=2, seconds=30)
+    minute = midnight - timedelta(minutes=2)
+    spot = "S" + secrets.token_hex(4).upper() + "-USDT"
+    futures = "F" + secrets.token_hex(4).upper() + "USDTM"
+    fake = FakeKucoin(
+        spot=[spot], futures=[futures], candles=rest_candles_until(midnight + timedelta(hours=1))
+    )
+
+    with connect("kbot_ingest") as conn:
+        sink = DatabaseSink(conn)
+        rest = test_client(fake, RestRateLimiter(pool_weight=10**6))
+
+        def rows(sql: str, *args: object) -> list[tuple[object, ...]]:
+            return conn.execute(sql, args).fetchall()
+
+        def connected(recorder: Recorder, moment: datetime) -> None:
+            assert recorder.core is not None
+            for market in ("SPOT", "FUTURES"):
+                recorder.core.on_state(market, "connected", moment, "wss://...")
+
+        first = Recorder(sink, rest=rest)
+
+        async def first_run() -> None:
+            await first.startup(start)
+            assert first.core is not None
+            connected(first, start + timedelta(seconds=1))
+            feed_minute(first.core, minute, spot, futures)
+            first.core.on_state(
+                "FUTURES",
+                "disconnected",
+                minute + timedelta(seconds=40),
+                "ConnectionClosedError: no close frame received or sent",
+            )
+            first.core.on_state("FUTURES", "connected", minute + timedelta(seconds=45), "wss://")
+            await first.step(minute + timedelta(seconds=62))  # 23:58 written, nothing asked
+
+        asyncio.run(first_run())
+        assert rows(
+            "SELECT symbol FROM market.ws_candles WHERE symbol IN (%s, %s) ORDER BY symbol",
+            spot,
+            futures,
+        ) == [(futures,), (spot,)], "the WebSocket candles of 23:58 are only in the database"
+        assert rows(
+            "SELECT count(*) FROM market.candles WHERE open_time = %s AND symbol IN (%s, %s)",
+            minute,
+            spot,
+            futures,
+        ) == [(0,)]
+
+        second = Recorder(sink, rest=rest)
+
+        async def second_run() -> None:
+            await second.startup(minute + timedelta(seconds=70))
+            assert second.core is not None
+            assert second.core.awaiting_minutes("SPOT", spot) == [minute]
+            assert second.core.awaiting_minutes("FUTURES", futures) == [minute]
+            assert sorted(m for _, m in second._index) == [minute - timedelta(minutes=1), minute]
+            connected(second, minute + timedelta(seconds=71))
+            await second.step(minute + timedelta(seconds=75))  # the REST candles
+            await second.step(minute + timedelta(minutes=3, seconds=1))  # Classic
+
+        asyncio.run(second_run())
+        last = rows(
+            "SELECT symbol, state, ws_volume FROM market.candles WHERE series = 'last'"
+            " AND open_time = %s AND symbol IN (%s, %s) ORDER BY symbol",
+            minute,
+            spot,
+            futures,
+        )
+        assert last == [
+            (futures, "cerrada_rest", None),  # its flow had the outage: REST alone
+            (spot, "cerrada_cruzada", Decimal(2)),  # cross-checked with the stored candle
+        ]
+        index = rows(
+            f"SELECT {HHMM}, evidence FROM market.candles WHERE series = 'index'"
+            " AND symbol = %s AND open_time <= %s ORDER BY open_time",
+            futures,
+            minute,
+        )
+        assert index == [("23:57", "reconstruida_classic"), ("23:58", "reconstruida_classic")]
+
+        third = Recorder(sink, rest=rest)
+        asyncio.run(third.startup(minute + timedelta(minutes=3, seconds=5)))
+        assert third.core is not None
+        for market, symbol in (("SPOT", spot), ("FUTURES", futures)):
+            assert [m for m in third.core.awaiting_minutes(market, symbol) if m <= minute] == []
+        assert [m for _, m in third._index if m <= minute] == [], "nothing is asked twice"

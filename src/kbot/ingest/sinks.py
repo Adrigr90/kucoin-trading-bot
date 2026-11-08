@@ -20,14 +20,17 @@ import psycopg
 
 from kbot.ingest.core import InstrumentSpec, ResumePoints, TickOutput
 from kbot.market import store
-from kbot.market.last_candles import CandleDecision
-from kbot.market.mark_candles import OwnCandle
+from kbot.market.last_candles import CandleDecision, PendingCandle
+from kbot.market.mark_candles import FlowState, IndexMinute, OwnCandle
 from kbot.market.reference import FundingRow, InstrumentRow, RiskTierRow
+from kbot.market.timeutil import floor_to
 from kbot.market.universe import UniverseEntry
 
 
 class Sink(Protocol):
     def resume_points(self, specs: Iterable[InstrumentSpec]) -> ResumePoints: ...
+    def pending_candles(self, since: datetime) -> list[PendingCandle]: ...
+    def pending_index_rebuilds(self, since: datetime) -> list[IndexMinute]: ...
     def load_universe(self, day: datetime) -> list[UniverseEntry]: ...
     def universe_members(self, day: datetime) -> set[tuple[str, str]]: ...
     def write_universe(self, entries: list[UniverseEntry]) -> None: ...
@@ -39,15 +42,18 @@ class Sink(Protocol):
     def write_tick(self, output: TickOutput) -> None: ...
     def write_last_candles(self, decisions: list[CandleDecision]) -> None: ...
     def write_index_candles(self, candles: list[OwnCandle]) -> None: ...
+    def write_exhausted_index(self, minutes: list[tuple[IndexMinute, int]]) -> None: ...
     def day_is_closed(self, market: str, symbol: str, day: datetime) -> bool: ...
     def close_day(self, market: str, symbol: str, day: datetime) -> int: ...
 
 
 def write_tick_to(conn: psycopg.Connection, output: TickOutput) -> None:
-    """One tick, in the order the foreign keys need: flows, then the candles that point at
-    them, then depth (slot status before metrics and snapshots) and gaps."""
+    """One tick, in the order the foreign keys need: flows, then the WebSocket and own
+    candles that point at them, then depth (slot status before metrics and snapshots)
+    and gaps."""
     with conn.transaction():
         store.write_flow(conn, output.flows)
+        store.write_ws_candles(conn, output.ws_candles)
         store.write_own_candles(conn, "FUTURES", output.own_candles)
         store.write_depth(conn, output.slots, output.minute_snapshots, output.gaps)
 
@@ -69,6 +75,12 @@ class DatabaseSink:
                     value = store.flow_resume_point(self.conn, spec.market, spec.symbol, channel)
                 points[(spec.market, spec.symbol, channel)] = value
         return points
+
+    def pending_candles(self, since: datetime) -> list[PendingCandle]:
+        return store.pending_candles(self.conn, since)
+
+    def pending_index_rebuilds(self, since: datetime) -> list[IndexMinute]:
+        return store.pending_index_rebuilds(self.conn, since)
 
     def load_universe(self, day: datetime) -> list[UniverseEntry]:
         return store.load_universe(self.conn, day)
@@ -99,6 +111,9 @@ class DatabaseSink:
     def write_index_candles(self, candles: list[OwnCandle]) -> None:
         store.write_own_candles(self.conn, "FUTURES", candles)
 
+    def write_exhausted_index(self, minutes: list[tuple[IndexMinute, int]]) -> None:
+        store.write_exhausted_index(self.conn, minutes)
+
     def day_is_closed(self, market: str, symbol: str, day: datetime) -> bool:
         return store.day_is_closed(self.conn, market, symbol, day)
 
@@ -119,10 +134,58 @@ class MemorySink:
         self.ticks: list[TickOutput] = []
         self.last_candles: list[CandleDecision] = []
         self.index_candles: list[OwnCandle] = []
+        self.exhausted_index: list[tuple[IndexMinute, int]] = []
         self.closed_days: list[tuple[str, str, datetime]] = []
 
     def resume_points(self, specs: Iterable[InstrumentSpec]) -> ResumePoints:
         return dict(self.resume)
+
+    def pending_candles(self, since: datetime) -> list[PendingCandle]:
+        """What ``store.pending_candles`` finds, from the lists (same rules)."""
+        decided = {(d.market, d.symbol, d.minute) for d in self.last_candles if d.has_candle}
+        closed = set(self.closed_days)
+        ws = {
+            (w.market, w.symbol, w.candle.open_time): w.candle
+            for tick in self.ticks
+            for w in tick.ws_candles
+        }
+        tick_size = {(row.market, row.symbol): row.tick_size for row in self.instruments}
+        pending = []
+        for tick in self.ticks:
+            for flow in tick.flows:
+                key = (flow.market, flow.symbol, flow.minute)
+                if (
+                    flow.channel != "trade"
+                    or flow.minute < since
+                    or key in decided
+                    or (flow.market, flow.symbol, floor_to(flow.minute, _DAY)) in closed
+                    or (flow.market, flow.symbol) not in tick_size
+                ):
+                    continue
+                pending.append(
+                    PendingCandle(flow, ws.get(key), tick_size[(flow.market, flow.symbol)])
+                )
+        return pending
+
+    def pending_index_rebuilds(self, since: datetime) -> list[IndexMinute]:
+        """What ``store.pending_index_rebuilds`` finds, from the lists (same rules)."""
+        done = {(c.symbol, c.open_time) for c in self.index_candles}
+        done |= {(m.symbol, m.minute) for m, _ in self.exhausted_index}
+        done |= {
+            (c.symbol, c.open_time)
+            for t in self.ticks
+            for c in t.own_candles
+            if c.series == "index"
+        }
+        return [
+            IndexMinute(f.symbol, f.minute, f.flow_state)
+            for t in self.ticks
+            for f in t.flows
+            if f.channel == "mark-price"
+            and f.flow_state is not FlowState.S1
+            and f.minute >= since
+            and (f.symbol, f.minute) not in done
+        ]
 
     def load_universe(self, day: datetime) -> list[UniverseEntry]:
         in_day = [e for e in self.universe if day <= e.evaluated_at < day + _DAY]
@@ -166,6 +229,9 @@ class MemorySink:
     def write_index_candles(self, candles: list[OwnCandle]) -> None:
         self.index_candles += candles
 
+    def write_exhausted_index(self, minutes: list[tuple[IndexMinute, int]]) -> None:
+        self.exhausted_index += minutes
+
     def day_is_closed(self, market: str, symbol: str, day: datetime) -> bool:
         return (market, symbol, day) in self.closed_days
 
@@ -202,6 +268,7 @@ class FileSink(MemorySink):
 
     def write_tick(self, output: TickOutput) -> None:
         self._append("flows", output.flows)
+        self._append("ws_candles", output.ws_candles)
         self._append("own_candles", output.own_candles)
         self._append("gaps", output.gaps)
         self._append(
@@ -250,6 +317,21 @@ class FileSink(MemorySink):
     def write_index_candles(self, candles: list[OwnCandle]) -> None:
         self._append("index_candles", candles)
         self.counts.update("index_rebuilt" for _ in candles)
+
+    def write_exhausted_index(self, minutes: list[tuple[IndexMinute, int]]) -> None:
+        self._append(
+            "index_exhausted",
+            (
+                {
+                    "symbol": m.symbol,
+                    "minute": m.minute,
+                    "flow_state": m.flow_state.value,
+                    "attempts": attempts,
+                }
+                for m, attempts in minutes
+            ),
+        )
+        self.counts.update("index_exhausted" for _ in minutes)
 
 
 _DAY = timedelta(days=1)

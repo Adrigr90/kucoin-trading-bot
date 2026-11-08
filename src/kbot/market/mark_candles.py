@@ -223,6 +223,16 @@ class MarkCandleBuilder:
         return self._minutes.setdefault(minute, _Minute())
 
 
+@dataclass(frozen=True)
+class IndexMinute:
+    """An index minute whose mark-price flow could not build its own candle (S2 or S3):
+    it is rebuilt from Classic, or given up when Classic has no complete minute."""
+
+    symbol: str
+    minute: datetime
+    flow_state: FlowState
+
+
 def index_candle_from_points(
     symbol: str, minute: datetime, points: Iterable[tuple[int, object]]
 ) -> OwnCandle | None:

@@ -1,6 +1,6 @@
 """The market schema in a real PostgreSQL 18, with real kbot_ingest sessions (02 §3.8).
 
-Phase 2 acceptance A7 (kbot_ingest only reads and inserts in market) and A8 (one terminal
+Acceptance F2-A7 (kbot_ingest only reads and inserts in market) and F2-A8 (one terminal
 state per depth slot), and the review of E2: the database itself refuses metrics of a slot
 that is not valid (problem 2), a candle or a minute status that contradicts its flow
 (problem 3), and a second terminal result for the same key (idempotence).
@@ -11,12 +11,15 @@ from __future__ import annotations
 import secrets
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 import psycopg
 import pytest
 from psycopg import errors
 from psycopg.types.json import Jsonb
 
+from kbot.market import store
+from kbot.market.mark_candles import FlowState
 from tools.grant_policy import MARKET_TABLES
 
 pytestmark = pytest.mark.db
@@ -118,7 +121,7 @@ def metrics(conn: psycopg.Connection, symbol: str, start: datetime) -> None:
     )
 
 
-# --- A7: privileges in real sessions ---------------------------------------------------
+# --- F2-A7: privileges in real sessions ---------------------------------------------------
 
 
 @pytest.mark.parametrize("table", MARKET_TABLES)
@@ -126,7 +129,7 @@ def metrics(conn: psycopg.Connection, symbol: str, start: datetime) -> None:
     "statement",
     ["UPDATE {t} SET recorded_at = recorded_at", "DELETE FROM {t}", "TRUNCATE {t}"],
 )
-def test_a7_kbot_ingest_can_never_change_or_delete(
+def test_f2_a7_kbot_ingest_can_never_change_or_delete(
     ingest: psycopg.Connection, table: str, statement: str
 ) -> None:
     with pytest.raises(errors.InsufficientPrivilege):
@@ -142,14 +145,14 @@ def test_a7_kbot_ingest_can_never_change_or_delete(
         "DROP TABLE market.data_gaps",
     ],
 )
-def test_a7_kbot_ingest_has_nothing_outside_its_rows(
+def test_f2_a7_kbot_ingest_has_nothing_outside_its_rows(
     ingest: psycopg.Connection, statement: str
 ) -> None:
     with pytest.raises(errors.InsufficientPrivilege):
         ingest.execute(statement)
 
 
-def test_a7_kbot_ingest_reads_and_inserts(ingest: psycopg.Connection, symbol: str) -> None:
+def test_f2_a7_kbot_ingest_reads_and_inserts(ingest: psycopg.Connection, symbol: str) -> None:
     ingest.execute(
         "INSERT INTO market.data_gaps (market, channel, symbol, start_at, end_at, cause)"
         " VALUES ('SPOT', 'obu5', %s, %s, %s, 'desconexion')",
@@ -161,10 +164,10 @@ def test_a7_kbot_ingest_reads_and_inserts(ingest: psycopg.Connection, symbol: st
     assert rows == [("desconexion",)]
 
 
-# --- A8 and problem 2: depth slots and their metrics -----------------------------------
+# --- F2-A8 and problem 2: depth slots and their metrics -----------------------------------
 
 
-def test_a8_one_terminal_state_per_slot_and_the_first_one_stays(
+def test_f2_a8_one_terminal_state_per_slot_and_the_first_one_stays(
     ingest: psycopg.Connection, symbol: str
 ) -> None:
     slot(ingest, symbol, T0, "valida")
@@ -328,6 +331,126 @@ def test_only_index_minutes_are_rebuilt_from_classic(
     with pytest.raises(errors.CheckViolation):
         candle(ingest, symbol, T0, series="mark", **rebuilt)  # type: ignore[arg-type]
     candle(ingest, symbol, T0, series="index", **rebuilt)  # type: ignore[arg-type]
+
+
+# --- audit E2-01, E2-02 and E2-03: pending work and late slots in the database ------------
+
+
+def ws_candle(conn: psycopg.Connection, symbol: str, minute: datetime, low: str = "99") -> None:
+    conn.execute(
+        "INSERT INTO market.ws_candles (market, symbol, open_time, open, high, low, close,"
+        " volume, turnover, published_at) VALUES ('FUTURES', %s, %s, 100, 101, %s, 100.5, 2,"
+        " 201, %s)",
+        (symbol, minute, low, minute + timedelta(seconds=30)),
+    )
+
+
+def given_up(conn: psycopg.Connection, symbol: str, minute: datetime, flow_state: str) -> None:
+    conn.execute(
+        "INSERT INTO market.exhausted_index_rebuilds (market, symbol, minute_start, attempts,"
+        " flow_state) VALUES ('FUTURES', %s, %s, 3, %s)",
+        (symbol, minute, flow_state),
+    )
+
+
+def test_a_websocket_candle_needs_the_trade_flow_of_its_minute(
+    ingest: psycopg.Connection, symbol: str
+) -> None:
+    with pytest.raises(errors.ForeignKeyViolation):
+        ws_candle(ingest, symbol, T0)  # no flow row: the order is flow first
+    quality(ingest, symbol, "kline", T0, "S1")
+    with pytest.raises(errors.ForeignKeyViolation):
+        ws_candle(ingest, symbol, T0)  # it is kept with the trade flow of its minute
+    quality(ingest, symbol, "trade", T0, "S1")
+    with pytest.raises(errors.CheckViolation):
+        ws_candle(ingest, symbol, T0, low="100.6")  # low above the close
+    ws_candle(ingest, symbol, T0)
+    with pytest.raises(errors.UniqueViolation):
+        ws_candle(ingest, symbol, T0)  # one per minute
+
+
+def test_only_an_index_minute_without_its_own_candle_can_be_given_up(
+    ingest: psycopg.Connection, symbol: str
+) -> None:
+    with pytest.raises(errors.ForeignKeyViolation):
+        given_up(ingest, symbol, T0, "S2")  # no mark-price flow row
+    quality(ingest, symbol, "mark-price", T0, "S1")
+    with pytest.raises(errors.CheckViolation):
+        given_up(ingest, symbol, T0, "S1")  # an S1 minute builds its own candle
+    with pytest.raises(errors.ForeignKeyViolation):
+        given_up(ingest, symbol, T0, "S2")  # contradicts the flow of the minute
+    minute = T0 + timedelta(minutes=1)
+    quality(ingest, symbol, "mark-price", minute, "S3")
+    given_up(ingest, symbol, minute, "S3")
+
+
+def test_a_late_slot_with_no_book_in_force_has_no_sequence(
+    ingest: psycopg.Connection, symbol: str
+) -> None:
+    ingest.execute(
+        "INSERT INTO market.depth_slot_status (market, symbol, depth, slot_start, state,"
+        " sequence, snapshot_age_ms) VALUES ('SPOT', %s, 5, %s, 'fuera_de_plazo', NULL, NULL)",
+        (symbol, T0),
+    )
+
+
+def test_pending_work_is_found_from_the_database_alone(
+    ingest: psycopg.Connection, symbol: str
+) -> None:
+    """What a restart resumes: minutes without a REST candle (with their WebSocket candle and
+    the tick size in force) and index minutes neither rebuilt nor given up."""
+
+    def instrument(observed_at: datetime, tick: str) -> None:
+        ingest.execute(
+            "INSERT INTO market.instruments (market, symbol, observed_at, base_currency,"
+            " quote_currency, settle_currency, tick_size, quantity_step, multiplier,"
+            " min_quantity, min_funds, trading_status, is_trading, raw) VALUES ('FUTURES', %s,"
+            " %s, 'XBT', 'USDT', 'USDT', %s, 1, 0.001, 1, NULL, 'Open', true, '{}')",
+            (symbol, observed_at, tick),
+        )
+
+    instrument(T0 - timedelta(days=1), "0.1")
+    instrument(T0 + timedelta(seconds=90), "0.5")  # the tick size changes after minute 0
+    m = [T0 + timedelta(minutes=i) for i in range(5)]
+    for minute, flow in zip(m, ["S1", "S2", "S1", "S1", "S1"], strict=True):
+        quality(ingest, symbol, "trade", minute, flow)
+    ws_candle(ingest, symbol, m[0])  # waits, with its WebSocket candle
+    candle(  # decided
+        ingest, symbol, m[1], state="cerrada_rest", evidence="vela_rest_suficiente", flow_state="S2"
+    )
+    ingest.execute(  # its day was closed
+        "INSERT INTO market.minute_status (market, symbol, minute_start, status, candle_state,"
+        " flow_channel, flow_state) VALUES ('FUTURES', %s, %s, 'sin_operaciones_probable',"
+        " 'ausencia_sin_trades_probable', 'trade', 'S1')",
+        (symbol, m[3]),
+    )
+    pending = [p for p in store.pending_candles(ingest, m[0]) if p.flow.symbol == symbol]
+    assert [(p.flow.minute, p.flow.flow_state, p.ws is not None, p.tick_size) for p in pending] == [
+        (m[0], FlowState.S1, True, Decimal("0.1")),
+        (m[2], FlowState.S1, False, Decimal("0.5")),
+        (m[4], FlowState.S1, False, Decimal("0.5")),
+    ]
+    assert pending[0].ws is not None and pending[0].ws.close == Decimal("100.5")
+    later = [p.flow.minute for p in store.pending_candles(ingest, m[1]) if p.flow.symbol == symbol]
+    assert later == [m[2], m[4]]
+
+    for minute, flow in zip(m, ["S2", "S3", "S2", "S1"], strict=False):
+        quality(ingest, symbol, "mark-price", minute, flow)
+    candle(  # rebuilt
+        ingest,
+        symbol,
+        m[1],
+        series="index",
+        state="cerrada_propia",
+        evidence="reconstruida_classic",
+        flow_channel=None,
+        flow_state=None,
+        samples=60,
+        volume=None,
+    )
+    given_up(ingest, symbol, m[2], "S2")
+    index = [i for i in store.pending_index_rebuilds(ingest, m[0]) if i.symbol == symbol]
+    assert [(i.minute, i.flow_state) for i in index] == [(m[0], FlowState.S2)]
 
 
 def test_a_data_minute_needs_its_candle_and_a_gap_needs_its_gap(

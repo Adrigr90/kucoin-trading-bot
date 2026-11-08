@@ -1,4 +1,4 @@
-"""Acceptance test A7: the live risk limits match the DM and no service can change them.
+"""Acceptance test F1-A7: the live risk limits match the DM and no service can change them.
 
 The change attempts run in real sessions of every login role, not by inspecting grants:
 writing rows, altering or dropping the table, and becoming its owner are all refused.
@@ -42,7 +42,7 @@ CHANGES = [
 ]
 
 
-def test_a7_live_limits_match_the_dm_and_their_hash(
+def test_f1_a7_live_limits_match_the_dm_and_their_hash(
     admin: psycopg.Connection, repo_root: Path
 ) -> None:
     with admin.cursor(row_factory=dict_row) as cur:
@@ -59,21 +59,21 @@ def test_a7_live_limits_match_the_dm_and_their_hash(
 
 
 @pytest.mark.parametrize("role", ["kbot_risk", "kbot_watchdog", "kbot_backup"])
-def test_a7_readers_can_read(connect: Connect, role: str) -> None:
+def test_f1_a7_readers_can_read(connect: Connect, role: str) -> None:
     with connect(role) as conn:
         assert conn.execute("SELECT count(*) FROM config.risk_limits").fetchone() == (1,)
 
 
 @pytest.mark.parametrize("statement", CHANGES)
 @pytest.mark.parametrize("role", LOGIN_ROLES)
-def test_a7_no_login_role_can_change_the_limits(
+def test_f1_a7_no_login_role_can_change_the_limits(
     connect: Connect, role: str, statement: str
 ) -> None:
     with connect(role) as conn, pytest.raises(errors.InsufficientPrivilege):
         conn.execute(statement)
 
 
-def test_a7_the_limits_are_unchanged_after_the_attempts(admin: psycopg.Connection) -> None:
+def test_f1_a7_the_limits_are_unchanged_after_the_attempts(admin: psycopg.Connection) -> None:
     rows = admin.execute(
         "SELECT version, max_futures_leverage FROM config.risk_limits ORDER BY version"
     ).fetchall()

@@ -83,6 +83,26 @@ class FlowMinute:
 
 
 @dataclass(frozen=True)
+class WsCandle:
+    """The last labelled WebSocket candle of a minute, stored with the trade flow of that
+    minute, so a restart decides its REST candle from the same evidence (audit E2-01)."""
+
+    market: str
+    symbol: str
+    candle: Ohlcv
+    published_at: datetime  # P of the message that carried it
+
+
+@dataclass(frozen=True)
+class PendingCandle:
+    """A closed minute that still waits for its REST candle, as the database holds it."""
+
+    flow: FlowMinute
+    ws: Ohlcv | None
+    tick_size: Decimal
+
+
+@dataclass(frozen=True)
 class CandleDecision:
     market: str
     symbol: str
@@ -234,6 +254,11 @@ class WsCandles:
     def pop(self, minute: datetime) -> Ohlcv | None:
         entry = self.latest.pop(minute, None)
         return entry[1] if entry else None
+
+    def take(self, minute: datetime) -> tuple[datetime, Ohlcv] | None:
+        """Remove the candle of ``minute`` and return it with the time KuCoin published it."""
+        entry = self.latest.pop(minute, None)
+        return (from_nanoseconds(entry[0]), entry[1]) if entry else None
 
 
 def price_differences(rest: Ohlcv, ws: Ohlcv, tick: Decimal) -> tuple[str, ...]:

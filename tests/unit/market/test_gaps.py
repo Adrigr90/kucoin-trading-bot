@@ -1,4 +1,4 @@
-"""Data gaps (02 §3.8; phase 2 acceptance A5)."""
+"""Data gaps (02 §3.8; acceptance F2-A5)."""
 
 from __future__ import annotations
 

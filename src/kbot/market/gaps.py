@@ -1,4 +1,4 @@
-"""Data gaps of one channel and instrument (02 §3.5, §3.7 and §3.8; phase 2 acceptance A5).
+"""Data gaps of one channel and instrument (02 §3.5, §3.7 and §3.8; acceptance F2-A5).
 
 A gap opens when the connection stops being healthy and is written to ``data_gaps`` once it
 closes, with its cause. When the process restarts after a stop, the time since the last

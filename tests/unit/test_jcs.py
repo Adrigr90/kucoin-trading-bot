@@ -1,6 +1,6 @@
-"""Canonical JSON (RFC 8785) and acceptance test A4.
+"""Canonical JSON (RFC 8785) and acceptance test F1-A4.
 
-A4: jcs reproduces the RFC 8785 examples and serializes decimals as text.
+F1-A4: jcs reproduces the RFC 8785 examples and serializes decimals as text.
 The expected values below are copied from RFC 8785 (https://www.rfc-editor.org/rfc/rfc8785),
 sections 3.2.2 to 3.2.4 and Appendix B, consulted on 6 November 2026.
 """
@@ -131,7 +131,7 @@ RFC_NUMBERS = [
 ]
 
 
-# --- A4: RFC 8785 examples ---------------------------------------------------------------
+# --- F1-A4: RFC 8785 examples ---------------------------------------------------------------
 
 
 def test_rfc8785_main_example_text_and_bytes() -> None:

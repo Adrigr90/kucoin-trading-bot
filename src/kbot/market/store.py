@@ -21,10 +21,13 @@ from kbot.market.last_candles import (
     CandleState,
     FlowMinute,
     MinuteStatus,
+    Ohlcv,
+    PendingCandle,
+    WsCandle,
     day_close,
     state_without_candle,
 )
-from kbot.market.mark_candles import Evidence, FlowState, OwnCandle
+from kbot.market.mark_candles import Evidence, FlowState, IndexMinute, OwnCandle
 from kbot.market.reference import FundingRow, InstrumentRow, RiskTierRow, changed_instruments
 from kbot.market.universe import UniverseEntry
 
@@ -197,6 +200,31 @@ def fill_missing_flow(
     )
 
 
+def write_ws_candles(conn: psycopg.Connection, candles: Iterable[WsCandle]) -> None:
+    """The last WebSocket candle of each closed minute, after its trade flow row (E2-01)."""
+    with conn.transaction(), conn.cursor() as cur:
+        cur.executemany(
+            "INSERT INTO market.ws_candles (market, symbol, open_time, open, high, low, close,"
+            " volume, turnover, published_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+            " ON CONFLICT DO NOTHING",
+            [
+                (
+                    w.market,
+                    w.symbol,
+                    w.candle.open_time,
+                    w.candle.open,
+                    w.candle.high,
+                    w.candle.low,
+                    w.candle.close,
+                    w.candle.volume,
+                    w.candle.turnover,
+                    w.published_at,
+                )
+                for w in candles
+            ],
+        )
+
+
 def write_last_candles(conn: psycopg.Connection, decisions: Iterable[CandleDecision]) -> None:
     with conn.transaction():
         for d in decisions:
@@ -335,6 +363,73 @@ def flow_resume_point(
     if row is None or row[0] is None:
         return None
     return row[0] + timedelta(minutes=1)
+
+
+def pending_candles(conn: psycopg.Connection, since: datetime) -> list[PendingCandle]:
+    """Minutes of the last series that still wait for their REST candle (audit E2-01): a
+    trade flow row since ``since`` with neither a candle nor a terminal status, with the
+    WebSocket candle stored with it and the tick size in force when the minute ended."""
+    rows = conn.execute(
+        "SELECT q.market, q.symbol, q.minute_start, q.flow_state, q.messages, q.anomalies,"
+        " q.reconnections, w.open, w.high, w.low, w.close, w.volume, w.turnover, i.tick_size"
+        " FROM market.data_quality_minute AS q"
+        " LEFT JOIN market.ws_candles AS w ON w.market = q.market AND w.symbol = q.symbol"
+        "   AND w.open_time = q.minute_start"
+        " LEFT JOIN LATERAL (SELECT n.tick_size FROM market.instruments AS n"
+        "   WHERE n.market = q.market AND n.symbol = q.symbol"
+        "   ORDER BY n.observed_at < q.minute_start + interval '1 minute' DESC,"
+        "   n.observed_at DESC LIMIT 1) AS i ON true"
+        " WHERE q.channel = 'trade' AND q.minute_start >= %s"
+        " AND NOT EXISTS (SELECT 1 FROM market.candles AS c WHERE c.series = 'last'"
+        "   AND c.market = q.market AND c.symbol = q.symbol AND c.open_time = q.minute_start)"
+        " AND NOT EXISTS (SELECT 1 FROM market.minute_status AS s WHERE s.market = q.market"
+        "   AND s.symbol = q.symbol AND s.minute_start = q.minute_start)"
+        " ORDER BY q.market, q.symbol, q.minute_start",
+        (since,),
+    ).fetchall()
+    pending = []
+    for row in rows:
+        market, symbol, minute, state, messages, anomalies, reconnections = row[:7]
+        o, h, low, c, volume, turnover, tick_size = row[7:]
+        if tick_size is None:
+            continue  # never recorded: the recorder stores the reference data first
+        flow = FlowMinute(
+            market, symbol, "trade", minute, FlowState(state), messages, anomalies, reconnections
+        )
+        ws = Ohlcv(minute, o, h, low, c, volume, turnover) if o is not None else None
+        pending.append(PendingCandle(flow, ws, tick_size))
+    return pending
+
+
+def pending_index_rebuilds(conn: psycopg.Connection, since: datetime) -> list[IndexMinute]:
+    """Index minutes still to rebuild from Classic (audit E2-02): a mark-price minute since
+    ``since`` whose flow could not build its own candles, with no index candle and not
+    given up. Rebuilt, pending and given up are told apart from the database alone."""
+    rows = conn.execute(
+        "SELECT q.symbol, q.minute_start, q.flow_state FROM market.data_quality_minute AS q"
+        " WHERE q.market = 'FUTURES' AND q.channel = 'mark-price' AND q.flow_state <> 'S1'"
+        " AND q.minute_start >= %s"
+        " AND NOT EXISTS (SELECT 1 FROM market.candles AS c WHERE c.series = 'index'"
+        "   AND c.market = 'FUTURES' AND c.symbol = q.symbol AND c.open_time = q.minute_start)"
+        " AND NOT EXISTS (SELECT 1 FROM market.exhausted_index_rebuilds AS x"
+        "   WHERE x.market = 'FUTURES' AND x.symbol = q.symbol"
+        "   AND x.minute_start = q.minute_start)"
+        " ORDER BY q.symbol, q.minute_start",
+        (since,),
+    ).fetchall()
+    return [IndexMinute(symbol, minute, FlowState(state)) for symbol, minute, state in rows]
+
+
+def write_exhausted_index(
+    conn: psycopg.Connection, minutes: Iterable[tuple[IndexMinute, int]]
+) -> None:
+    """Index minutes given up after every attempt: Classic had no complete minute."""
+    with conn.transaction(), conn.cursor() as cur:
+        cur.executemany(
+            "INSERT INTO market.exhausted_index_rebuilds (market, symbol, minute_start,"
+            " attempts, flow_state) VALUES ('FUTURES', %s, %s, %s, %s) ON CONFLICT DO NOTHING",
+            [(m.symbol, m.minute, attempts, m.flow_state.value) for m, attempts in minutes],
+        )
 
 
 def day_is_closed(conn: psycopg.Connection, market: str, symbol: str, day: datetime) -> bool:

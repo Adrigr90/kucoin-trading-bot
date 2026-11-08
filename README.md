@@ -36,6 +36,7 @@ Los límites de riesgo viven en la tabla `config.risk_limits`, que solo puede es
 | `tests/` | Pruebas unitarias, de propiedades, de contrato (respuestas reales de KuCoin en `tests/fixtures/kucoin/`), de la integración continua y de PostgreSQL |
 | `docs/especificacion/` | Documento Maestro y especificación vigente |
 | `docs/kucoin/` | Matriz de revisión V1/V2 de la API de KuCoin (evidencia de D04, ya decidida) |
+| `docs/informes/` | Informe de la Fase 1 y tabla de trazabilidad de las pruebas de aceptación (F1-A# y F2-A#) |
 
 ## Cómo ejecutar las pruebas
 

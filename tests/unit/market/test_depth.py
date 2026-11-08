@@ -1,4 +1,4 @@
-"""Depth slots and metrics (spec 02 §3.3, §3.5 and §3.8; acceptance A5 and A8 of phase 2)."""
+"""Depth slots and metrics (spec 02 §3.3, §3.5 and §3.8; acceptance F2-A5 and F2-A8)."""
 
 from __future__ import annotations
 
@@ -169,6 +169,19 @@ def test_a_snapshot_that_arrives_after_the_deadline_makes_its_slot_late() -> Non
     assert slots[0].sequence == 1, "the book in force at the deadline was older"
 
 
+def test_a_late_book_with_no_earlier_one_makes_the_slot_late_not_missing() -> None:
+    """Audit E2-03: the only book of the slot was published in it and arrived after the
+    deadline. Something was received, too late: fuera_de_plazo, never no_recibida."""
+    ch = channel()
+    ch.connection_up(at(0))
+    ch.on_message(book(1, at(9.5)), at(11.5))  # published in [0, 10), 1.5 s after 10 + 1
+    slots, _ = ch.close_until(at(12), timedelta(seconds=1))
+    assert states(slots) == ["fuera_de_plazo"]
+    assert (slots[0].sequence, slots[0].age_ms) == (None, None), "no book was in force"
+    following, _ = ch.close_until(at(21), timedelta(seconds=1))
+    assert states(following) == ["valida"] and following[0].sequence == 1
+
+
 def test_a_book_published_after_the_end_belongs_to_the_next_slot() -> None:
     ch = channel()
     ch.connection_up(at(0))
@@ -272,7 +285,7 @@ EVENTS = st.lists(
 @settings(max_examples=200, deadline=None)
 @given(EVENTS)
 def test_every_slot_gets_exactly_one_terminal_state(events: list[tuple[str, int]]) -> None:
-    """A8: whatever happens, slots are contiguous and each has exactly one state."""
+    """F2-A8: whatever happens, slots are contiguous and each has exactly one state."""
     ch = channel()
     sequence = 0
     results = []

@@ -1,4 +1,4 @@
-"""Contract tests for the REST payloads, version by version (07 A4; H08, B4-B6, B14 a)."""
+"""Contract tests for the REST payloads, version by version (07 F2-A4; H08, B4-B6, B14 a)."""
 
 from __future__ import annotations
 

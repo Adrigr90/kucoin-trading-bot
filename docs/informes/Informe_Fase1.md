@@ -8,12 +8,12 @@
 
 ## 1. Resumen
 
-- **Las 10 pruebas de aceptación (A1-A10) pasan.**
+- **Las 10 pruebas de aceptación (F1-A1 a F1-A10) pasan.**
 - **Integración continua en verde:** ejecución [42257410131](https://github.com/Adrigr90/kucoin-trading-bot/actions/runs/42257410131) sobre el commit `0271430`, con **355 pruebas superadas, 0 omitidas y 0 fallidas**. Los commits posteriores solo cambian documentación.
-- **Revisión final del revisor (núcleo de cálculo y analizador de SQL):** OK en A3, A4, A5, límites del DM, gitleaks y módulos de migración. Encontró dos huecos ALTOS en la lista blanca de SQL y uno BAJO en A10. **Los tres están corregidos** (sección 10).
+- **Revisión final del revisor (núcleo de cálculo y analizador de SQL):** OK en F1-A3, F1-A4, F1-A5, límites del DM, gitleaks y módulos de migración. Encontró dos huecos ALTOS en la lista blanca de SQL y uno BAJO en F1-A10. **Los tres están corregidos** (sección 10).
 - **Dictamen global del revisor (6 de noviembre de 2026): APROBABLE para integrar `fase-1` en `main`.** La decisión de integrar es del propietario.
 - **Tras la primera revisión del revisor** se añadieron 38 pruebas sobre privilegios heredados, pertenencias entre roles, propietarios, privilegios por defecto y cambios de esquema (secciones 3 y 4).
-- **Revisión del código de PostgreSQL por el revisor (6 de noviembre de 2026): OK** en concesiones y revocaciones, privilegios heredados, propietarios, autenticación, A6, A7 y A9, sin cambios. Queda pendiente su revisión del núcleo de cálculo y del analizador de SQL.
+- **Revisión del código de PostgreSQL por el revisor (6 de noviembre de 2026): OK** en concesiones y revocaciones, privilegios heredados, propietarios, autenticación, F1-A6, F1-A7 y F1-A9, sin cambios. Queda pendiente su revisión del núcleo de cálculo y del analizador de SQL.
 - **Revisión propia del analizador de SQL:** se cerró un hueco. Un módulo de migración podía ejecutar un archivo `.sql` situado fuera de `migrations/versions/`, que el analizador no revisaba. Ahora cada módulo debe tener exactamente la forma de la plantilla, con 9 casos de prueba de manipulación (sección 6, punto 5).
 - **Integración en `main`:** el propietario integró la versión `efacd49` el 6 de noviembre de 2026 a las 17:19 (pull request #1), antes de la auditoría del revisor; la CI de `main` pasó. Las mejoras y correcciones posteriores llegaron con la pull request #2, que el propietario integró el mismo día a las 18:15. **La Fase 1 está integrada por completo en `main`.**
 - La Fase 1 **no se conecta a KuCoin, no usa Oracle y no maneja ninguna clave**.
@@ -34,18 +34,18 @@ Fuentes de evidencia: **CI** es la ejecución citada en la sección 1. Cada paso
 
 | # | Prueba | Resultado | Evidencia |
 |---|---|---|---|
-| A1 | `uv sync --frozen` instala desde `uv.lock` en un entorno limpio | **Pasa** | Paso «A1» de la CI en una máquina nueva; también en el PC |
-| A2 | Toda la CI pasa en la rama de la F1 | **Pasa** | Ejecución 42257410131: todos los pasos en verde |
-| A3 | Ningún cálculo fuera de las cuantizaciones lanza `Inexact`, y un cálculo que perdería precisión falla en lugar de redondear | **Pasa** | `tests/unit/test_decimal.py`: propiedades con 400 casos cada una (sumas, restas, productos, divisiones, cuantizaciones y cocientes frente a un oráculo con fracciones exactas); 1/3 y un producto de más de 80 cifras lanzan `Inexact`; los floats lanzan `FloatOperation`; RC15 |
-| A4 | `jcs` reproduce los ejemplos de la RFC 8785 y serializa los decimales como texto | **Pasa** | `tests/unit/test_jcs.py`: ejemplo de §3.2.2-3.2.3, bytes UTF-8 de §3.2.4, orden de §3.2.3 y los 26 valores del apéndice B |
-| A5 | Dos implementaciones independientes (`hashlib` y OpenSSL) dan los valores de RC14 | **Pasa** | `tests/unit/test_merkle.py`. Raíz vacía `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`; hoja vacía `6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d`. Además, las 9 raíces de referencia de transparency-dev coinciden con las dos implementaciones |
-| A6 | Roles sin contraseña, solo `peer`, sin TCP, identidad no autorizada rechazada, sin `CREATE`, PUBLIC sin derechos | **Pasa** | `tests/db/test_roles.py` y `tests/db/test_privileges.py` en PostgreSQL 18.6. Detalle en la sección 4 |
-| A7 | `config.risk_limits` coincide con el DM; un servicio que intenta modificarla recibe «permiso denegado»; la huella coincide | **Pasa** | `tests/db/test_risk_limits.py`: los 9 roles con login (8 servicios y `kbot_backup`), conectados de verdad, reciben `42501` en `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `ALTER TABLE`, `DROP TABLE` y `SET ROLE kbot_owner`. Después de esos intentos, la tabla sigue intacta. Solo `kbot_risk`, `kbot_watchdog` y `kbot_backup` pueden leerla |
-| A8 | La CI rechaza una sentencia fuera de la lista blanca, un secreto de prueba y un límite distinto del DM | **Pasa** | `tests/ci/test_sql_guard.py` (17 casos en `roles.sql`, 22 en el SQL de las migraciones, 12 concesiones fuera de la matriz de roles, 26 definiciones de tabla prohibidas y 13 manipulaciones de módulos de migración, además de casos positivos); `tests/ci/test_grant_policy.py` (la matriz respeta la sección 9); `tests/ci/test_gitleaks.py` (un token generado al vuelo se detecta); `tests/ci/test_limits_check.py` (4 límites cambiados, una huella alterada y un DM cambiado) |
-| A9 | Prueba de dos sesiones: las claves foráneas toman `FOR KEY SHARE` | **Pasa** | `tests/db/test_fk_locks.py`: con una fila hija sin confirmar, `FOR NO KEY UPDATE NOWAIT` sobre el padre funciona y `FOR UPDATE NOWAIT` falla con `55P03`; al revertir, funciona |
-| A10 | Coste de GitHub Actions dentro de lo gratuito | **Pasa** | Según la documentación de GitHub, los runners estándar son gratuitos en repositorios públicos [H, `02` §16]. `tests/ci/test_workflow.py` comprueba que el repositorio es público, con la visibilidad que GitHub informa en cada ejecución, y exige runners estándar, acciones fijadas por commit y permisos de solo lectura. Cada ejecución dura unos 40 segundos |
+| F1-A1 | `uv sync --frozen` instala desde `uv.lock` en un entorno limpio | **Pasa** | Paso «F1-A1» de la CI en una máquina nueva; también en el PC |
+| F1-A2 | Toda la CI pasa en la rama de la F1 | **Pasa** | Ejecución 42257410131: todos los pasos en verde |
+| F1-A3 | Ningún cálculo fuera de las cuantizaciones lanza `Inexact`, y un cálculo que perdería precisión falla en lugar de redondear | **Pasa** | `tests/unit/test_decimal.py`: propiedades con 400 casos cada una (sumas, restas, productos, divisiones, cuantizaciones y cocientes frente a un oráculo con fracciones exactas); 1/3 y un producto de más de 80 cifras lanzan `Inexact`; los floats lanzan `FloatOperation`; RC15 |
+| F1-A4 | `jcs` reproduce los ejemplos de la RFC 8785 y serializa los decimales como texto | **Pasa** | `tests/unit/test_jcs.py`: ejemplo de §3.2.2-3.2.3, bytes UTF-8 de §3.2.4, orden de §3.2.3 y los 26 valores del apéndice B |
+| F1-A5 | Dos implementaciones independientes (`hashlib` y OpenSSL) dan los valores de RC14 | **Pasa** | `tests/unit/test_merkle.py`. Raíz vacía `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`; hoja vacía `6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d`. Además, las 9 raíces de referencia de transparency-dev coinciden con las dos implementaciones |
+| F1-A6 | Roles sin contraseña, solo `peer`, sin TCP, identidad no autorizada rechazada, sin `CREATE`, PUBLIC sin derechos | **Pasa** | `tests/db/test_roles.py` y `tests/db/test_privileges.py` en PostgreSQL 18.6. Detalle en la sección 4 |
+| F1-A7 | `config.risk_limits` coincide con el DM; un servicio que intenta modificarla recibe «permiso denegado»; la huella coincide | **Pasa** | `tests/db/test_risk_limits.py`: los 9 roles con login (8 servicios y `kbot_backup`), conectados de verdad, reciben `42501` en `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `ALTER TABLE`, `DROP TABLE` y `SET ROLE kbot_owner`. Después de esos intentos, la tabla sigue intacta. Solo `kbot_risk`, `kbot_watchdog` y `kbot_backup` pueden leerla |
+| F1-A8 | La CI rechaza una sentencia fuera de la lista blanca, un secreto de prueba y un límite distinto del DM | **Pasa** | `tests/ci/test_sql_guard.py` (17 casos en `roles.sql`, 22 en el SQL de las migraciones, 12 concesiones fuera de la matriz de roles, 26 definiciones de tabla prohibidas y 13 manipulaciones de módulos de migración, además de casos positivos); `tests/ci/test_grant_policy.py` (la matriz respeta la sección 9); `tests/ci/test_gitleaks.py` (un token generado al vuelo se detecta); `tests/ci/test_limits_check.py` (4 límites cambiados, una huella alterada y un DM cambiado) |
+| F1-A9 | Prueba de dos sesiones: las claves foráneas toman `FOR KEY SHARE` | **Pasa** | `tests/db/test_fk_locks.py`: con una fila hija sin confirmar, `FOR NO KEY UPDATE NOWAIT` sobre el padre funciona y `FOR UPDATE NOWAIT` falla con `55P03`; al revertir, funciona |
+| F1-A10 | Coste de GitHub Actions dentro de lo gratuito | **Pasa** | Según la documentación de GitHub, los runners estándar son gratuitos en repositorios públicos [H, `02` §16]. `tests/ci/test_workflow.py` comprueba que el repositorio es público, con la visibilidad que GitHub informa en cada ejecución, y exige runners estándar, acciones fijadas por commit y permisos de solo lectura. Cada ejecución dura unos 40 segundos |
 
-## 4. Detalle de A6 (seguridad de PostgreSQL)
+## 4. Detalle de F1-A6 (seguridad de PostgreSQL)
 
 PostgreSQL 18.6 del repositorio oficial PGDG, **instalado en el propio runner de Ubuntu**, sin contenedor (corrección 1 de la revisión de la sección 9).
 
@@ -69,11 +69,11 @@ PostgreSQL 18.6 del repositorio oficial PGDG, **instalado en el propio runner de
 
 | Verificación | Estado nuevo | Evidencia |
 |---|---|---|
-| H07 (decimales sin redondeo silencioso) | **Validado mediante pruebas** | A3 |
-| B18 (`FOR KEY SHARE` en claves foráneas) | **Validado mediante pruebas**: la afirmación de C69 pasa de [I] a [H] en PostgreSQL 18.6 | A9 |
-| B20 (`pglast` con la gramática de PostgreSQL 18) | **Validado**: `pglast` 8.7 con la gramática 18.6; analiza todas las migraciones y reconoce sintaxis exclusiva de la 18 (columnas `VIRTUAL`) | A8 y CI |
-| B25 (coste de GitHub Actions) | **Verificado documentalmente y validado** | A10 |
-| B26 (RC14 con dos implementaciones) | **Validado mediante pruebas** | A5 |
+| H07 (decimales sin redondeo silencioso) | **Validado mediante pruebas** | F1-A3 |
+| B18 (`FOR KEY SHARE` en claves foráneas) | **Validado mediante pruebas**: la afirmación de C69 pasa de [I] a [H] en PostgreSQL 18.6 | F1-A9 |
+| B20 (`pglast` con la gramática de PostgreSQL 18) | **Validado**: `pglast` 8.7 con la gramática 18.6; analiza todas las migraciones y reconoce sintaxis exclusiva de la 18 (columnas `VIRTUAL`) | F1-A8 y CI |
+| B25 (coste de GitHub Actions) | **Verificado documentalmente y validado** | F1-A10 |
+| B26 (RC14 con dos implementaciones) | **Validado mediante pruebas** | F1-A5 |
 
 ## 6. Decisiones de implementación (dentro del alcance aprobado)
 
@@ -87,9 +87,9 @@ PostgreSQL 18.6 del repositorio oficial PGDG, **instalado en el propio runner de
 
 ## 7. Observaciones y límites conocidos
 
-- **A6 valida la configuración de la CI, no la de producción.** En la CI, un mapa de `pg_ident.conf` deja que el usuario del runner se conecte como cada rol. En el servidor, cada servicio tendrá su propio usuario del sistema (`02` §1.1) y no habrá mapa. **La configuración `peer` de producción no está validada.** Se escribirá al desplegar (F2 si D03; si no, F9) y se validará repitiendo allí las comprobaciones de A6 con los usuarios reales de cada servicio (punto 31 de `04`), junto con B19 (`IPAddressDeny`).
+- **F1-A6 valida la configuración de la CI, no la de producción.** En la CI, un mapa de `pg_ident.conf` deja que el usuario del runner se conecte como cada rol. En el servidor, cada servicio tendrá su propio usuario del sistema (`02` §1.1) y no habrá mapa. **La configuración `peer` de producción no está validada.** Se escribirá al desplegar (F2 si D03; si no, F9) y se validará repitiendo allí las comprobaciones de F1-A6 con los usuarios reales de cada servicio (punto 31 de `04`), junto con B19 (`IPAddressDeny`).
 - **Qué protege los límites de riesgo y qué no:**
-  - **La protección son los permisos.** La tabla pertenece a `kbot_owner`, que no puede iniciar sesión. Ningún rol con login puede escribirla, alterarla, borrarla ni convertirse en su dueño, y eso se ha probado con sesiones reales (A7). Las migraciones solo pueden hacer `INSERT` en ella: la lista blanca rechaza `UPDATE`, `DELETE`, `TRUNCATE`, `DROP` y `ALTER` (A8).
+  - **La protección son los permisos.** La tabla pertenece a `kbot_owner`, que no puede iniciar sesión. Ningún rol con login puede escribirla, alterarla, borrarla ni convertirse en su dueño, y eso se ha probado con sesiones reales (F1-A7). Las migraciones solo pueden hacer `INSERT` en ella: la lista blanca rechaza `UPDATE`, `DELETE`, `TRUNCATE`, `DROP` y `ALTER` (F1-A8).
   - **La huella no impide nada: solo detecta.** Además, la huella guardada en la misma fila no sirve sola, porque quien pudiera escribir la fila podría cambiar a la vez los valores y la huella. Solo tiene sentido compararla con una referencia de fuera de la base de datos. En la CI, esa referencia es el texto del DM. En ejecución lo será la huella esperada que comprobará `svc-risk` al arrancar (`02` §4.2), que llega en la F4.
   - **Fuera del alcance:** el superusuario `postgres` puede cambiarlo todo. Contra un administrador con acceso total al servidor no hay protección dentro de la base de datos. Lo mitigan la comprobación de `svc-risk` al arrancar (F4), la comprobación diaria de deriva (F9) y la auditoría.
 - **Los límites de conexiones y de tiempo son provisionales** y se ajustan con las mediciones de la F2 (punto 83 de `04`).
@@ -111,12 +111,12 @@ PostgreSQL 18.6 del repositorio oficial PGDG, **instalado en el propio runner de
 
 ## 10. Correcciones de la revisión final del revisor (6 de noviembre de 2026)
 
-El revisor dio OK al núcleo de cálculo (A3, A4 y A5), a los límites del DM, a gitleaks y a los módulos de migración. Su dictamen global fue «no aprobable todavía» por tres hallazgos en la lista blanca de SQL y en A10. Están corregidos, con sus pruebas, en el commit `0271430` (CI en verde con 355 pruebas).
+El revisor dio OK al núcleo de cálculo (F1-A3, F1-A4 y F1-A5), a los límites del DM, a gitleaks y a los módulos de migración. Su dictamen global fue «no aprobable todavía» por tres hallazgos en la lista blanca de SQL y en F1-A10. Están corregidos, con sus pruebas, en el commit `0271430` (CI en verde con 355 pruebas).
 
 | Hallazgo | Gravedad | Corrección | Prueba de aceptación |
 |---|---|---|---|
 | La lista blanca permitía conceder permisos fuera de la matriz de roles de `02` §9. Por ejemplo, `GRANT USAGE ON SCHEMA trading TO kbot_ingest` | ALTO | `tools/grant_policy.py` tiene dos capas. La primera es la **lista exacta** de concesiones permitidas: el analizador rechaza cualquier otra. La segunda son las **reglas de la columna «No puede» de §9**, con §6.1 y §8, que se aplican a la propia lista para que no pueda contradecir la especificación. La prueba de PostgreSQL exige que la base real tenga **exactamente** los permisos de la lista | 12 concesiones prohibidas rechazadas, incluidos los dos ejemplos del revisor y escrituras indebidas de `kbot_strategy`, `kbot_broker`, `kbot_web`, `kbot_risk`, `kbot_telegram` y `kbot_backup`. 15 casos de conflicto con §9 detectados y 6 concesiones legítimas aceptadas. Las concesiones reales de la migración pasan |
 | `CREATE TABLE` aceptaba expresiones y restricciones sin analizar, por ejemplo `CHECK (pg_notify('canal', payload) IS NULL)` | ALTO | Se revisan los tipos de columna, las restricciones y las expresiones. **`CHECK` no puede llamar a ninguna función.** **`DEFAULT` solo puede llamar a `clock_timestamp()`**, que es volátil pero no tiene efectos secundarios. Se rechazan las subconsultas, los operadores cualificados, `LIKE`, `INHERITS`, las particiones, las opciones de almacenamiento, `COLLATE`, las identidades, las columnas generadas, las exclusiones y las claves foráneas en cascada o fuera de los esquemas del proyecto | 26 definiciones prohibidas rechazadas: el ejemplo del revisor, `nextval`, `set_config`, `pg_sleep`, `random`, `current_user` y otras. Una tabla ordinaria con todo lo permitido pasa |
-| A10 no comprobaba que el repositorio fuera público | BAJO | La CI recibe la visibilidad que GitHub informa en cada ejecución (`github.event.repository.visibility`) y la prueba exige `public` | La regla falla con `private`, `internal` o un valor vacío y pasa con `public`; en la CI pasa con el repositorio real |
+| F1-A10 no comprobaba que el repositorio fuera público | BAJO | La CI recibe la visibilidad que GitHub informa en cada ejecución (`github.event.repository.visibility`) y la prueba exige `public` | La regla falla con `private`, `internal` o un valor vacío y pasa con `public`; en la CI pasa con el repositorio real |
 
 **Confirmación del revisor (6 de noviembre de 2026):** revisó el contenido real de los archivos modificados en el commit `c302ee7`, el informe y la ejecución de la CI. Las tres correcciones resuelven sus hallazgos y no encontró ningún problema pendiente. **Dictamen global: APROBABLE para integrar `fase-1` en `main`.**

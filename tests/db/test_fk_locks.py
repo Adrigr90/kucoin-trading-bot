@@ -1,4 +1,4 @@
-"""Acceptance test A9 (verification B18): foreign keys take FOR KEY SHARE locks.
+"""Acceptance test F1-A9 (verification B18): foreign keys take FOR KEY SHARE locks.
 
 Two simultaneous sessions in a scratch database:
 (1) parent and child tables with a foreign key, and one parent row;
@@ -40,7 +40,7 @@ def scratch_db(admin: psycopg.Connection, connect: Connect) -> Iterator[str]:
         admin.execute(f"DROP DATABASE IF EXISTS {SCRATCH} WITH (FORCE)")
 
 
-def test_a9_foreign_key_takes_for_key_share(connect: Connect, scratch_db: str) -> None:
+def test_f1_a9_foreign_key_takes_for_key_share(connect: Connect, scratch_db: str) -> None:
     with (
         connect("postgres", dbname=scratch_db, autocommit=False) as session1,
         connect("postgres", dbname=scratch_db, autocommit=False) as session2,

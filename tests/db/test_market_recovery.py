@@ -1,4 +1,4 @@
-"""Phase 2 acceptance A5 in a real PostgreSQL, written as kbot_ingest.
+"""Acceptance F2-A5 in a real PostgreSQL, written as kbot_ingest.
 
 A run records depth slots, the process stops, and a second run resumes from what the
 database says it recorded: the stop is a gap with cause ``proceso_detenido``, every slot
@@ -55,7 +55,7 @@ def ingest(connect: Connect) -> Iterator[psycopg.Connection]:
         yield conn
 
 
-def test_a5_a_stop_and_a_restart(ingest: psycopg.Connection) -> None:
+def test_f2_a5_a_stop_and_a_restart(ingest: psycopg.Connection) -> None:
     symbol = "R" + secrets.token_hex(5).upper() + "-USDT"
     channel_name = depth_channel_name(5)
     assert resume_point(ingest, "SPOT", symbol, 5) is None
@@ -115,8 +115,8 @@ def test_a5_a_stop_and_a_restart(ingest: psycopg.Connection) -> None:
     assert snapshots == [(at(0), at(50), 1)]
 
 
-def test_a6_closing_a_day_from_the_database(ingest: psycopg.Connection) -> None:
-    """A6: every minute of the day gets exactly one terminal status, from the database alone;
+def test_f2_a6_closing_a_day_from_the_database(ingest: psycopg.Connection) -> None:
+    """F2-A6: every minute of the day gets exactly one terminal status, from the database alone;
     closing again (as after a restart) changes nothing."""
     from kbot.market.gaps import DataGap
     from kbot.market.last_candles import FlowMinute, Ohlcv, decide

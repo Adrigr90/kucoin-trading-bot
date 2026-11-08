@@ -14,13 +14,16 @@ Per instrument of the universe (02 §3.8):
 * one gap tracker per channel (``GapTracker``).
 
 A minute of the last series waits for its REST candle (``candle_requests`` and
-``apply_rest_candles``); an index minute without a candle from the flow waits for its
-rebuild from Classic (``index_rebuilds`` in the tick output).
+``apply_rest_candles``); its WebSocket candle goes to the database with its flow, so a
+restart resumes the wait from the database (``restore_awaiting``, audit E2-01). An index
+minute without a candle from the flow waits for its rebuild from Classic
+(``index_rebuilds`` in the tick output).
 
-The universe changes only at a UTC midnight (``apply_universe``): an instrument that
-leaves stops producing rows at that instant but keeps its pending REST candles until they
-are decided; one that enters starts at that instant. So each day has a fixed set of
-instruments, and the day close covers exactly them.
+The universe changes at a UTC midnight (``apply_universe``), or at the moment of a late
+evaluation when the recorder was stopped or suspended across midnight: an instrument that
+leaves stops producing rows at that instant, and its pending REST candles are still
+decided; one that enters starts at that instant. The day close covers every instrument
+that was in the universe at some moment of the day.
 """
 
 from __future__ import annotations
@@ -41,6 +44,8 @@ from kbot.market.last_candles import (
     EventFlow,
     FlowMinute,
     Ohlcv,
+    PendingCandle,
+    WsCandle,
     WsCandles,
     decide,
 )
@@ -57,7 +62,9 @@ MARKETS = ("SPOT", "FUTURES")
 LATENESS = timedelta(seconds=2)  # provisional until D26
 MAX_BACKFILL = timedelta(days=1)
 MAX_CANDLE_ATTEMPTS = 5  # a pending REST candle is asked for at most this many times
-MAX_MINUTES_PER_REQUEST = 100  # below the 200 candles per request of Futures (02 §3.2)
+# Minutes from the first to the last of one REST request. The window asked for is one
+# minute wider on each side, so at most 102 candles: below the 200 of Futures (02 §3.2).
+MAX_MINUTES_PER_REQUEST = 100
 # Without a REST candle yet, these may still get one: KuCoin warns that its REST candles
 # can be incomplete, so the minute is asked again before it is given up.
 RETRIED = frozenset({CandleState.PENDIENTE, CandleState.AUSENCIA_NO_VERIFICABLE})
@@ -93,6 +100,7 @@ class IndexRebuild:
     symbol: str
     index_symbol: str
     minute: datetime
+    flow_state: FlowState  # of the mark-price minute: S2 or S3
 
 
 @dataclass
@@ -100,6 +108,7 @@ class TickOutput:
     """What one tick closed, in the order the foreign keys need it written."""
 
     flows: list[FlowMinute] = field(default_factory=list)
+    ws_candles: list[WsCandle] = field(default_factory=list)
     own_candles: list[OwnCandle] = field(default_factory=list)
     slots: list[SlotResult] = field(default_factory=list)
     minute_snapshots: list[MinuteSnapshot] = field(default_factory=list)
@@ -109,6 +118,7 @@ class TickOutput:
     def is_empty(self) -> bool:
         return not (
             self.flows
+            or self.ws_candles
             or self.own_candles
             or self.slots
             or self.minute_snapshots
@@ -121,6 +131,7 @@ class TickOutput:
 class _Awaiting:
     flow: FlowMinute
     ws: Ohlcv | None
+    tick_size: Decimal  # of the instrument when the minute was recorded
     attempts: int = 0
     next_try: datetime | None = None
 
@@ -134,7 +145,6 @@ class _Instrument:
     ws_candles: WsCandles
     mark: MarkCandleBuilder | None
     gaps: dict[str, GapTracker]
-    awaiting: dict[datetime, _Awaiting] = field(default_factory=dict)
     retired_at: datetime | None = None
 
     def recorded_until(self) -> datetime:
@@ -229,6 +239,9 @@ class RecorderCore:
         self._instruments: dict[tuple[str, str], _Instrument] = {}
         self._retired: list[_Instrument] = []
         self._closed_gaps: list[DataGap] = []
+        # Minutes waiting for their REST candle, per (market, symbol): kept apart from the
+        # instruments, so they are decided even after their instrument left the universe.
+        self._awaiting: dict[tuple[str, str], dict[datetime, _Awaiting]] = {}
         for spec in specs:
             key = (spec.market, spec.symbol)
             if key in self._instruments:
@@ -263,9 +276,10 @@ class RecorderCore:
         return result
 
     def apply_universe(self, specs: Iterable[InstrumentSpec], at: datetime) -> bool:
-        """Record exactly ``specs`` from ``at`` on (a UTC midnight). An instrument whose
-        spec changes (for example it becomes a depth-50 candidate) is retired and added
-        again. Returns whether anything changed, so the caller renews its subscriptions."""
+        """Record exactly ``specs`` from ``at`` on: a UTC midnight, or the moment of a late
+        evaluation after a stop across midnight. An instrument whose spec changes (for
+        example it becomes a depth-50 candidate) is retired and added again. Returns
+        whether anything changed, so the caller renews its subscriptions."""
         at = as_utc(at, "at")
         wanted = {(s.market, s.symbol): s for s in specs}
         changed = False
@@ -368,7 +382,7 @@ class RecorderCore:
         self._retired = [
             i
             for i in self._retired
-            if i.awaiting or i.recorded_until() < i.retired_at  # type: ignore[operator]
+            if i.recorded_until() < i.retired_at  # type: ignore[operator]
         ]
         return out
 
@@ -381,8 +395,13 @@ class RecorderCore:
         out.flows += instrument.kline.close_until(now, self.lateness)
         for flow in instrument.trade.close_until(now, self.lateness):
             out.flows.append(flow)
-            instrument.awaiting[flow.minute] = _Awaiting(
-                flow, instrument.ws_candles.pop(flow.minute)
+            taken = instrument.ws_candles.take(flow.minute)
+            ws = None
+            if taken is not None:
+                published_at, ws = taken
+                out.ws_candles.append(WsCandle(spec.market, spec.symbol, ws, published_at))
+            self._awaiting.setdefault((spec.market, spec.symbol), {})[flow.minute] = _Awaiting(
+                flow, ws, spec.tick_size
             )
         # A WebSocket candle of a minute whose flow is already closed can no longer be used.
         closed = instrument.trade.next_minute
@@ -395,26 +414,49 @@ class RecorderCore:
                     out.own_candles += [result.mark, result.index]
                 elif spec.index_symbol is not None:
                     out.index_rebuilds.append(
-                        IndexRebuild(spec.symbol, spec.index_symbol, result.minute)
+                        IndexRebuild(
+                            spec.symbol, spec.index_symbol, result.minute, result.flow_state
+                        )
                     )
 
     # --- REST candles of the last series ---------------------------------------------------
 
+    def restore_awaiting(self, pending: Iterable[PendingCandle]) -> int:
+        """Wait again for the minutes the previous run left without a REST candle, as the
+        database holds them: flow, WebSocket candle and tick size (audit E2-01). A minute
+        already waiting is kept as it is. Returns how many minutes were added."""
+        added = 0
+        for item in pending:
+            flow = item.flow
+            minutes = self._awaiting.setdefault((flow.market, flow.symbol), {})
+            if flow.minute not in minutes:
+                minutes[flow.minute] = _Awaiting(flow, item.ws, item.tick_size)
+                added += 1
+        return added
+
+    def awaiting_minutes(self, market: str, symbol: str) -> list[datetime]:
+        return sorted(self._awaiting.get((market, symbol), {}))
+
     def candle_requests(self, now: datetime) -> list[CandleRequest]:
-        """One request per instrument (and per ``MAX_MINUTES_PER_REQUEST`` minutes) for the
-        minutes whose stabilization margin has passed."""
+        """Requests for the minutes whose stabilization margin has passed. One request
+        covers at most ``MAX_MINUTES_PER_REQUEST`` minutes from its first to its last,
+        however few of them wait, so minutes far apart never make a window too wide."""
         now = as_utc(now, "now")
         requests = []
-        for instrument in [*self._instruments.values(), *self._retired]:
+        for (market, symbol), pending in self._awaiting.items():
             due = sorted(
                 m
-                for m, a in instrument.awaiting.items()
+                for m, a in pending.items()
                 if m + MINUTE + STABILIZATION <= now and (a.next_try is None or a.next_try <= now)
             )
-            spec = instrument.spec
-            for start in range(0, len(due), MAX_MINUTES_PER_REQUEST):
-                chunk = due[start : start + MAX_MINUTES_PER_REQUEST]
-                requests.append(CandleRequest(spec.market, spec.symbol, chunk[0], chunk[-1]))
+            chunk: list[datetime] = []
+            for minute in due:
+                if chunk and minute - chunk[0] >= MAX_MINUTES_PER_REQUEST * MINUTE:
+                    requests.append(CandleRequest(market, symbol, chunk[0], chunk[-1]))
+                    chunk = []
+                chunk.append(minute)
+            if chunk:
+                requests.append(CandleRequest(market, symbol, chunk[0], chunk[-1]))
         return requests
 
     def apply_rest_candles(
@@ -426,42 +468,37 @@ class RecorderCore:
         candle). A minute that is still ``pendiente_estabilizacion`` is asked again too."""
         now = as_utc(now, "now")
         key = (request.market, request.symbol)
-        owners = [i for i in [self._instruments.get(key), *self._retired] if i is not None]
+        pending = self._awaiting.get(key, {})
         decisions: list[CandleDecision] = []
         by_minute = {row.open_time: row for row in rows} if rows is not None else {}
-        for instrument in owners:
-            if (instrument.spec.market, instrument.spec.symbol) != key:
+        for minute in [m for m in sorted(pending) if request.first <= m <= request.last]:
+            awaiting = pending[minute]
+            awaiting.attempts += 1
+            awaiting.next_try = now + RETRY_INTERVAL
+            if rows is None:
+                if awaiting.attempts >= MAX_CANDLE_ATTEMPTS:
+                    del pending[minute]
                 continue
-            minutes = [m for m in sorted(instrument.awaiting) if request.first <= m <= request.last]
-            for minute in minutes:
-                awaiting = instrument.awaiting[minute]
-                awaiting.attempts += 1
-                awaiting.next_try = now + RETRY_INTERVAL
-                if rows is None:
-                    if awaiting.attempts >= MAX_CANDLE_ATTEMPTS:
-                        del instrument.awaiting[minute]
-                    continue
-                decision = decide(
-                    request.market,
-                    request.symbol,
-                    awaiting.flow,
-                    by_minute.get(minute),
-                    awaiting.ws,
-                    instrument.spec.tick_size,
-                )
-                if decision.state in RETRIED and awaiting.attempts < MAX_CANDLE_ATTEMPTS:
-                    continue
-                del instrument.awaiting[minute]
-                decisions.append(decision)
+            decision = decide(
+                request.market,
+                request.symbol,
+                awaiting.flow,
+                by_minute.get(minute),
+                awaiting.ws,
+                awaiting.tick_size,
+            )
+            if decision.state in RETRIED and awaiting.attempts < MAX_CANDLE_ATTEMPTS:
+                continue
+            del pending[minute]
+            decisions.append(decision)
+        if not pending:
+            self._awaiting.pop(key, None)
         return decisions
 
     def awaiting_until(self, moment: datetime) -> int:
         """Minutes before ``moment`` still waiting for their REST candle."""
         return sum(
-            1
-            for instrument in [*self._instruments.values(), *self._retired]
-            for minute in instrument.awaiting
-            if minute < moment
+            1 for pending in self._awaiting.values() for minute in pending if minute < moment
         )
 
 

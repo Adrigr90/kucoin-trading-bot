@@ -2,15 +2,16 @@
 
 One ``DepthChannel`` follows one instrument at one depth (5 or 50 levels). It receives the
 snapshots, the connection events and the passing of time, and closes every 10-second slot
-with **exactly one** terminal state:
+with **exactly one** terminal state, the first of this list that applies:
 
 * ``desconectado``: the connection was not healthy at some moment of the slot;
-* ``no_recibida``: healthy connection, but no snapshot since the last subscription;
 * ``libro_inconsistente``: the snapshot in force at the end of the slot is inconsistent
   (crossed, unordered, non-positive, or its sequence ``C`` went back);
 * ``fuera_de_plazo``: a snapshot published during the slot arrived after the slot's
-  deadline (its end plus the lateness margin), so the book in force at the deadline was
-  not up to date;
+  deadline (its end plus the lateness margin), so the book in force at the deadline, if
+  there was one, was not up to date;
+* ``no_recibida``: healthy connection, but no snapshot since the last subscription, neither
+  in time nor late;
 * ``valida``: otherwise. KuCoin sends nothing while the book does not change, so silence
   on a healthy connection keeps the last snapshot in force, with its age.
 
@@ -306,11 +307,14 @@ class DepthChannel:
         for snapshot in current:  # one connection keeps the order in which KuCoin sent them
             if _event_time(snapshot) < end and snapshot.received_at <= deadline:
                 in_force = snapshot
+        # Checked before no_recibida: a book published in the slot that arrived after the
+        # deadline makes the slot late even when no earlier book was in force (audit E2-03).
+        late = any(start <= _event_time(s) < end and s.received_at > deadline for s in current)
         if in_force is None:
-            return self._result(start, SlotState.NO_RECIBIDA, None, end)
+            state = SlotState.FUERA_DE_PLAZO if late else SlotState.NO_RECIBIDA
+            return self._result(start, state, None, end)
         if not in_force.consistent:
             return self._result(start, SlotState.LIBRO_INCONSISTENTE, in_force, end)
-        late = any(start <= _event_time(s) < end and s.received_at > deadline for s in current)
         if late:
             return self._result(start, SlotState.FUERA_DE_PLAZO, in_force, end)
         return self._result(start, SlotState.VALIDA, in_force, end)

@@ -946,3 +946,96 @@ def test_an_older_candle_never_replaces_one_sent_again(
         ).fetchall() == [("cerrada_cruzada",)]
         statuses = store.minute_statuses(conn, "SPOT", spot, day)
         assert statuses[minute] == ("datos", "cerrada_cruzada")
+
+
+def flat_candle(
+    market: str, symbol: str, minute: datetime, published: datetime, volume: str
+) -> dict[str, Any]:
+    """A WebSocket candle of ``minute`` at a constant price of 100, published at ``published``."""
+    message = kline(market, symbol, minute, published)
+    message["d"].update(o="100", h="100", l="100", c="100", v=volume, a=str(Decimal(volume) * 100))
+    return message
+
+
+# Review of E2, seventh round (R6-E2-03): (seconds after 23:59:00 when received, when
+# published, volume); a candle received after 60 s arrives once 23:59 is closed.
+SEQUENCES = {
+    "replaced before the close": [(30, 30, "1"), (50, 50, "0")],
+    "older, before the close": [(50, 50, "0"), (55, 30, "1")],
+    "older, after the close": [(50, 50, "0"), (63, 30, "1")],
+}
+
+
+@pytest.mark.parametrize("restart", [False, True])
+@pytest.mark.parametrize("sequence", sorted(SEQUENCES))
+def test_trading_shown_by_an_older_or_replaced_candle_is_never_lost(
+    connect: Connect, test_client: Factory, free_day: FreeDay, sequence: str, restart: bool
+) -> None:
+    """Review of E2, seventh round (R6-E2-03), in PostgreSQL: flow S1, no trade, a constant
+    price of 100; a candle of 23:59 with volume 1 and one of volume 0 published later. The
+    candle with volume is replaced before the close, arrives after the other one, or
+    arrives after the close; with or without a restart before the REST answer. The latest
+    candle, for comparing prices, is the one of volume 0, and the trading seen is never
+    lost: against KuCoin's zero-volume REST candle, 23:59 is datos/discrepante."""
+    day = free_day()
+    midnight = day + timedelta(days=1)
+    minute = midnight - timedelta(minutes=1)
+    spot = "S" + secrets.token_hex(4).upper() + "-USDT"
+    futures = "F" + secrets.token_hex(4).upper() + "USDTM"
+
+    def answer(market: str, symbol: str, begin: int, end: int) -> list[list[object]]:
+        wanted = range(end - end % 60, begin - begin % 60, -60)
+        minutes = [s for s in wanted if s < seconds(midnight)]
+        if market == "FUTURES":
+            return [rest_row(datetime.fromtimestamp(s, UTC)) for s in minutes]
+        return [[s, "100", "100", "100", "100", "0", "0"] for s in minutes]
+
+    fake = FakeKucoin(spot=[spot], futures=[futures], candles=answer)
+
+    with connect("kbot_ingest") as conn:
+        sink = DatabaseSink(conn)
+        rest = test_client(fake, RestRateLimiter(pool_weight=10**6))
+        recorder = Recorder(sink, rest=rest)
+
+        async def start(at: datetime) -> None:
+            nonlocal recorder
+            recorder = Recorder(sink, rest=rest)
+            await recorder.startup(at)
+            assert recorder.core is not None
+            for market in ("SPOT", "FUTURES"):
+                recorder.core.on_state(market, "connected", at + timedelta(seconds=1), "wss://")
+
+        async def scenario() -> None:
+            await start(midnight - timedelta(seconds=90))
+            await beat(recorder, minute)
+            closed = False
+            for received, published, volume in SEQUENCES[sequence]:
+                if received > 60 and not closed:
+                    await beat(recorder, midnight + timedelta(seconds=2))  # 23:59 closed
+                    closed = True
+                at = minute + timedelta(seconds=received)
+                message = flat_candle(
+                    "SPOT", spot, minute, minute + timedelta(seconds=published), volume
+                )
+                assert recorder.core is not None
+                recorder.core.on_message("SPOT", message, at)
+            await beat(recorder, midnight + timedelta(seconds=4))
+            if restart:
+                await start(midnight + timedelta(seconds=5))
+            await beat(recorder, midnight + timedelta(seconds=16))  # KuCoin: volume 0
+
+        asyncio.run(scenario())
+        decided = conn.execute(
+            "SELECT c.state, c.ws_volume, w.traded FROM market.candles c"
+            " JOIN market.ws_candles w ON w.market = c.market AND w.symbol = c.symbol"
+            " AND w.open_time = c.open_time"
+            " WHERE c.series = 'last' AND c.symbol = %s AND c.open_time = %s",
+            (spot, minute),
+        ).fetchall()
+        in_time = sequence != "older, after the close"
+        assert decided == [("discrepante", Decimal(0), in_time)], "compared with the latest"
+        late = conn.execute(
+            "SELECT count(*) FROM market.late_ws_candles WHERE symbol = %s", (spot,)
+        ).fetchone()
+        assert late == ((0,) if in_time else (1,))
+        assert store.minute_statuses(conn, "SPOT", spot, day)[minute] == ("datos", "discrepante")

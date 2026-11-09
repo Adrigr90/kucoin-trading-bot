@@ -407,6 +407,50 @@ def test_trading_once_seen_is_never_forgotten(restart: bool) -> None:
     assert decision.differences == ("volumen_rest_cero",)
 
 
+def flat_kline(published: float, volume: str) -> dict[str, object]:
+    """A candle of [0, 60) at a constant price of 100, published at ``published`` s."""
+    message = zero_kline(at(0), at(published))
+    message["d"].update(v=volume, a=str(Decimal(volume) * 100))
+    return message
+
+
+# Review of E2, seventh round (R6-E2-03): the three sequences in which the candle that shows
+# trading is not the latest. (moment received, published, volume), and when the minute closes.
+SEQUENCES = {
+    "replaced before the close": [(30, 30, "1"), (50, 50, "0")],
+    "older, before the close": [(50, 50, "0"), (55, 30, "1")],
+    "older, after the close": [(50, 50, "0"), (63, 30, "1")],
+}
+
+
+@pytest.mark.parametrize("restart", [False, True])
+@pytest.mark.parametrize("sequence", sorted(SEQUENCES))
+def test_trading_shown_by_an_older_or_replaced_candle_is_never_lost(
+    sequence: str, restart: bool
+) -> None:
+    """Flow S1, no trade, a constant price of 100: a candle with volume 1 and one of volume
+    0, published later. The latest candle, for comparing prices, is the one of volume 0; but
+    the WebSocket saw trading all the same, whether the candle with volume was replaced
+    before the close, arrived after the other one or after the close. Against a zero-volume
+    REST candle the minute is discrepante, also after a restart (review of E2, seventh
+    round)."""
+    recorder, sink = core(SPOT), MemorySink()
+    connect(recorder, at(0))
+    for received, published, volume in SEQUENCES[sequence]:
+        if received > 62:  # after the close of [0, 60)
+            written(recorder, sink, 62)
+        recorder.on_message("SPOT", flat_kline(published, volume), at(received))
+    written(recorder, sink, 62, 64)
+    if restart:
+        recorder = restarted(sink, 65)
+    decision = decide_now(recorder, 75, [ZERO_REST])
+    assert decision.ws is not None and decision.ws.volume == 0, "the latest candle by P"
+    assert decision.state is CandleState.DISCREPANTE
+    assert decision.differences == ("volumen_rest_cero",)
+    late = [c.published_at for c in sink.late_ws_candles]
+    assert late == ([at(30)] if sequence == "older, after the close" else [])
+
+
 def test_late_evidence_is_kept_once_and_only_while_it_changes_the_minute() -> None:
     """Every late trade and candle goes to the database, which keeps it only while it
     changes what the minute can be decided as (here, the same rules in memory): two late

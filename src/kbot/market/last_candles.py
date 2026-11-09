@@ -86,12 +86,15 @@ class FlowMinute:
 @dataclass(frozen=True)
 class WsCandle:
     """The last labelled WebSocket candle of a minute, stored with the trade flow of that
-    minute, so a restart decides its REST candle from the same evidence (audit E2-01)."""
+    minute, so a restart decides its REST candle from the same evidence (audit E2-01).
+    ``traded`` says whether any candle of the minute received in time had volume, this one
+    or an earlier or older one (review of E2, seventh round)."""
 
     market: str
     symbol: str
     candle: Ohlcv
     published_at: datetime  # P of the message that carried it
+    traded: bool
 
 
 @dataclass(frozen=True)
@@ -113,13 +116,25 @@ class LateWsCandle:
     """A WebSocket candle of a minute received after the minute was closed. The database
     keeps it (``late_ws_candles``) if it is newer than every candle it holds for the
     minute and different from the latest one; newer and the same, only its time is kept
-    (``LateWsRepeat``); older, nothing (``candle_kind``)."""
+    (``LateWsRepeat``); older, only if its volume is the first sign of trading in the
+    minute (``LateWsTrading``); otherwise nothing (``candle_kind``)."""
 
     market: str
     symbol: str
     candle: Ohlcv
     published_at: datetime  # P of the message that carried it
     received_at: datetime
+
+
+@dataclass(frozen=True)
+class LateWsTrading:
+    """A late WebSocket candle kept in ``late_ws_candles`` only because its volume shows
+    trading in a minute in which the WebSocket had seen none: it is older than the latest
+    candle, which it never replaces (review of E2, seventh round)."""
+
+    market: str
+    symbol: str
+    minute: datetime
 
 
 @dataclass(frozen=True)
@@ -137,7 +152,8 @@ class LateWsRepeat:
 
 
 LateEvidence = LateTrade | LateWsCandle  # what the recorder hands to the database
-KeptEvidence = LateTrade | LateWsCandle | LateWsRepeat  # what the database keeps
+# What the database keeps of it, as the recorder is told (``RecorderCore.late_kept``).
+KeptEvidence = LateTrade | LateWsCandle | LateWsRepeat | LateWsTrading
 
 
 def trade_changes(flow: FlowMinute, active: bool) -> bool:
@@ -153,19 +169,26 @@ def candle_kind(
     flow: FlowMinute,
     latest: Ohlcv | None,
     max_published: datetime | None,
+    active: bool,
     candle: Ohlcv,
     published: datetime,
 ) -> str | None:
     """What a WebSocket candle seen after its minute was closed is, against what is held
-    for the minute: ``"candle"`` if it is newer than every one seen (``max_published``,
-    sent again or not) and different from the latest; ``"repeat"`` if newer and the same,
-    as when KuCoin Futures sends the closing candle again with the first trade of the next
-    minute [H, E1 recording]; None if it is older, or the flow is not S1."""
+    for the minute. Two things are kept apart (review of E2, seventh round): which candle
+    is the latest, for comparing prices, and whether the WebSocket saw trading.
+
+    * ``"candle"``: newer than every one seen (``max_published``, sent again or not) and
+      different from the latest: the new latest candle;
+    * ``"repeat"``: newer and the same, as when KuCoin Futures sends the closing candle again
+      with the first trade of the next minute [H, E1 recording]: only its time counts;
+    * ``"trading"``: older, but with volume in a minute in which the WebSocket had seen no
+      trading (``active``): it never becomes the latest, but it shows trading;
+    * None: older and showing nothing new, or the flow is not S1."""
     if flow.flow_state is not FlowState.S1:
         return None
-    if max_published is not None and published <= max_published:
-        return None
-    return "repeat" if latest is not None and candle == latest else "candle"
+    if max_published is None or published > max_published:
+        return "repeat" if latest is not None and candle == latest else "candle"
+    return "trading" if candle.volume > 0 and not active else None
 
 
 @dataclass(frozen=True)
@@ -315,9 +338,13 @@ class EventFlow:
 
 @dataclass
 class WsCandles:
-    """The last labelled WebSocket candle of each minute (the one with the latest ``P``)."""
+    """The last labelled WebSocket candle of each minute (the one with the latest ``P``),
+    and apart from it whether any candle of the minute had volume: a later candle of volume
+    0, or an older one that arrives after it, never hides that one showed trading (review
+    of E2, seventh round)."""
 
     latest: dict[datetime, tuple[int, Ohlcv]] = field(default_factory=dict)
+    traded: set[datetime] = field(default_factory=set)
 
     def add(self, message: Mapping[str, Any]) -> bool:
         candle, published = ws_kline(message), message.get("P")
@@ -326,16 +353,22 @@ class WsCandles:
         current = self.latest.get(candle.open_time)
         if current is None or published > current[0]:
             self.latest[candle.open_time] = (published, candle)
+        if candle.volume > 0:
+            self.traded.add(candle.open_time)
         return True
 
     def pop(self, minute: datetime) -> Ohlcv | None:
+        self.traded.discard(minute)
         entry = self.latest.pop(minute, None)
         return entry[1] if entry else None
 
-    def take(self, minute: datetime) -> tuple[datetime, Ohlcv] | None:
-        """Remove the candle of ``minute`` and return it with the time KuCoin published it."""
+    def take(self, minute: datetime) -> tuple[datetime, Ohlcv, bool] | None:
+        """Remove the candle of ``minute`` and return it with the time KuCoin published it
+        and whether any candle of the minute had volume."""
+        traded = minute in self.traded
+        self.traded.discard(minute)
         entry = self.latest.pop(minute, None)
-        return (from_nanoseconds(entry[0]), entry[1]) if entry else None
+        return (from_nanoseconds(entry[0]), entry[1], traded) if entry else None
 
 
 def price_differences(rest: Ohlcv, ws: Ohlcv, tick: Decimal) -> tuple[str, ...]:

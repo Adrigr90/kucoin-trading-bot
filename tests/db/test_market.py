@@ -339,8 +339,8 @@ def test_only_index_minutes_are_rebuilt_from_classic(
 def ws_candle(conn: psycopg.Connection, symbol: str, minute: datetime, low: str = "99") -> None:
     conn.execute(
         "INSERT INTO market.ws_candles (market, symbol, open_time, open, high, low, close,"
-        " volume, turnover, published_at) VALUES ('FUTURES', %s, %s, 100, 101, %s, 100.5, 2,"
-        " 201, %s)",
+        " volume, turnover, published_at, traded) VALUES ('FUTURES', %s, %s, 100, 101, %s,"
+        " 100.5, 2, 201, %s, true)",
         (symbol, minute, low, minute + timedelta(seconds=30)),
     )
 
@@ -364,6 +364,13 @@ def test_a_websocket_candle_needs_the_trade_flow_of_its_minute(
     quality(ingest, symbol, "trade", T0, "S1")
     with pytest.raises(errors.CheckViolation):
         ws_candle(ingest, symbol, T0, low="100.6")  # low above the close
+    with pytest.raises(errors.CheckViolation):
+        ingest.execute(  # a candle with volume always says that the minute had trading
+            "INSERT INTO market.ws_candles (market, symbol, open_time, open, high, low, close,"
+            " volume, turnover, published_at, traded) VALUES ('FUTURES', %s, %s, 100, 101, 99,"
+            " 100.5, 2, 201, %s, false)",
+            (symbol, T0, T0 + timedelta(seconds=30)),
+        )
     ws_candle(ingest, symbol, T0)
     with pytest.raises(errors.UniqueViolation):
         ws_candle(ingest, symbol, T0)  # one per minute

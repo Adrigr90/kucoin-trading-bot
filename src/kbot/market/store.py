@@ -25,6 +25,7 @@ from kbot.market.last_candles import (
     LateEvidence,
     LateTrade,
     LateWsRepeat,
+    LateWsTrading,
     MinuteStatus,
     Ohlcv,
     PendingCandle,
@@ -162,8 +163,10 @@ def write_late_books(conn: psycopg.Connection, books: Iterable[LateBook]) -> Non
 # data_quality_minute), composed with psycopg.sql from constants only:
 # - its candle: the latest by P of the one stored with its flow and those kept late;
 # - the latest P seen, also of a candle sent again (late_ws_repeats);
-# - whether it saw trading besides the trades in time: a candle of the minute with volume,
-#   in time or late, or a late trade. Once true it stays true (review of E2, sixth round).
+# - whether it saw trading besides the trades in time: any candle of the minute with
+#   volume, in time (ws_candles.traded, even if a later one had none) or late (also an older
+#   one that never became the latest), or a late trade. Once true it stays true, apart from
+#   which candle is the latest (review of E2, sixth and seventh rounds).
 _LATEST_WS = sql.SQL(
     "SELECT x.open, x.high, x.low, x.close, x.volume, x.turnover FROM ("
     " SELECT w.open, w.high, w.low, w.close, w.volume, w.turnover, w.published_at"
@@ -191,7 +194,7 @@ _ACTIVE = sql.SQL(
     "EXISTS (SELECT 1 FROM market.trading_seen_late AS t WHERE t.market = q.market"
     " AND t.symbol = q.symbol AND t.minute_start = q.minute_start)"
     " OR EXISTS (SELECT 1 FROM market.ws_candles AS w WHERE w.market = q.market"
-    " AND w.symbol = q.symbol AND w.open_time = q.minute_start AND w.volume > 0)"
+    " AND w.symbol = q.symbol AND w.open_time = q.minute_start AND w.traded)"
     " OR EXISTS (SELECT 1 FROM market.late_ws_candles AS l WHERE l.market = q.market"
     " AND l.symbol = q.symbol AND l.open_time = q.minute_start AND l.volume > 0)"
 )
@@ -209,7 +212,7 @@ def write_late_minutes(
     conn: psycopg.Connection, items: Iterable[LateEvidence]
 ) -> list[KeptEvidence]:
     """Trades and WebSocket candles of minutes already closed, in the order they arrived
-    (reviews of E2, fourth to sixth rounds). Each one is judged against what the database
+    (reviews of E2, fourth to seventh rounds). Each one is judged against what the database
     holds for its minute, with the rules of ``last_candles`` (``trade_changes`` and
     ``candle_kind``), so a restart gives the same answer as a run without one:
 
@@ -217,7 +220,8 @@ def write_late_minutes(
       the WebSocket had seen no trading in it;
     * a candle is kept if that flow is S1 and it is newer than every candle seen for the
       minute and different from the latest; newer and the same, only its time is kept
-      (``late_ws_repeats``); older, nothing.
+      (``late_ws_repeats``); older, only if its volume is the first sign of trading in the
+      minute, and then it never becomes the latest; otherwise nothing.
 
     Returns what was kept, which the recorder uses only now (``RecorderCore.late_kept``)."""
     kept: list[KeptEvidence] = []
@@ -249,9 +253,9 @@ def write_late_minutes(
                 ):
                     kept.append(item)
                 continue
-            kind = candle_kind(flow, latest, max_published, item.candle, item.published_at)
+            kind = candle_kind(flow, latest, max_published, active, item.candle, item.published_at)
             c = item.candle
-            if kind == "candle" and _inserted(
+            if kind in ("candle", "trading") and _inserted(
                 conn,
                 "INSERT INTO market.late_ws_candles (market, symbol, open_time, published_at,"
                 " open, high, low, close, volume, turnover, received_at) VALUES (%s, %s, %s,"
@@ -270,7 +274,11 @@ def write_late_minutes(
                     item.received_at,
                 ),
             ):
-                kept.append(item)
+                # An older candle is the latest for no one (the latest is by P): it only
+                # shows trading.
+                kept.append(
+                    item if kind == "candle" else LateWsTrading(item.market, item.symbol, minute)
+                )
             elif kind == "repeat" and _inserted(
                 conn,
                 "INSERT INTO market.late_ws_repeats (market, symbol, open_time, published_at,"
@@ -390,12 +398,13 @@ def fill_missing_flow(
 
 
 def write_ws_candles(conn: psycopg.Connection, candles: Iterable[WsCandle]) -> None:
-    """The last WebSocket candle of each closed minute, after its trade flow row (E2-01)."""
+    """The last WebSocket candle of each closed minute, after its trade flow row (E2-01),
+    with whether any candle of the minute had volume (review of E2, seventh round)."""
     with conn.transaction(), conn.cursor() as cur:
         cur.executemany(
             "INSERT INTO market.ws_candles (market, symbol, open_time, open, high, low, close,"
-            " volume, turnover, published_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
-            " ON CONFLICT DO NOTHING",
+            " volume, turnover, published_at, traded)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
             [
                 (
                     w.market,
@@ -408,6 +417,7 @@ def write_ws_candles(conn: psycopg.Connection, candles: Iterable[WsCandle]) -> N
                     w.candle.volume,
                     w.candle.turnover,
                     w.published_at,
+                    w.traded,
                 )
                 for w in candles
             ],

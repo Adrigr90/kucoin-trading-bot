@@ -28,6 +28,7 @@ from kbot.market.last_candles import (
     LateTrade,
     LateWsCandle,
     LateWsRepeat,
+    LateWsTrading,
     Ohlcv,
     PendingCandle,
     candle_kind,
@@ -181,24 +182,24 @@ class MemorySink:
         sent again) and whether the WebSocket ever saw trading in it, as the database
         would say (``store._LATE_STATE``)."""
         key = (market, symbol, minute)
-        candles = [
-            (w.published_at, w.candle)
+        in_time = [
+            w
             for tick in self.ticks
             for w in tick.ws_candles
             if (w.market, w.symbol, w.candle.open_time) == key
         ]
-        candles += [
-            (c.published_at, c.candle)
-            for c in self.late_ws_candles
-            if (c.market, c.symbol, c.candle.open_time) == key
-        ]
+        late = [c for c in self.late_ws_candles if (c.market, c.symbol, c.candle.open_time) == key]
+        candles = [(w.published_at, w.candle) for w in in_time]
+        candles += [(c.published_at, c.candle) for c in late]
         seen = [published for published, _ in candles]
         seen += [
             r.published_at for r in self.late_ws_repeats if (r.market, r.symbol, r.minute) == key
         ]
-        active = any(candle.volume > 0 for _, candle in candles) or key in {
-            (t.market, t.symbol, t.minute) for t in self.late_trades
-        }
+        active = (
+            any(w.traded for w in in_time)
+            or any(c.candle.volume > 0 for c in late)
+            or key in {(t.market, t.symbol, t.minute) for t in self.late_trades}
+        )
         latest = max(candles, key=lambda item: item[0])[1] if candles else None
         return latest, max(seen) if seen else None, active
 
@@ -213,10 +214,13 @@ class MemorySink:
                 self.late_trades.append(item)
                 return item
             return None
-        kind = candle_kind(flow, latest, max_published, item.candle, item.published_at)
+        kind = candle_kind(flow, latest, max_published, active, item.candle, item.published_at)
         if kind == "candle":
             self.late_ws_candles.append(item)
             return item
+        if kind == "trading":  # older: never the latest, but it shows trading
+            self.late_ws_candles.append(item)
+            return LateWsTrading(item.market, item.symbol, minute)
         if kind == "repeat":
             repeat = LateWsRepeat(
                 item.market, item.symbol, minute, item.published_at, item.received_at

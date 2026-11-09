@@ -162,6 +162,23 @@ def test_the_last_published_websocket_candle_of_each_minute_counts() -> None:
     assert book.pop(T0) is None
 
 
+@pytest.mark.parametrize("order", [(30, 50), (50, 30)])
+def test_trading_shown_by_any_candle_of_the_minute_stays(order: tuple[int, int]) -> None:
+    """Review of E2, seventh round: a candle with volume (P = 30) and one of volume 0
+    (P = 50), in either order of arrival. The latest by P is the one of volume 0, but that
+    the minute had trading is kept apart and never lost."""
+    book = WsCandles()
+    for published in order:
+        message = kline("100", "100", published=published)
+        message["d"].update(l="100", c="100", v="1" if published == 30 else "0", a="100")
+        assert book.add(message)
+    taken = book.take(T0)
+    assert taken is not None
+    _published, latest, traded = taken
+    assert latest.volume == 0 and traded
+    assert book.take(T0) is None and not book.traded
+
+
 def event_flow() -> EventFlow:
     return EventFlow("SPOT", "BTC-USDT", "trade", started_at=at(0))
 
@@ -314,10 +331,20 @@ def test_what_late_evidence_changes() -> None:
     assert not trade_changes(traded, active=False), "a trade already arrived in time"
     assert not trade_changes(degraded, active=False), "on S2 the WebSocket decides nothing"
 
-    assert candle_kind(quiet, None, None, candle(), at(70)) == "candle", "the first one"
-    assert candle_kind(quiet, candle(), at(30), candle(c="100.9"), at(70)) == "candle"
-    assert candle_kind(quiet, candle(), at(30), candle(), at(70)) == "repeat", "sent again"
-    assert candle_kind(quiet, candle(), at(30), candle(c="100.9"), at(20)) is None, "older"
+    def kind(
+        latest: Ohlcv | None, seen: float | None, active: bool, new: Ohlcv, published: float
+    ) -> object:
+        last_seen = at(seen) if seen is not None else None
+        return candle_kind(quiet, latest, last_seen, active, new, at(published))
+
+    assert kind(None, None, False, candle(), 70) == "candle", "the first one"
+    assert kind(candle(), 30, True, candle(c="100.9"), 70) == "candle", "newer and different"
+    assert kind(candle(), 30, True, candle(), 70) == "repeat", "the same, sent again"
     # R6-E2-02: the same candle was seen again at 80 s, so one published at 70 s is older.
-    assert candle_kind(quiet, candle(), at(80), candle(c="100.9"), at(70)) is None
-    assert candle_kind(degraded, None, None, candle(), at(70)) is None
+    assert kind(candle(), 80, True, candle(c="100.9"), 70) is None
+    # R6-E2-03, seventh round: older, it is never the latest; but if it has volume and the
+    # WebSocket had seen no trading in the minute, it shows trading.
+    assert kind(flat(), 50, False, candle(), 30) == "trading"
+    assert kind(flat(), 50, True, candle(), 30) is None, "trading already seen"
+    assert kind(flat(), 50, False, flat("100.9"), 30) is None, "older and without volume"
+    assert candle_kind(degraded, None, None, False, candle(), at(70)) is None

@@ -56,6 +56,7 @@ from kbot.market.last_candles import (
     LateEvidence,
     LateTrade,
     LateWsCandle,
+    LateWsTrading,
     Ohlcv,
     PendingCandle,
     WsCandle,
@@ -416,9 +417,10 @@ class RecorderCore:
         sixth round, R6-E2-01). Only now does a minute still waiting for its REST candle use
         it, so a decision never rests on evidence the database does not hold: a late
         candle is its latest WebSocket candle, and a candle with volume or a late trade
-        says that the WebSocket saw trading in it. A candle sent again changes nothing."""
+        says that the WebSocket saw trading in it, also an older candle that never becomes
+        the latest (seventh round). A candle sent again changes nothing."""
         for item in kept:
-            if isinstance(item, LateTrade):
+            if isinstance(item, LateTrade | LateWsTrading):
                 minute = item.minute
             elif isinstance(item, LateWsCandle):
                 minute = item.candle.open_time
@@ -427,11 +429,11 @@ class RecorderCore:
             awaiting = self._awaiting.get((item.market, item.symbol), {}).get(minute)
             if awaiting is None:
                 continue  # decided already: what it counts as is read from the database
-            if isinstance(item, LateTrade):
-                awaiting.active = True
-            else:
+            if isinstance(item, LateWsCandle):
                 awaiting.ws = item.candle  # newer than every candle held for the minute
                 awaiting.active = awaiting.active or item.candle.volume > 0
+            else:
+                awaiting.active = True
 
     def on_alive(self, market: str, at: datetime) -> None:
         """A control message (pong, acknowledgement or welcome) received at ``at``: a proof
@@ -562,12 +564,13 @@ class RecorderCore:
         for flow in instrument.trade.close_until(now, self.lateness):
             out.flows.append(flow)
             taken = instrument.ws_candles.take(flow.minute)
-            ws = None
+            ws, traded = None, False
             if taken is not None:
-                published_at, ws = taken
-                out.ws_candles.append(WsCandle(spec.market, spec.symbol, ws, published_at))
+                published_at, ws, traded = taken
+                out.ws_candles.append(WsCandle(spec.market, spec.symbol, ws, published_at, traded))
+            # ``traded``: any candle of the minute had volume, not only the latest one.
             self._awaiting.setdefault((spec.market, spec.symbol), {})[flow.minute] = _Awaiting(
-                flow, ws, spec.tick_size, active=ws is not None and ws.volume > 0
+                flow, ws, spec.tick_size, active=traded
             )
         # A WebSocket candle of a minute whose flow is already closed is late evidence now
         # (``_late_candle``); none is left here.

@@ -233,10 +233,10 @@ def test_late_evidence_is_judged_from_the_database_alone(ingest: psycopg.Connect
     write_ws_candles(
         ingest,
         [
-            WsCandle("SPOT", symbol, zero(3), at(3, 30)),
-            WsCandle("SPOT", symbol, traded(4), at(4, 30)),
-            WsCandle("SPOT", symbol, traded(5), at(5, 30)),
-            WsCandle("SPOT", symbol, zero(6), at(6, 30)),
+            WsCandle("SPOT", symbol, zero(3), at(3, 30), False),
+            WsCandle("SPOT", symbol, traded(4), at(4, 30), True),
+            WsCandle("SPOT", symbol, traded(5), at(5, 30), True),
+            WsCandle("SPOT", symbol, zero(6), at(6, 30), False),
         ],
     )
     decisions = [

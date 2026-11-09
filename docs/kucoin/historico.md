@@ -33,6 +33,6 @@ Comprobación aparte, día a día: no hay ningún valor el 25 de julio, el 1 de 
 | HYVE/USDT | El mismo anuncio que REN/USDT | 29 dic 2025, 09:00 | 29 ene 2026, 09:00 | **No:** código 138004 [H] |
 
 - **KuCoin conserva las velas de un par deslistado durante un tiempo y después lo quita de la API** [H]. BLAST/USDT tenía todo su histórico 24 días después de su retirada, y 15 días después del cierre de sus retiradas. OXT/USDT ya no existía 87 días después de la suya.
-- Entre esos dos casos no se ha medido cuánto dura ese plazo [P]. Está entre 24 y 87 días desde la retirada.
+- Son observaciones de pares distintos, no una regla de KuCoin: no se ha seguido ningún par a lo largo del tiempo, y la política general de retención de los pares retirados sigue sin determinar [P].
 - **Consecuencia para el backtest (punto 73):** KuCoin no sirve como fuente del histórico de los pares deslistados más allá de unas semanas. Solo habrá velas de los pares que el grabador haya guardado mientras estaban en el universo, o de los que se descarguen poco después de su retirada [I].
-- [R] Descargar el histórico completo de velas de 1 minuto de cada par del universo en cuanto KuCoin anuncie su retirada, o como muy tarde al salir del universo, mientras la API aún lo dé. Queda como propuesta para el propietario. No forma parte de E3.
+- [R] Descargar el histórico completo de velas de 1 minuto de cada par del universo en cuanto KuCoin anuncie su retirada, o como muy tarde al salir del universo, mientras la API aún lo dé. Queda como propuesta para el propietario. Pertenece al diseño futuro de la recarga de históricos (backfill), no a E3.

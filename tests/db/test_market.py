@@ -595,7 +595,8 @@ def test_pending_work_is_found_from_the_database_alone(
         (m[2], FlowState.S1, False, Decimal("0.5")),
         (m[4], FlowState.S1, False, Decimal("0.5")),
     ]
-    assert [p.seen_late for p in pending] == [False, True, False]
+    # The WebSocket saw trading in 0 (a candle with volume) and in 2 (a late trade).
+    assert [p.active for p in pending] == [True, True, False]
     assert pending[0].ws is not None and pending[0].ws.close == Decimal("100.5")
     later = [p.flow.minute for p in store.pending_candles(ingest, m[1]) if p.flow.symbol == symbol]
     assert later == [m[2], m[4]]

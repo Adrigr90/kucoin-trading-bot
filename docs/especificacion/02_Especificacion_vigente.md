@@ -340,6 +340,93 @@ Este documento **sustituye, para leer y auditar**, al Informe V4 y a los anexos 
 - **Si KuCoin no da los listados al arrancar, el servicio falla** y systemd lo vuelve a arrancar más tarde (§0, regla 1). Un instrumento cuyos datos no cumplen su contrato no se graba y queda en el registro.
 - **En un PC sin PostgreSQL** (`--sink file`) el grabador escribe en archivos JSON lo que guardaría, para comprobarlo contra KuCoin real.
 
+### 3.9 Almacenamiento histórico (etapa E3) [propuesta, pendiente de revisión y de dos decisiones del propietario]
+
+**Qué pide la etapa** (`07` §2, E3):
+- 90 días calientes en PostgreSQL con particionado nativo [D17];
+- lo antiguo en Parquet (zstd) inmutable, con SHA-256 de cada archivo (§2 y §10.1);
+- tamaño y tiempo de consulta del Parquet medidos con datos reales (punto 66 de `04`).
+
+**Particiones por día UTC:**
+- **Doce tablas particionadas** por rango de su columna de tiempo, las de `market` que crecen con el tiempo:
+  - por su minuto: `data_quality_minute`, `minute_status`, `candles`, `ws_candles`, `exhausted_index_rebuilds`, `trading_seen_late`, `late_ws_candles`, `late_ws_repeats` y `depth_snapshots`;
+  - por `slot_start`: `depth_slot_status`, `depth_metrics` y `depth_late_books`.
+
+  Sus claves primarias y únicas ya incluyen esa columna, como exige PostgreSQL [H: documentación de PostgreSQL 18, §5.12.2.3]. Cada clave foránea une filas del mismo minuto o del mismo intervalo, y por tanto del mismo día. La única excepción es `depth_late_books.last_slot_start`, que puede apuntar a un día posterior, así que los días se borran en orden cronológico.
+- **Cinco tablas pequeñas sin particionar:** `instruments`, `risk_tiers`, `funding_rates`, `universe_snapshots` y `data_gaps`. Un hueco puede durar varios días y `minute_status` lo referencia, así que `data_gaps` no puede perder sus filas junto con las de un día.
+- **Por día y no por mes** [R]. La copia horaria excluye los datos de las particiones ya archivadas en Parquet (§10.1).
+  - Por días, cada copia horaria lleva solo los días aún sin archivar.
+  - Por meses llevaría hasta un mes entero, y la retención de D25 no cabría en los 20 GB de Object Storage [I].
+- **Las particiones de los próximos 14 días existen siempre**, y la migración crea las primeras. Si quedan menos de 7 días creados, salta una alerta [R].
+- **Sin partición por defecto:** una fila sin partición falla y se ve, en lugar de quedar escondida.
+
+**Ciclo de un día D** [R]:
+1. **Escritura:** como hasta ahora. Las particiones son transparentes para el grabador.
+2. **Archivo.** Empieza cuando el día está cerrado para todos sus instrumentos (`day_is_closed`) y han pasado al menos 72 h desde su final, porque una vela REST puede esperar 48 h. Por cada tabla particionada, un archivo Parquet del día:
+   - se escribe en un archivo temporal, se sincroniza con el disco y se renombra;
+   - se calcula su SHA-256;
+   - se vuelve a leer y se comprueba que tiene las mismas filas que la partición (`count(*)`) y la misma huella de contenido que las filas leídas de PostgreSQL, con la misma serialización canónica en los dos lados;
+   - se anota en un manifiesto nuevo de solo inserción, `market.archived_files`: tabla, día, ruta, SHA-256, filas, bytes, huella y versión del formato.
+3. **Copias (§10.1).** Desde que el día está en el manifiesto:
+   - la copia horaria excluye los datos de sus particiones con `--exclude-table-data` [H: documentación de `pg_dump` 18; I: una partición se excluye por su nombre, como cualquier tabla];
+   - el manifiesto de la copia lo anota como `excluido_parquet`;
+   - el Parquet se lleva fuera del servidor (Object Storage, E4).
+4. **Comprobación diaria:** las particiones archivadas que siguen en la base deben tener las mismas filas que su manifiesto. Si no, salta una alerta y se archiva una versión nueva. Un archivo nunca se sobrescribe.
+5. **Borrado**, pasados 90 días. Solo si cada tabla del día está en el manifiesto con las mismas filas que su partición y, desde E4, con su copia fuera del servidor confirmada. Se separan y se borran las particiones del día, primero las que referencian y después las referenciadas.
+
+**Parquet** [R]:
+- **Un archivo por tabla y día:** `market/<tabla>/<AAAA>/<MM>/<tabla>_<AAAA-MM-DD>.parquet`, con las columnas y los nombres de la tabla y las filas en el orden de su clave primaria.
+- **Tipos exactos:**
+  - `numeric` como `decimal128(38, 18)`. Si un valor no cabe sin perder dígitos, el archivo no se escribe y se avisa; nunca se redondea.
+  - `timestamptz` como marca de tiempo UTC en microsegundos.
+  - Los niveles de los snapshots, como listas de pares (precio, cantidad) en decimal. La medición los compara con guardar el JSON tal cual.
+- **Compresión:** zstd, con el nivel que dé la medición (3 frente a 9).
+- **Bibliotecas:** `pyarrow` para escribir y verificar, y DuckDB para las consultas de la medición (§2). Son dos dependencias nuevas y gratuitas.
+
+**Quién hace cada paso: decisión del propietario.** §9 dice tres cosas:
+- ningún servicio usa `kbot_owner`;
+- los servicios no tienen `CREATE`;
+- las funciones `SECURITY DEFINER` son de `kbot_fn_owner` y no usan SQL dinámico.
+
+Crear y borrar particiones cada día no cabe en esas reglas. Es DDL en ejecución, con nombres de partición que dependen de la fecha, y probablemente solo el dueño de una tabla puede añadirle particiones [I: PostgreSQL lo documenta para `ATTACH PARTITION`; se comprueba en la CI]. Opciones:
+- **(a) Dos funciones acotadas [R]:** `market.prepare_partitions(día)` y `market.drop_archived_day(día)`.
+  - Son `SECURITY DEFINER` y propiedad de `kbot_owner`, con `SET search_path = market, pg_temp`.
+  - Su SQL dinámico solo usa `format()` con `%I` y `%L` [H: documentación de PL/pgSQL 18]. Los nombres de tabla salen de una lista fija escrita en la función, y el día es de tipo `date`.
+  - Validan el argumento. Preparar admite de hoy a hoy + 14 días; borrar, solo días de hace más de 90 días con el manifiesto completo.
+  - Las usa un rol nuevo, `kbot_archive` (LOGIN, `peer`, con su propio usuario del sistema), con `EXECUTE` en las dos funciones, `SELECT` en `market` e `INSERT` solo en el manifiesto. Lo ejecuta un temporizador nuevo de archivo.
+  - En ejecución nadie tiene DDL libre: solo lo que hacen las dos funciones.
+  - Cambia dos reglas de §9 (el propietario y el SQL dinámico acotado) y añade un rol.
+- **(b) Temporizador del administrador:** `postgres` con `SET ROLE kbot_owner`, ejecutando un guion fijo del repositorio. No cambia las reglas de la base, pero en ejecución tiene los privilegios del superusuario.
+- **(c) A mano:** el administrador crea y borra particiones cada mes. No cambia nada, pero si se olvida, el grabador deja de escribir cuando se acaban las particiones.
+
+**La migración: decisión del propietario.** La `0002` ya está en `main`, y desde ese momento las migraciones son inmutables (§3.8). Pero ninguna base la ha aplicado: la CI crea una base nueva en cada ejecución y el servidor aún no existe. Opciones:
+- **(a) Corregir la `0002` [R]** para que cree las tablas ya particionadas, como excepción única y anotada en §18. Desde la primera base persistente (E4), una prueba de la CI impide cambiar cualquier migración ya aplicada [R].
+- **(b) Una `0003`** que borre y vuelva a crear las doce tablas. Exige admitir `DROP TABLE` en la lista blanca de las migraciones.
+
+**Lista blanca de SQL** (revisión explícita, `07` §2). En las migraciones se admiten:
+- `PARTITION BY RANGE` de una sola columna `timestamptz`, solo en esas doce tablas;
+- particiones con límites constantes;
+- `CREATE FUNCTION` solo si es `SECURITY DEFINER`, en PL/pgSQL, con `SET search_path = market, pg_temp`, y con su `REVOKE` y su `GRANT EXECUTE` en la misma migración y según la matriz;
+- dentro de esas funciones, `EXECUTE` solo con `format()` y una de las tres plantillas aprobadas: crear la partición de un día, separarla y borrarla.
+
+La huella de las funciones va en `sql/security_definer_catalog.json`, y la CI la compara con el catálogo (§9).
+
+**Medición con datos reales (punto 66).** El PC no tiene PostgreSQL, y `--sink file` solo guarda un resumen. Se añade `--sink rows`, que escribe por tabla exactamente las filas que irían a PostgreSQL, construidas con las mismas funciones que `store`. Se graban unas horas en el PC con el universo completo, y una herramienta convierte las filas a Parquet con el formato de arriba. Mide:
+- los bytes por tabla y día, sin comprimir y con zstd 3 y 9;
+- su proyección a un año, frente a §3.1 y §10.3;
+- el tiempo de dos consultas tipo con DuckDB: las velas de un símbolo en un día y las métricas de profundidad de un día.
+
+La medición definitiva, con la base real, es la de E5.
+
+**Pruebas** (F2-A9 y la lista blanca), en la CI con PostgreSQL:
+- las particiones existen por adelantado y cada fila va a la suya;
+- las claves foráneas funcionan entre tablas particionadas;
+- el archivo de un día sintético tiene su SHA-256, y al releerlo las filas y la huella coinciden;
+- el borrado se niega si el día es reciente, si falta el manifiesto o si el número de filas no coincide, y se hace en el caso correcto;
+- `kbot_ingest` no puede llamar a las funciones, y `kbot_archive` no puede hacer DDL directo;
+- `sql_guard` rechaza cualquier otra plantilla;
+- la matriz de roles sigue siendo exacta (F2-A7).
+
 ## 4. Eventos y recuperación
 
 ### 4.1 Eventos (C01)
@@ -1464,3 +1551,4 @@ $$\Delta Cap=\underbrace{8}_{\text{distancia mark-stop de lo cerrado}}+\underbra
 | 9 nov 2026 | **Novena revisión de E2 (commit `5d4e792`), del mismo revisor, que tampoco pudo ejecutar la batería completa: N-E2-01 RESUELTO**, también en el tercer empate que Claude encontró al preparar la entrega: con una vela tardía guardada como última, resuelto con `latest` en la clave de `late_ws_candles`. R6-E2-03 sigue resuelto. Ninguna reapertura ni defecto nuevo demostrado, y no hace falta otra restricción de unicidad. El revisor aprueba técnicamente la corrección y no pide otra ronda. Su única reserva para integrar la rama en `main` es confirmar la CI completa de ese commit, que no pudo consultar: ejecución 42592485155, en verde con 884 pruebas y gitleaks sin hallazgos | Revisor; **aprobada por el propietario e integrada en `main` el 9 nov 2026** (pull request #4, `3e4142b`) |
 | 9 nov 2026 | **Cabecera al día:** estado de implementación y de validación de la Fase 1 y de las etapas E1 y E2 de la Fase 2 | Claude |
 | 9 nov 2026 | **E3: histórico público de KuCoin medido** (3.7). El índice de Classic solo cubre unos 100 días (B3). Las velas de un par deslistado solo se conservan unas semanas tras su retirada (B13). Detalle y herramienta en `docs/kucoin/historico.md` y `tools/kucoin_history.py` | Claude (alcance aprobado de la F2); **pendiente de revisión** |
+| 9 nov 2026 | **Propuesta de E3, almacenamiento histórico** (3.9): particiones por día UTC en doce tablas de `market`, archivo en Parquet con SHA-256 y manifiesto, borrado a los 90 días, formato Parquet exacto, ampliación de la lista blanca y medición con datos reales. **Dos decisiones del propietario:** quién crea y borra las particiones (recomendación: dos funciones acotadas y un rol `kbot_archive`, con dos excepciones de §9) y cómo se cambia el esquema (recomendación: corregir la `0002`, que ninguna base ha aplicado) | Claude (alcance aprobado de la F2); **pendiente de revisión y de las decisiones** |

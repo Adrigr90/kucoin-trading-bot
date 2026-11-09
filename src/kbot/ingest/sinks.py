@@ -23,12 +23,14 @@ from kbot.market import store
 from kbot.market.last_candles import (
     CandleDecision,
     FlowMinute,
+    KeptEvidence,
     LateEvidence,
     LateTrade,
     LateWsCandle,
+    LateWsRepeat,
     Ohlcv,
     PendingCandle,
-    candle_changes,
+    candle_kind,
     trade_changes,
 )
 from kbot.market.mark_candles import FlowState, IndexMinute, OwnCandle
@@ -50,7 +52,7 @@ class Sink(Protocol):
         self, symbol: str, tiers: list[RiskTierRow], observed_at: datetime
     ) -> bool: ...
     def write_funding(self, rows: list[FundingRow]) -> None: ...
-    def write_tick(self, output: TickOutput) -> None: ...
+    def write_tick(self, output: TickOutput) -> list[KeptEvidence]: ...
     def write_last_candles(self, decisions: list[CandleDecision]) -> None: ...
     def write_index_candles(self, candles: list[OwnCandle]) -> None: ...
     def write_exhausted_index(self, minutes: list[tuple[IndexMinute, int]]) -> None: ...
@@ -58,17 +60,18 @@ class Sink(Protocol):
     def close_day(self, market: str, symbol: str, day: datetime) -> int: ...
 
 
-def write_tick_to(conn: psycopg.Connection, output: TickOutput) -> None:
+def write_tick_to(conn: psycopg.Connection, output: TickOutput) -> list[KeptEvidence]:
     """One tick, in the order the foreign keys need: flows, then the WebSocket and own
     candles that point at them, then depth (slot status before metrics and snapshots)
-    and gaps, and last the late evidence (its slots and minutes were written before)."""
+    and gaps, and last the late evidence (its slots and minutes were written before).
+    Returns the late evidence of the minutes that was kept."""
     with conn.transaction():
         store.write_flow(conn, output.flows)
         store.write_ws_candles(conn, output.ws_candles)
         store.write_own_candles(conn, "FUTURES", output.own_candles)
         store.write_depth(conn, output.slots, output.minute_snapshots, output.gaps)
         store.write_late_books(conn, output.late_books)
-        store.write_late_minutes(conn, output.late_minutes)
+        return store.write_late_minutes(conn, output.late_minutes)
 
 
 class DatabaseSink:
@@ -118,8 +121,8 @@ class DatabaseSink:
     def write_funding(self, rows: list[FundingRow]) -> None:
         store.write_funding(self.conn, rows)
 
-    def write_tick(self, output: TickOutput) -> None:
-        write_tick_to(self.conn, output)
+    def write_tick(self, output: TickOutput) -> list[KeptEvidence]:
+        return write_tick_to(self.conn, output)
 
     def write_last_candles(self, decisions: list[CandleDecision]) -> None:
         store.write_last_candles(self.conn, decisions)
@@ -155,6 +158,7 @@ class MemorySink:
         # The late evidence kept, as ``store.write_late_minutes`` keeps it (same rules).
         self.late_trades: list[LateTrade] = []
         self.late_ws_candles: list[LateWsCandle] = []
+        self.late_ws_repeats: list[LateWsRepeat] = []
 
     def resume_points(self, specs: Iterable[InstrumentSpec]) -> ResumePoints:
         return dict(self.resume)
@@ -170,50 +174,62 @@ class MemorySink:
                     return flow
         return None
 
-    def _latest_ws(
+    def _ws_state(
         self, market: str, symbol: str, minute: datetime
-    ) -> tuple[Ohlcv | None, datetime | None]:
+    ) -> tuple[Ohlcv | None, datetime | None, bool]:
+        """The latest WebSocket candle of the minute, the latest P seen (also of a candle
+        sent again) and whether the WebSocket ever saw trading in it, as the database
+        would say (``store._LATE_STATE``)."""
         key = (market, symbol, minute)
-        known = [
+        candles = [
             (w.published_at, w.candle)
             for tick in self.ticks
             for w in tick.ws_candles
             if (w.market, w.symbol, w.candle.open_time) == key
         ]
-        known += [
+        candles += [
             (c.published_at, c.candle)
             for c in self.late_ws_candles
             if (c.market, c.symbol, c.candle.open_time) == key
         ]
-        if not known:
-            return None, None
-        published, candle = max(known, key=lambda item: item[0])
-        return candle, published
+        seen = [published for published, _ in candles]
+        seen += [
+            r.published_at for r in self.late_ws_repeats if (r.market, r.symbol, r.minute) == key
+        ]
+        active = any(candle.volume > 0 for _, candle in candles) or key in {
+            (t.market, t.symbol, t.minute) for t in self.late_trades
+        }
+        latest = max(candles, key=lambda item: item[0])[1] if candles else None
+        return latest, max(seen) if seen else None, active
 
-    def _keep_late(self, item: LateEvidence) -> None:
-        if isinstance(item, LateTrade):
-            flow = self._trade_flow(item.market, item.symbol, item.minute)
-            ws, _published = self._latest_ws(item.market, item.symbol, item.minute)
-            kept = {(t.market, t.symbol, t.minute) for t in self.late_trades}
-            if (
-                flow is not None
-                and trade_changes(flow, ws)
-                and (item.market, item.symbol, item.minute) not in kept
-            ):
-                self.late_trades.append(item)
-            return
-        minute = item.candle.open_time
+    def _keep_late(self, item: LateEvidence) -> KeptEvidence | None:
+        minute = item.minute if isinstance(item, LateTrade) else item.candle.open_time
         flow = self._trade_flow(item.market, item.symbol, minute)
-        ws, published = self._latest_ws(item.market, item.symbol, minute)
-        if flow is not None and candle_changes(flow, ws, published, item.candle, item.published_at):
+        if flow is None:
+            return None
+        latest, max_published, active = self._ws_state(item.market, item.symbol, minute)
+        if isinstance(item, LateTrade):
+            if trade_changes(flow, active):  # also once per minute: then it is active
+                self.late_trades.append(item)
+                return item
+            return None
+        kind = candle_kind(flow, latest, max_published, item.candle, item.published_at)
+        if kind == "candle":
             self.late_ws_candles.append(item)
+            return item
+        if kind == "repeat":
+            repeat = LateWsRepeat(
+                item.market, item.symbol, minute, item.published_at, item.received_at
+            )
+            self.late_ws_repeats.append(repeat)
+            return repeat
+        return None
 
     def pending_candles(self, since: datetime) -> list[PendingCandle]:
         """What ``store.pending_candles`` finds, from the lists (same rules)."""
         decided = {(d.market, d.symbol, d.minute) for d in self.last_candles if d.has_candle}
         closed = set(self.closed_days)
         tick_size = {(row.market, row.symbol): row.tick_size for row in self.instruments}
-        late = {(t.market, t.symbol, t.minute) for t in self.late_trades}
         pending = []
         for tick in self.ticks:
             for flow in tick.flows:
@@ -226,15 +242,9 @@ class MemorySink:
                     or (flow.market, flow.symbol) not in tick_size
                 ):
                     continue
-                ws, published = self._latest_ws(*key)
+                ws, _published, active = self._ws_state(*key)
                 pending.append(
-                    PendingCandle(
-                        flow,
-                        ws,
-                        tick_size[(flow.market, flow.symbol)],
-                        seen_late=key in late,
-                        ws_published=published,
-                    )
+                    PendingCandle(flow, ws, tick_size[(flow.market, flow.symbol)], active=active)
                 )
         return pending
 
@@ -301,11 +311,15 @@ class MemorySink:
     def write_funding(self, rows: list[FundingRow]) -> None:
         self.funding += rows
 
-    def write_tick(self, output: TickOutput) -> None:
+    def write_tick(self, output: TickOutput) -> list[KeptEvidence]:
         if not output.is_empty():
             self.ticks.append(output)
+        kept = []
         for item in output.late_minutes:  # after the rows they refer to, in arrival order
-            self._keep_late(item)
+            stored = self._keep_late(item)
+            if stored is not None:
+                kept.append(stored)
+        return kept
 
     def write_last_candles(self, decisions: list[CandleDecision]) -> None:
         self.last_candles += decisions
@@ -350,7 +364,9 @@ class FileSink(MemorySink):
         super().write_funding(rows)
         self._append("funding", rows)
 
-    def write_tick(self, output: TickOutput) -> None:
+    def write_tick(self, output: TickOutput) -> list[KeptEvidence]:
+        """Appends the tick to its files. It keeps nothing for later decisions, so the
+        late evidence is only written down: decisions on a PC run never use it."""
         self._append("flows", output.flows)
         self._append("ws_candles", output.ws_candles)
         self._append("own_candles", output.own_candles)
@@ -382,6 +398,7 @@ class FileSink(MemorySink):
         self.counts.update("gap" for _ in output.gaps)
         self.counts.update("minute_snapshot" for _ in output.minute_snapshots)
         self.counts.update("index_rebuild_needed" for _ in output.index_rebuilds)
+        return []
 
     def write_last_candles(self, decisions: list[CandleDecision]) -> None:
         self._append(

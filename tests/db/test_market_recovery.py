@@ -155,9 +155,9 @@ def test_a_late_book_is_kept_and_its_slots_count_as_late(ingest: psycopg.Connect
 
 
 def test_late_evidence_is_judged_from_the_database_alone(ingest: psycopg.Connection) -> None:
-    """Reviews of E2, fourth and fifth rounds, from the database: five minutes closed as S1
-    with no trade in time. Late trades of minutes 0 to 4 and two late candles of minute 4
-    are handed to the database, which keeps what changes each minute:
+    """Reviews of E2, fourth to sixth rounds, from the database: seven minutes closed as S1
+    with no trade in time. Late trades and candles are handed to the database, which keeps
+    what changes each minute:
 
     0. no candle: the trade is kept before the close, which writes sin_explicar;
     1. a zero-volume REST candle cross-checked without a WebSocket candle: kept, it counts
@@ -166,13 +166,16 @@ def test_late_evidence_is_judged_from_the_database_alone(ingest: psycopg.Connect
        sin_explicar;
     3. a WebSocket candle of volume 0 and a zero-volume REST candle (R5-E2-02): kept, it
        counts as discrepante;
-    4. a WebSocket candle with volume: the trade changes nothing, the closing candle sent
-       again neither; a later candle with another close is kept, and against the REST candle
-       the minute counts as discrepante.
+    4. a WebSocket candle with volume: the trade changes nothing; the closing candle sent
+       again keeps only its time; a later candle with another close is kept, and against
+       the REST candle the minute counts as discrepante;
+    5. candle A sent again at 80 s, then B published at 70 s (R6-E2-02): B is older, it is
+       not kept, and the minute stays cerrada_cruzada with A;
+    6. a WebSocket candle of volume 0, a late candle with volume, a late trade and a later
+       candle of volume 0 (R6-E2-03): the trade is not kept, but the trading seen stays
+       seen, and against a zero-volume REST candle the minute counts as discrepante.
 
     The rows written stay as they are, and closing again changes nothing."""
-    from dataclasses import replace
-
     from kbot.market.last_candles import (
         CandleState,
         FlowMinute,
@@ -194,7 +197,7 @@ def test_late_evidence_is_judged_from_the_database_alone(ingest: psycopg.Connect
 
     symbol = "Q" + secrets.token_hex(5).upper() + "-USDT"
     day = datetime(2026, 11, 7, tzinfo=UTC) + timedelta(days=secrets.randbelow(3000))
-    m = [day + timedelta(minutes=i) for i in range(5)]
+    m = [day + timedelta(minutes=i) for i in range(7)]
     tick = Decimal("0.1")
     ingest.execute(  # the tick size in force, which deciding a minute again needs
         "INSERT INTO market.instruments (market, symbol, observed_at, base_currency,"
@@ -214,35 +217,54 @@ def test_late_evidence_is_judged_from_the_database_alone(ingest: psycopg.Connect
         return LateTrade("SPOT", symbol, minute, minute + timedelta(seconds=70))
 
     write_flow(ingest, [flow(minute, channel) for minute in m for channel in ("trade", "kline")])
-    zero_ws = ohlcv(m[3], "100", "100", "100", "100", "0", "0")
-    traded_ws = ohlcv(m[4], "100", "101", "99", "100.5", "2", "201")
+
+    def at(minute: int, seconds: float) -> datetime:
+        return m[minute] + timedelta(seconds=seconds)
+
+    def zero(minute: int) -> Ohlcv:
+        return ohlcv(m[minute], "100", "100", "100", "100", "0", "0")
+
+    def traded(minute: int, close: str = "100.5") -> Ohlcv:
+        return ohlcv(m[minute], "100", "101", "99", close, "2", "201")
+
+    def candle(value: Ohlcv, published: datetime) -> LateWsCandle:
+        return LateWsCandle("SPOT", symbol, value, published, published)
+
     write_ws_candles(
         ingest,
         [
-            WsCandle("SPOT", symbol, zero_ws, m[3] + timedelta(seconds=30)),
-            WsCandle("SPOT", symbol, traded_ws, m[4] + timedelta(seconds=30)),
+            WsCandle("SPOT", symbol, zero(3), at(3, 30)),
+            WsCandle("SPOT", symbol, traded(4), at(4, 30)),
+            WsCandle("SPOT", symbol, traded(5), at(5, 30)),
+            WsCandle("SPOT", symbol, zero(6), at(6, 30)),
         ],
     )
     decisions = [
-        decide("SPOT", symbol, flow(m[1]), ohlcv(m[1], *("100",) * 4, "0", "0"), None, tick),
-        decide("SPOT", symbol, flow(m[3]), ohlcv(m[3], *("100",) * 4, "0", "0"), zero_ws, tick),
-        decide("SPOT", symbol, flow(m[4]), replace(traded_ws), traded_ws, tick),
+        decide("SPOT", symbol, flow(m[1]), zero(1), None, tick),
+        decide("SPOT", symbol, flow(m[3]), zero(3), zero(3), tick),
+        decide("SPOT", symbol, flow(m[4]), traded(4), traded(4), tick),
+        decide("SPOT", symbol, flow(m[5]), traded(5), traded(5), tick),
+        decide("SPOT", symbol, flow(m[6]), zero(6), zero(6), tick),
     ]
-    assert [d.state for d in decisions] == [CandleState.CERRADA_CRUZADA] * 3, "before them"
+    assert [d.state for d in decisions] == [CandleState.CERRADA_CRUZADA] * 5, "before them"
     write_last_candles(ingest, decisions)
-    again = m[4] + timedelta(seconds=88)  # the same closing candle, sent again
-    later = m[4] + timedelta(seconds=89)
-    write_late_minutes(
+    kept = write_late_minutes(
         ingest,
         [
             late(m[0]),
             late(m[1]),
             late(m[3]),
             late(m[4]),
-            LateWsCandle("SPOT", symbol, traded_ws, again, again),
-            LateWsCandle("SPOT", symbol, replace(traded_ws, close=Decimal("100.9")), later, later),
+            candle(traded(4), at(4, 88)),  # the same closing candle, sent again
+            candle(traded(4, "100.9"), at(4, 89)),
+            candle(traded(5), at(5, 80)),  # A again
+            candle(traded(5, "100.9"), at(5, 70)),  # B, older than A seen again
+            candle(traded(6), at(6, 63)),  # with volume
+            late(m[6]),
+            candle(zero(6), at(6, 65)),  # volume 0, the latest
         ],
     )
+    assert len(kept) == 8, "every one except the trade of 4, B and the trade of 6"
     close_day(ingest, "SPOT", symbol, day)
     write_late_minutes(ingest, [late(m[2])])
     close_day(ingest, "SPOT", symbol, day)  # again, as after a restart
@@ -253,16 +275,26 @@ def test_late_evidence_is_judged_from_the_database_alone(ingest: psycopg.Connect
     assert rows(
         "SELECT minute_start FROM market.trading_seen_late WHERE symbol = %s ORDER BY 1"
     ) == [m[0], m[1], m[2], m[3]]
-    assert rows("SELECT published_at FROM market.late_ws_candles WHERE symbol = %s") == [later]
+    assert rows("SELECT published_at FROM market.late_ws_candles WHERE symbol = %s ORDER BY 1") == [
+        at(4, 89),
+        at(6, 63),
+        at(6, 65),
+    ]
+    assert rows("SELECT published_at FROM market.late_ws_repeats WHERE symbol = %s ORDER BY 1") == [
+        at(4, 88),
+        at(5, 80),
+    ]
     written = ingest.execute(
         "SELECT status, candle_state FROM market.minute_status WHERE symbol = %s"
-        " ORDER BY minute_start LIMIT 5",
+        " ORDER BY minute_start LIMIT 7",
         (symbol,),
     ).fetchall()
     assert written == [
         ("sin_explicar", "pendiente_estabilizacion"),
         ("datos", "cerrada_cruzada"),
         ("sin_operaciones_probable", "ausencia_sin_trades_probable"),
+        ("datos", "cerrada_cruzada"),
+        ("datos", "cerrada_cruzada"),
         ("datos", "cerrada_cruzada"),
         ("datos", "cerrada_cruzada"),
     ]
@@ -273,9 +305,11 @@ def test_late_evidence_is_judged_from_the_database_alone(ingest: psycopg.Connect
         ("sin_explicar", "pendiente_estabilizacion"),
         ("datos", "discrepante"),
         ("datos", "discrepante"),
+        ("datos", "cerrada_cruzada"),  # B never became the latest candle
+        ("datos", "discrepante"),  # the trading seen stays seen
     ]
     assert len(effective) == 1440
-    nobody = day + timedelta(minutes=5)  # nothing was recording it: S3 at the close
+    nobody = day + timedelta(minutes=7)  # nothing was recording it: S3 at the close
     assert effective[nobody] == ("sin_explicar", "ausencia_no_verificable")
 
 

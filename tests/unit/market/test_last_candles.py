@@ -17,7 +17,7 @@ from kbot.market.last_candles import (
     FlowMinute,
     Ohlcv,
     WsCandles,
-    candle_changes,
+    candle_kind,
     day_close,
     decide,
     rest_kline,
@@ -305,17 +305,19 @@ def test_a_trade_without_a_websocket_candle_still_counts_as_trading() -> None:
 
 
 def test_what_late_evidence_changes() -> None:
-    """Review of E2, fifth round: the rules the database applies to a trade or a candle that
-    arrives after its minute closed (store.write_late_minutes runs the same ones in SQL)."""
+    """Reviews of E2, fifth and sixth rounds: the rules applied, against what the database
+    holds, to a trade or a candle that arrives after its minute closed
+    (store.write_late_minutes and MemorySink use them both)."""
     quiet, traded, degraded = flow(FlowState.S1), flow(FlowState.S1, trades=1), flow(FlowState.S2)
-    assert trade_changes(quiet, None)
-    assert trade_changes(quiet, flat()), "a candle of volume 0 is no trading (R5-E2-02)"
-    assert not trade_changes(quiet, candle()), "the candle already showed trading"
-    assert not trade_changes(traded, None), "a trade already arrived in time"
-    assert not trade_changes(degraded, None), "on S2 the WebSocket decides nothing"
+    assert trade_changes(quiet, active=False)
+    assert not trade_changes(quiet, active=True), "trading already seen, in any candle"
+    assert not trade_changes(traded, active=False), "a trade already arrived in time"
+    assert not trade_changes(degraded, active=False), "on S2 the WebSocket decides nothing"
 
-    assert candle_changes(quiet, None, None, candle(), at(70)), "the first candle of the minute"
-    assert candle_changes(quiet, candle(), at(30), candle(c="100.9"), at(70)), "newer, different"
-    assert not candle_changes(quiet, candle(), at(30), candle(), at(70)), "the same, sent again"
-    assert not candle_changes(quiet, candle(), at(30), candle(c="100.9"), at(20)), "older"
-    assert not candle_changes(degraded, None, None, candle(), at(70))
+    assert candle_kind(quiet, None, None, candle(), at(70)) == "candle", "the first one"
+    assert candle_kind(quiet, candle(), at(30), candle(c="100.9"), at(70)) == "candle"
+    assert candle_kind(quiet, candle(), at(30), candle(), at(70)) == "repeat", "sent again"
+    assert candle_kind(quiet, candle(), at(30), candle(c="100.9"), at(20)) is None, "older"
+    # R6-E2-02: the same candle was seen again at 80 s, so one published at 70 s is older.
+    assert candle_kind(quiet, candle(), at(80), candle(c="100.9"), at(70)) is None
+    assert candle_kind(degraded, None, None, candle(), at(70)) is None

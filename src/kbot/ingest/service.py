@@ -170,7 +170,9 @@ class Recorder:
             self._switch_day(self._next_midnight)
         output = core.tick(now)
         if not output.is_empty():
-            await self._db(self.sink.write_tick, output)
+            # Late evidence is used only once the database holds it (review of E2, sixth
+            # round): a decision never rests on evidence a restart would not find.
+            core.late_kept(await self._db(self.sink.write_tick, output))
         for rebuild in output.index_rebuilds:
             self._add_index_task(rebuild)
         for request in core.candle_requests(now):

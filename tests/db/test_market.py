@@ -521,28 +521,38 @@ def late_candle(conn: psycopg.Connection, symbol: str, minute: datetime, low: st
     )
 
 
+def late_repeat(conn: psycopg.Connection, symbol: str, minute: datetime) -> None:
+    conn.execute(
+        "INSERT INTO market.late_ws_repeats (market, symbol, open_time, published_at,"
+        " received_at) VALUES ('FUTURES', %s, %s, %s, %s)",
+        (symbol, minute, minute + timedelta(seconds=80), minute + timedelta(seconds=81)),
+    )
+
+
 def test_late_evidence_belongs_to_a_minute_closed_as_s1(
     ingest: psycopg.Connection, symbol: str
 ) -> None:
-    """Reviews of E2, fourth and fifth rounds: only a minute whose trade flow was S1 can be
-    decided from the WebSocket, so only such a minute keeps a late trade or a late candle;
-    a trade once, a candle once per publication time, and with a consistent candle."""
-    for insert in (seen_late, late_candle):
+    """Reviews of E2, fourth to sixth rounds: only a minute whose trade flow was S1 can be
+    decided from the WebSocket, so only such a minute keeps a late trade, a late candle or
+    the time of a candle sent again; a trade once, a candle and a repeat once per
+    publication time, and a candle only if it is consistent."""
+    inserts = (seen_late, late_candle, late_repeat)
+    for insert in inserts:
         with pytest.raises(errors.ForeignKeyViolation):
             insert(ingest, symbol, T0)  # no flow row
     quality(ingest, symbol, "kline", T0, "S1")
-    for insert in (seen_late, late_candle):
+    for insert in inserts:
         with pytest.raises(errors.ForeignKeyViolation):
             insert(ingest, symbol, T0)  # they belong to the trade flow of their minute
     quality(ingest, symbol, "trade", T0, "S2")
-    for insert in (seen_late, late_candle):
+    for insert in inserts:
         with pytest.raises(errors.ForeignKeyViolation):
             insert(ingest, symbol, T0)  # on a degraded flow the WebSocket decides nothing
     minute = T0 + timedelta(minutes=1)
     quality(ingest, symbol, "trade", minute, "S1")
     with pytest.raises(errors.CheckViolation):
         late_candle(ingest, symbol, minute, low="100.6")  # low above the close
-    for insert in (seen_late, late_candle):
+    for insert in inserts:
         insert(ingest, symbol, minute)
         with pytest.raises(errors.UniqueViolation):
             insert(ingest, symbol, minute)

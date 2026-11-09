@@ -111,8 +111,9 @@ class LateTrade:
 @dataclass(frozen=True)
 class LateWsCandle:
     """A WebSocket candle of a minute received after the minute was closed. The database
-    keeps it (``late_ws_candles``) only if it is newer than, and different from, the latest
-    candle it holds for the minute (``candle_changes``)."""
+    keeps it (``late_ws_candles``) if it is newer than every candle it holds for the
+    minute and different from the latest one; newer and the same, only its time is kept
+    (``LateWsRepeat``); older, nothing (``candle_kind``)."""
 
     market: str
     symbol: str
@@ -121,33 +122,50 @@ class LateWsCandle:
     received_at: datetime
 
 
-LateEvidence = LateTrade | LateWsCandle
+@dataclass(frozen=True)
+class LateWsRepeat:
+    """The latest WebSocket candle of a minute, sent again with a later ``P`` after the
+    minute was closed (``late_ws_repeats``). It changes no candle, but its ``P`` must
+    survive a restart: an older candle that arrives after it is never taken for the latest
+    (review of E2, sixth round, R6-E2-02)."""
+
+    market: str
+    symbol: str
+    minute: datetime
+    published_at: datetime
+    received_at: datetime
 
 
-def trade_changes(flow: FlowMinute, ws: Ohlcv | None) -> bool:
+LateEvidence = LateTrade | LateWsCandle  # what the recorder hands to the database
+KeptEvidence = LateTrade | LateWsCandle | LateWsRepeat  # what the database keeps
+
+
+def trade_changes(flow: FlowMinute, active: bool) -> bool:
     """Whether a trade seen after its minute was closed changes what the minute can be
-    decided as: the flow was S1, no trade of the minute arrived in time, and the latest
-    WebSocket candle of the minute, if any, has volume 0. Otherwise the WebSocket had
-    already seen trading (review of E2, fifth round: a candle of volume 0 is no trading)."""
-    return flow.flow_state is FlowState.S1 and flow.messages == 0 and (ws is None or ws.volume == 0)
+    decided as: the flow was S1 (the WebSocket only counts on S1), no trade of the minute
+    arrived in time, and the WebSocket had seen no trading in it (``active``: no candle of
+    it with volume, in time or late, and no late trade kept). A candle of volume 0 is no
+    trading (reviews of E2, fifth and sixth rounds)."""
+    return flow.flow_state is FlowState.S1 and flow.messages == 0 and not active
 
 
-def candle_changes(
+def candle_kind(
     flow: FlowMinute,
-    ws: Ohlcv | None,
-    ws_published: datetime | None,
+    latest: Ohlcv | None,
+    max_published: datetime | None,
     candle: Ohlcv,
     published: datetime,
-) -> bool:
-    """Whether a WebSocket candle seen after its minute was closed changes the latest one
-    known: the flow was S1 (the WebSocket only counts on S1) and there was none, or this
-    one is newer and different. KuCoin Futures sends the closing candle of a minute again
-    with the first trade of the next one [H, E1 recording]: the same candle changes nothing."""
+) -> str | None:
+    """What a WebSocket candle seen after its minute was closed is, against what is held
+    for the minute: ``"candle"`` if it is newer than every one seen (``max_published``,
+    sent again or not) and different from the latest; ``"repeat"`` if newer and the same,
+    as when KuCoin Futures sends the closing candle again with the first trade of the next
+    minute [H, E1 recording]; None if it is older, or the flow is not S1."""
     if flow.flow_state is not FlowState.S1:
-        return False
-    if ws is None or ws_published is None:
-        return True
-    return published > ws_published and candle != ws
+        return None
+    if max_published is not None and published <= max_published:
+        return None
+    return "repeat" if latest is not None and candle == latest else "candle"
 
 
 @dataclass(frozen=True)
@@ -157,8 +175,7 @@ class PendingCandle:
     flow: FlowMinute
     ws: Ohlcv | None  # the latest WebSocket candle of the minute, in time or late
     tick_size: Decimal
-    seen_late: bool = False  # a trade kept in trading_seen_late
-    ws_published: datetime | None = None  # P of ``ws``
+    active: bool = False  # trading seen besides the trades in time (``decide``)
 
 
 @dataclass(frozen=True)
@@ -342,23 +359,26 @@ def decide(
     ws: Ohlcv | None,
     tick: Decimal,
     *,
-    seen_late: bool = False,
+    active: bool = False,
 ) -> CandleDecision:
     """The candle of one closed minute. ``flow`` is the minute of the ``trade`` channel;
     ``rest`` is None only when a successful REST answer covering the minute had no candle
-    for it; a failed request is not a decision.
+    for it; a failed request is not a decision. ``ws`` is the latest WebSocket candle of the
+    minute (by ``P``), in time or late.
 
     The WebSocket saw trading in the minute if it sent a candle for it or a trade of it (by
     its match time ``M``): either one rules out a probable absence of trades, and either one
-    against a REST candle of volume 0 is a contradiction (review of E2, third round). So
-    does trading it showed only after the minute was closed (``seen_late``, fourth round)."""
+    against a REST candle of volume 0 is a contradiction (review of E2, third round).
+    ``active`` says that it saw trading besides the trades that arrived in time: a candle of
+    the minute with volume, in time or late, or a trade that arrived late. It never goes
+    away once seen, even if a later candle has volume 0 (fourth to sixth rounds)."""
     minute, state_of_flow = flow.minute, flow.flow_state
     for candle in (rest, ws):
         if candle is not None and candle.open_time != minute:
             raise ValueError("candle of another minute")
     # Trades of the minute received before it closed (on S1 all of them valid), or trading
-    # seen in it afterwards.
-    traded = flow.messages > 0 or seen_late
+    # seen in it otherwise.
+    traded = flow.messages > 0 or active
     differences: tuple[str, ...] = ()
     if rest is not None:
         rest_without_trades = rest.volume == 0 and rest.turnover == 0

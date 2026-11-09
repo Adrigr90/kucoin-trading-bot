@@ -519,12 +519,28 @@ def seen_late(conn: psycopg.Connection, symbol: str, minute: datetime) -> None:
     )
 
 
-def late_candle(conn: psycopg.Connection, symbol: str, minute: datetime, low: str = "99") -> None:
+def late_candle(
+    conn: psycopg.Connection,
+    symbol: str,
+    minute: datetime,
+    low: str = "99",
+    *,
+    volume: str = "2",
+    latest: bool = True,
+) -> None:
     conn.execute(
         "INSERT INTO market.late_ws_candles (market, symbol, open_time, published_at, open,"
-        " high, low, close, volume, turnover, received_at)"
-        " VALUES ('FUTURES', %s, %s, %s, 100, 101, %s, 100.5, 2, 201, %s)",
-        (symbol, minute, minute + timedelta(seconds=70), low, minute + timedelta(seconds=71)),
+        " high, low, close, volume, turnover, received_at, latest)"
+        " VALUES ('FUTURES', %s, %s, %s, 100, 101, %s, 100.5, %s, 201, %s, %s)",
+        (
+            symbol,
+            minute,
+            minute + timedelta(seconds=70),
+            low,
+            volume,
+            minute + timedelta(seconds=71),
+            latest,
+        ),
     )
 
 
@@ -559,6 +575,8 @@ def test_late_evidence_belongs_to_a_minute_closed_as_s1(
     quality(ingest, symbol, "trade", minute, "S1")
     with pytest.raises(errors.CheckViolation):
         late_candle(ingest, symbol, minute, low="100.6")  # low above the close
+    with pytest.raises(errors.CheckViolation):  # one that is not the latest only shows trading
+        late_candle(ingest, symbol, minute, volume="0", latest=False)
     for insert in inserts:
         insert(ingest, symbol, minute)
         with pytest.raises(errors.UniqueViolation):

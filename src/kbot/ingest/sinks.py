@@ -156,9 +156,11 @@ class MemorySink:
         self.index_candles: list[OwnCandle] = []
         self.exhausted_index: list[tuple[IndexMinute, int]] = []
         self.closed_days: list[tuple[str, str, datetime]] = []
-        # The late evidence kept, as ``store.write_late_minutes`` keeps it (same rules).
+        # The late evidence kept, as ``store.write_late_minutes`` keeps it (same rules). The
+        # rows of late_ws_candles are split: latest = true and latest = false (trading only).
         self.late_trades: list[LateTrade] = []
         self.late_ws_candles: list[LateWsCandle] = []
+        self.late_ws_trading: list[LateWsCandle] = []
         self.late_ws_repeats: list[LateWsRepeat] = []
 
     def resume_points(self, specs: Iterable[InstrumentSpec]) -> ResumePoints:
@@ -189,15 +191,19 @@ class MemorySink:
             if (w.market, w.symbol, w.candle.open_time) == key
         ]
         late = [c for c in self.late_ws_candles if (c.market, c.symbol, c.candle.open_time) == key]
+        trading = [
+            c for c in self.late_ws_trading if (c.market, c.symbol, c.candle.open_time) == key
+        ]
         candles = [(w.published_at, w.candle) for w in in_time]
-        candles += [(c.published_at, c.candle) for c in late]
+        candles += [(c.published_at, c.candle) for c in late]  # never a trading-only one
         seen = [published for published, _ in candles]
+        seen += [c.published_at for c in trading]
         seen += [
             r.published_at for r in self.late_ws_repeats if (r.market, r.symbol, r.minute) == key
         ]
         active = (
             any(w.traded for w in in_time)
-            or any(c.candle.volume > 0 for c in late)
+            or any(c.candle.volume > 0 for c in [*late, *trading])
             or key in {(t.market, t.symbol, t.minute) for t in self.late_trades}
         )
         latest = max(candles, key=lambda item: item[0])[1] if candles else None
@@ -218,8 +224,8 @@ class MemorySink:
         if kind == "candle":
             self.late_ws_candles.append(item)
             return item
-        if kind == "trading":  # older: never the latest, but it shows trading
-            self.late_ws_candles.append(item)
+        if kind == "trading":  # not newer: never the latest, but it shows trading
+            self.late_ws_trading.append(item)
             return LateWsTrading(item.market, item.symbol, minute)
         if kind == "repeat":
             repeat = LateWsRepeat(

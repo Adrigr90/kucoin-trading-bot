@@ -181,9 +181,11 @@ def candle_kind(
       different from the latest: the new latest candle;
     * ``"repeat"``: newer and the same, as when KuCoin Futures sends the closing candle again
       with the first trade of the next minute [H, E1 recording]: only its time counts;
-    * ``"trading"``: older, but with volume in a minute in which the WebSocket had seen no
-      trading (``active``): it never becomes the latest, but it shows trading;
-    * None: older and showing nothing new, or the flow is not S1."""
+    * ``"trading"``: not newer (older, or with the same ``P`` as one seen), but with volume
+      in a minute in which the WebSocket had seen no trading (``active``): it never becomes
+      the latest, so two candles with the same ``P`` never compete for it (eighth round),
+      but it shows trading;
+    * None: not newer and showing nothing new, or the flow is not S1."""
     if flow.flow_state is not FlowState.S1:
         return None
     if max_published is None or published > max_published:

@@ -447,8 +447,43 @@ def test_trading_shown_by_an_older_or_replaced_candle_is_never_lost(
     assert decision.ws is not None and decision.ws.volume == 0, "the latest candle by P"
     assert decision.state is CandleState.DISCREPANTE
     assert decision.differences == ("volumen_rest_cero",)
-    late = [c.published_at for c in sink.late_ws_candles]
-    assert late == ([at(30)] if sequence == "older, after the close" else [])
+    assert sink.late_ws_candles == [], "no late candle became the latest"
+    trading_only = [c.published_at for c in sink.late_ws_trading]
+    assert trading_only == ([at(30)] if sequence == "older, after the close" else [])
+
+
+@pytest.mark.parametrize("restart", [False, True])
+@pytest.mark.parametrize("tie_with", ["the stored candle", "a candle sent again"])
+def test_a_candle_with_the_same_p_never_competes_for_the_latest(
+    tie_with: str, restart: bool
+) -> None:
+    """Review of E2, eighth round (N-E2-01): the latest candle has volume 0; another one,
+    different and with volume, arrives late with the same P (that of the stored candle, or
+    that of the candle sent again). It is not newer, so it never becomes the latest: it
+    only shows trading. The latest stays the same, with or without a restart, and against
+    a zero-volume REST candle the minute is discrepante."""
+    recorder, sink = core(SPOT), MemorySink()
+    connect(recorder, at(0))
+    recorder.on_message("SPOT", flat_kline(50, "0"), at(50))
+    written(recorder, sink, 62)
+    tie = 50
+    if tie_with == "a candle sent again":
+        recorder.on_message("SPOT", flat_kline(80, "0"), at(80))  # the same candle, P = 80
+        written(recorder, sink, 81)
+        tie = 80
+    other = flat_kline(tie, "1")
+    other["d"]["c"] = "100"  # flat at 100 like the latest, but with volume: different
+    recorder.on_message("SPOT", other, at(82))
+    written(recorder, sink, 83)
+    assert sink.late_ws_candles == [] and [c.published_at for c in sink.late_ws_trading] == [
+        at(tie)
+    ]
+    if restart:
+        recorder = restarted(sink, 84)
+    decision = decide_now(recorder, 85, [ZERO_REST])
+    assert decision.ws is not None and decision.ws.volume == 0, "the same latest candle"
+    assert decision.state is CandleState.DISCREPANTE
+    assert decision.differences == ("volumen_rest_cero",)
 
 
 def test_late_evidence_is_kept_once_and_only_while_it_changes_the_minute() -> None:

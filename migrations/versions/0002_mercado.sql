@@ -350,11 +350,12 @@ CREATE TABLE market.trading_seen_late (
         REFERENCES market.data_quality_minute (market, symbol, channel, minute_start, flow_state)
 );
 
--- A WebSocket candle received after its minute closed, newer (P) than every candle seen for
--- the minute and different from the latest one; or older, but with volume in a minute in
--- which the WebSocket had seen no trading, which it shows (review of E2, seventh round). The
--- WebSocket candle of a minute is the latest by P of ws_candles and this table, so an older
--- one never becomes it.
+-- A WebSocket candle received after its minute closed: newer (P) than every candle seen for
+-- the minute and different from the latest one, which makes it the latest (latest = true);
+-- or not newer, also with the same P, but with volume in a minute in which the WebSocket had
+-- seen no trading, which it only shows (latest = false; reviews of E2, seventh and eighth
+-- rounds). The WebSocket candle of a minute is the latest by P of ws_candles and the rows of
+-- this table with latest = true: their P only grows, so it is always one and the same.
 CREATE TABLE market.late_ws_candles (
     market text NOT NULL CHECK (market IN ('SPOT', 'FUTURES')),
     symbol text NOT NULL,
@@ -367,13 +368,15 @@ CREATE TABLE market.late_ws_candles (
     volume numeric NOT NULL CHECK (volume >= 0),
     turnover numeric NOT NULL CHECK (turnover >= 0),
     received_at timestamptz NOT NULL,
+    latest boolean NOT NULL,
     flow_channel text NOT NULL DEFAULT 'trade' CHECK (flow_channel = 'trade'),
     flow_state text NOT NULL DEFAULT 'S1' CHECK (flow_state = 'S1'),
     recorded_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (market, symbol, open_time, published_at),
     FOREIGN KEY (market, symbol, flow_channel, open_time, flow_state)
         REFERENCES market.data_quality_minute (market, symbol, channel, minute_start, flow_state),
-    CHECK (low <= open AND low <= close AND open <= high AND close <= high)
+    CHECK (low <= open AND low <= close AND open <= high AND close <= high),
+    CHECK (latest OR volume > 0)
 );
 
 -- The latest WebSocket candle of a minute, sent again after the minute closed with a later P

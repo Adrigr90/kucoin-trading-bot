@@ -1035,7 +1035,83 @@ def test_trading_shown_by_an_older_or_replaced_candle_is_never_lost(
         in_time = sequence != "older, after the close"
         assert decided == [("discrepante", Decimal(0), in_time)], "compared with the latest"
         late = conn.execute(
-            "SELECT count(*) FROM market.late_ws_candles WHERE symbol = %s", (spot,)
-        ).fetchone()
-        assert late == ((0,) if in_time else (1,))
+            "SELECT latest FROM market.late_ws_candles WHERE symbol = %s", (spot,)
+        ).fetchall()
+        assert late == ([] if in_time else [(False,)]), "it only shows trading"
+        assert store.minute_statuses(conn, "SPOT", spot, day)[minute] == ("datos", "discrepante")
+
+
+@pytest.mark.parametrize("restart", [False, True])
+@pytest.mark.parametrize("tie_with", ["the stored candle", "a candle sent again"])
+def test_a_candle_with_the_same_p_never_competes_for_the_latest(
+    connect: Connect, test_client: Factory, free_day: FreeDay, tie_with: str, restart: bool
+) -> None:
+    """Review of E2, eighth round (N-E2-01), in PostgreSQL: the latest candle of 23:59 has
+    volume 0; another one, different and with volume, arrives after the close with the
+    same P (that of the stored candle, or that of the candle sent again). It is kept only
+    as a sign of trading (latest = false), never as a rival for the latest candle, which
+    stays the same with or without a restart: against KuCoin's zero-volume REST candle,
+    23:59 is datos/discrepante, compared with the candle of volume 0."""
+    day = free_day()
+    midnight = day + timedelta(days=1)
+    minute = midnight - timedelta(minutes=1)
+    spot = "S" + secrets.token_hex(4).upper() + "-USDT"
+    futures = "F" + secrets.token_hex(4).upper() + "USDTM"
+
+    def answer(market: str, symbol: str, begin: int, end: int) -> list[list[object]]:
+        wanted = range(end - end % 60, begin - begin % 60, -60)
+        minutes = [s for s in wanted if s < seconds(midnight)]
+        if market == "FUTURES":
+            return [rest_row(datetime.fromtimestamp(s, UTC)) for s in minutes]
+        return [[s, "100", "100", "100", "100", "0", "0"] for s in minutes]
+
+    fake = FakeKucoin(spot=[spot], futures=[futures], candles=answer)
+    stored = minute + timedelta(seconds=50)
+    again = midnight + timedelta(seconds=5)
+    tie = stored if tie_with == "the stored candle" else again
+
+    with connect("kbot_ingest") as conn:
+        sink = DatabaseSink(conn)
+        rest = test_client(fake, RestRateLimiter(pool_weight=10**6))
+        recorder = Recorder(sink, rest=rest)
+
+        async def start(at: datetime) -> None:
+            nonlocal recorder
+            recorder = Recorder(sink, rest=rest)
+            await recorder.startup(at)
+            assert recorder.core is not None
+            for market in ("SPOT", "FUTURES"):
+                recorder.core.on_state(market, "connected", at + timedelta(seconds=1), "wss://")
+
+        def deliver(published: datetime, volume: str, at: datetime) -> None:
+            assert recorder.core is not None
+            message = flat_candle("SPOT", spot, minute, published, volume)
+            recorder.core.on_message("SPOT", message, at)
+
+        async def scenario() -> None:
+            await start(midnight - timedelta(seconds=90))
+            await beat(recorder, minute)
+            deliver(stored, "0", stored)
+            await beat(recorder, midnight + timedelta(seconds=2))  # 23:59 closed
+            if tie_with == "a candle sent again":
+                deliver(again, "0", again)
+                await beat(recorder, midnight + timedelta(seconds=6))  # only its time kept
+            deliver(tie, "1", midnight + timedelta(seconds=7))  # same P, with volume
+            await beat(recorder, midnight + timedelta(seconds=8))
+            if restart:
+                await start(midnight + timedelta(seconds=9))
+            await beat(recorder, midnight + timedelta(seconds=16))  # KuCoin: volume 0
+
+        asyncio.run(scenario())
+        late = conn.execute(
+            "SELECT published_at, volume, latest FROM market.late_ws_candles WHERE symbol = %s",
+            (spot,),
+        ).fetchall()
+        assert late == [(tie, Decimal(1), False)], "only a sign of trading"
+        decided = conn.execute(
+            "SELECT state, ws_volume FROM market.candles WHERE series = 'last'"
+            " AND symbol = %s AND open_time = %s",
+            (spot, minute),
+        ).fetchall()
+        assert decided == [("discrepante", Decimal(0))], "compared with the same latest candle"
         assert store.minute_statuses(conn, "SPOT", spot, day)[minute] == ("datos", "discrepante")

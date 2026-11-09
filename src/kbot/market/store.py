@@ -161,7 +161,9 @@ def write_late_books(conn: psycopg.Connection, books: Iterable[LateBook]) -> Non
 
 # What the database holds about the WebSocket in the minute of ``q`` (a trade row of
 # data_quality_minute), composed with psycopg.sql from constants only:
-# - its candle: the latest by P of the one stored with its flow and those kept late;
+# - its candle: the latest by P of the one stored with its flow and those kept late as the
+#   latest (late_ws_candles.latest); each of those is newer than all before it, so there is
+#   never a tie (review of E2, eighth round);
 # - the latest P seen, also of a candle sent again (late_ws_repeats);
 # - whether it saw trading besides the trades in time: any candle of the minute with
 #   volume, in time (ws_candles.traded, even if a later one had none) or late (also an older
@@ -175,7 +177,7 @@ _LATEST_WS = sql.SQL(
     " UNION ALL"
     " SELECT l.open, l.high, l.low, l.close, l.volume, l.turnover, l.published_at"
     " FROM market.late_ws_candles AS l WHERE l.market = q.market AND l.symbol = q.symbol"
-    " AND l.open_time = q.minute_start"
+    " AND l.open_time = q.minute_start AND l.latest"
     ") AS x ORDER BY x.published_at DESC LIMIT 1"
 )
 _MAX_PUBLISHED = sql.SQL(
@@ -258,8 +260,8 @@ def write_late_minutes(
             if kind in ("candle", "trading") and _inserted(
                 conn,
                 "INSERT INTO market.late_ws_candles (market, symbol, open_time, published_at,"
-                " open, high, low, close, volume, turnover, received_at) VALUES (%s, %s, %s,"
-                " %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING RETURNING 1",
+                " open, high, low, close, volume, turnover, received_at, latest) VALUES (%s,"
+                " %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING RETURNING 1",
                 (
                     item.market,
                     item.symbol,
@@ -272,10 +274,11 @@ def write_late_minutes(
                     c.volume,
                     c.turnover,
                     item.received_at,
+                    kind == "candle",
                 ),
             ):
-                # An older candle is the latest for no one (the latest is by P): it only
-                # shows trading.
+                # A candle that is not newer, also one with the same P as the latest, never
+                # becomes the latest (latest = false): it only shows trading (eighth round).
                 kept.append(
                     item if kind == "candle" else LateWsTrading(item.market, item.symbol, minute)
                 )

@@ -555,10 +555,11 @@ def late_repeat(conn: psycopg.Connection, symbol: str, minute: datetime) -> None
 def test_late_evidence_belongs_to_a_minute_closed_as_s1(
     ingest: psycopg.Connection, symbol: str
 ) -> None:
-    """Reviews of E2, fourth to sixth rounds: only a minute whose trade flow was S1 can be
+    """Reviews of E2, fourth to eighth rounds: only a minute whose trade flow was S1 can be
     decided from the WebSocket, so only such a minute keeps a late trade, a late candle or
-    the time of a candle sent again; a trade once, a candle and a repeat once per
-    publication time, and a candle only if it is consistent."""
+    the time of a candle sent again; a trade once, a repeat once per publication time, a
+    candle once per publication time as the latest and once as a sign of trading only (a
+    different candle with the same P), and a candle only if it is consistent."""
     inserts = (seen_late, late_candle, late_repeat)
     for insert in inserts:
         with pytest.raises(errors.ForeignKeyViolation):
@@ -581,6 +582,9 @@ def test_late_evidence_belongs_to_a_minute_closed_as_s1(
         insert(ingest, symbol, minute)
         with pytest.raises(errors.UniqueViolation):
             insert(ingest, symbol, minute)
+    late_candle(ingest, symbol, minute, latest=False)  # the same P, only showing trading
+    with pytest.raises(errors.UniqueViolation):
+        late_candle(ingest, symbol, minute, latest=False)
 
 
 def test_pending_work_is_found_from_the_database_alone(

@@ -1042,16 +1042,20 @@ def test_trading_shown_by_an_older_or_replaced_candle_is_never_lost(
 
 
 @pytest.mark.parametrize("restart", [False, True])
-@pytest.mark.parametrize("tie_with", ["the stored candle", "a candle sent again"])
+@pytest.mark.parametrize(
+    "tie_with", ["the stored candle", "a candle sent again", "a late candle kept as the latest"]
+)
 def test_a_candle_with_the_same_p_never_competes_for_the_latest(
     connect: Connect, test_client: Factory, free_day: FreeDay, tie_with: str, restart: bool
 ) -> None:
     """Review of E2, eighth round (N-E2-01), in PostgreSQL: the latest candle of 23:59 has
-    volume 0; another one, different and with volume, arrives after the close with the
-    same P (that of the stored candle, or that of the candle sent again). It is kept only
-    as a sign of trading (latest = false), never as a rival for the latest candle, which
-    stays the same with or without a restart: against KuCoin's zero-volume REST candle,
-    23:59 is datos/discrepante, compared with the candle of volume 0."""
+    volume 0 and is flat at 100; another one, different and with volume, arrives after the
+    close with the same P: that of the stored candle, of the candle sent again, or of a late
+    candle kept as the latest (which replaced a stored one at 99.9, and shares with it all
+    the key of late_ws_candles but latest). It is kept only as a sign of trading
+    (latest = false), never as a rival for the latest candle, which stays the same with or
+    without a restart: against KuCoin's zero-volume REST candle at 100, 23:59 is
+    datos/discrepante, compared with the candle of volume 0."""
     day = free_day()
     midnight = day + timedelta(days=1)
     minute = midnight - timedelta(minutes=1)
@@ -1069,6 +1073,7 @@ def test_a_candle_with_the_same_p_never_competes_for_the_latest(
     stored = minute + timedelta(seconds=50)
     again = midnight + timedelta(seconds=5)
     tie = stored if tie_with == "the stored candle" else again
+    replaced = tie_with == "a late candle kept as the latest"  # the stored one, by a late one
 
     with connect("kbot_ingest") as conn:
         sink = DatabaseSink(conn)
@@ -1083,31 +1088,42 @@ def test_a_candle_with_the_same_p_never_competes_for_the_latest(
             for market in ("SPOT", "FUTURES"):
                 recorder.core.on_state(market, "connected", at + timedelta(seconds=1), "wss://")
 
-        def deliver(published: datetime, volume: str, at: datetime) -> None:
+        def deliver(published: datetime, volume: str, at: datetime, price: str = "100") -> None:
             assert recorder.core is not None
             message = flat_candle("SPOT", spot, minute, published, volume)
+            message["d"].update(l=price, c=price)
             recorder.core.on_message("SPOT", message, at)
 
         async def scenario() -> None:
             await start(midnight - timedelta(seconds=90))
             await beat(recorder, minute)
-            deliver(stored, "0", stored)
+            deliver(stored, "0", stored, "99.9" if replaced else "100")
             await beat(recorder, midnight + timedelta(seconds=2))  # 23:59 closed
-            if tie_with == "a candle sent again":
-                deliver(again, "0", again)
-                await beat(recorder, midnight + timedelta(seconds=6))  # only its time kept
+            if tie_with != "the stored candle":
+                deliver(again, "0", again)  # the same candle sent again, or the new latest
+                await beat(recorder, midnight + timedelta(seconds=6))
             deliver(tie, "1", midnight + timedelta(seconds=7))  # same P, with volume
             await beat(recorder, midnight + timedelta(seconds=8))
+            (waiting,) = [
+                p
+                for p in store.pending_candles(conn, day)
+                if (p.flow.symbol, p.flow.minute) == (spot, minute)
+            ]
+            assert waiting.ws is not None, "the latest candle, as the database holds it"
+            assert (waiting.ws.close, waiting.ws.volume) == (Decimal(100), Decimal(0))
+            assert waiting.active, "trading seen, by the candle that only shows it"
             if restart:
                 await start(midnight + timedelta(seconds=9))
             await beat(recorder, midnight + timedelta(seconds=16))  # KuCoin: volume 0
 
         asyncio.run(scenario())
         late = conn.execute(
-            "SELECT published_at, volume, latest FROM market.late_ws_candles WHERE symbol = %s",
+            "SELECT published_at, volume, latest FROM market.late_ws_candles WHERE symbol = %s"
+            " ORDER BY latest DESC",
             (spot,),
         ).fetchall()
-        assert late == [(tie, Decimal(1), False)], "only a sign of trading"
+        kept_as_latest = [(again, Decimal(0), True)] if replaced else []
+        assert late == [*kept_as_latest, (tie, Decimal(1), False)], "only a sign of trading"
         decided = conn.execute(
             "SELECT state, ws_volume FROM market.candles WHERE series = 'last'"
             " AND symbol = %s AND open_time = %s",

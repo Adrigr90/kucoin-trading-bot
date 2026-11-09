@@ -452,36 +452,44 @@ def test_trading_shown_by_an_older_or_replaced_candle_is_never_lost(
     assert trading_only == ([at(30)] if sequence == "older, after the close" else [])
 
 
+TIES = ["the stored candle", "a candle sent again", "a late candle kept as the latest"]
+
+
 @pytest.mark.parametrize("restart", [False, True])
-@pytest.mark.parametrize("tie_with", ["the stored candle", "a candle sent again"])
+@pytest.mark.parametrize("tie_with", TIES)
 def test_a_candle_with_the_same_p_never_competes_for_the_latest(
     tie_with: str, restart: bool
 ) -> None:
-    """Review of E2, eighth round (N-E2-01): the latest candle has volume 0; another one,
-    different and with volume, arrives late with the same P (that of the stored candle, or
-    that of the candle sent again). It is not newer, so it never becomes the latest: it
-    only shows trading. The latest stays the same, with or without a restart, and against
-    a zero-volume REST candle the minute is discrepante."""
+    """Review of E2, eighth round (N-E2-01): the latest candle has volume 0 and is flat at
+    100; another one, different and with volume, arrives late with the same P: that of the
+    stored candle, of the candle sent again, or of a late candle kept as the latest (which
+    replaced a stored one at 99.9). It is not newer, so it never becomes the latest: it only
+    shows trading. The latest stays the same, with or without a restart, and against a
+    zero-volume REST candle at 100 the minute is discrepante for its volume alone."""
     recorder, sink = core(SPOT), MemorySink()
     connect(recorder, at(0))
-    recorder.on_message("SPOT", flat_kline(50, "0"), at(50))
+    in_time = flat_kline(50, "0")
+    if tie_with == "a late candle kept as the latest":
+        in_time["d"].update(l="99.9", c="99.9")
+    recorder.on_message("SPOT", in_time, at(50))
     written(recorder, sink, 62)
     tie = 50
-    if tie_with == "a candle sent again":
-        recorder.on_message("SPOT", flat_kline(80, "0"), at(80))  # the same candle, P = 80
+    if tie_with != "the stored candle":
+        # P = 80: the same candle sent again, or a newer and different one, the latest
+        recorder.on_message("SPOT", flat_kline(80, "0"), at(80))
         written(recorder, sink, 81)
         tie = 80
-    other = flat_kline(tie, "1")
-    other["d"]["c"] = "100"  # flat at 100 like the latest, but with volume: different
+    other = flat_kline(tie, "1")  # flat at 100 like the latest, but with volume: different
     recorder.on_message("SPOT", other, at(82))
     written(recorder, sink, 83)
-    assert sink.late_ws_candles == [] and [c.published_at for c in sink.late_ws_trading] == [
-        at(tie)
-    ]
+    kept_as_latest = [at(80)] if tie_with == "a late candle kept as the latest" else []
+    assert [c.published_at for c in sink.late_ws_candles] == kept_as_latest
+    assert [c.published_at for c in sink.late_ws_trading] == [at(tie)], "only shows trading"
     if restart:
         recorder = restarted(sink, 84)
     decision = decide_now(recorder, 85, [ZERO_REST])
-    assert decision.ws is not None and decision.ws.volume == 0, "the same latest candle"
+    assert decision.ws is not None, "the same latest candle"
+    assert (decision.ws.close, decision.ws.volume) == (Decimal(100), Decimal(0))
     assert decision.state is CandleState.DISCREPANTE
     assert decision.differences == ("volumen_rest_cero",)
 

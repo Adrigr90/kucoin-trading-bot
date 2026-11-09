@@ -356,6 +356,9 @@ CREATE TABLE market.trading_seen_late (
 -- seen no trading, which it only shows (latest = false; reviews of E2, seventh and eighth
 -- rounds). The WebSocket candle of a minute is the latest by P of ws_candles and the rows of
 -- this table with latest = true: their P only grows, so it is always one and the same.
+-- A candle kept as the latest and a different one that only shows trading can share P, so
+-- latest is part of the key; there is never more than one of each: the P of the latest
+-- only grows, and only the first sign of trading of a minute is kept (eighth round).
 CREATE TABLE market.late_ws_candles (
     market text NOT NULL CHECK (market IN ('SPOT', 'FUTURES')),
     symbol text NOT NULL,
@@ -372,7 +375,7 @@ CREATE TABLE market.late_ws_candles (
     flow_channel text NOT NULL DEFAULT 'trade' CHECK (flow_channel = 'trade'),
     flow_state text NOT NULL DEFAULT 'S1' CHECK (flow_state = 'S1'),
     recorded_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-    PRIMARY KEY (market, symbol, open_time, published_at),
+    PRIMARY KEY (market, symbol, open_time, published_at, latest),
     FOREIGN KEY (market, symbol, flow_channel, open_time, flow_state)
         REFERENCES market.data_quality_minute (market, symbol, channel, minute_start, flow_state),
     CHECK (low <= open AND low <= close AND open <= high AND close <= high),

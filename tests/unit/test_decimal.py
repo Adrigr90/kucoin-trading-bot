@@ -1,6 +1,6 @@
-"""Accounting decimals (spec 02 §5.7, H07) and acceptance test A3.
+"""Accounting decimals (spec 02 §5.7, H07) and acceptance test F1-A3.
 
-A3: no operation outside the declared quantizations raises Inexact, and a calculation
+F1-A3: no operation outside the declared quantizations raises Inexact, and a calculation
 that would lose precision fails instead of rounding.
 """
 
@@ -75,7 +75,7 @@ def exact(value: Decimal) -> Fraction:
     return Fraction(value)
 
 
-# --- A3: no silent rounding --------------------------------------------------------------
+# --- F1-A3: no silent rounding --------------------------------------------------------------
 
 
 @PROPERTY_SETTINGS

@@ -37,6 +37,27 @@ class Grant:
         return f"{self.privilege.upper()} on {self.kind} {self.target} to {self.role}"
 
 
+# Phase 2, stage E2 (02 §3.8): the market tables, where kbot_ingest reads and inserts.
+MARKET_TABLES = (
+    "market.instruments",
+    "market.risk_tiers",
+    "market.data_quality_minute",
+    "market.candles",
+    "market.ws_candles",
+    "market.exhausted_index_rebuilds",
+    "market.data_gaps",
+    "market.minute_status",
+    "market.depth_slot_status",
+    "market.depth_metrics",
+    "market.depth_snapshots",
+    "market.depth_late_books",
+    "market.trading_seen_late",
+    "market.late_ws_candles",
+    "market.late_ws_repeats",
+    "market.funding_rates",
+    "market.universe_snapshots",
+)
+
 ALLOWED_GRANTS: frozenset[Grant] = frozenset(
     {
         # Risk applies the DM limits and the watchdog checks them (02 §6.1).
@@ -44,6 +65,10 @@ ALLOWED_GRANTS: frozenset[Grant] = frozenset(
         Grant("kbot_risk", "select", TABLE, "config.risk_limits"),
         Grant("kbot_watchdog", "usage", SCHEMA, "config"),
         Grant("kbot_watchdog", "select", TABLE, "config.risk_limits"),
+        # svc-ingest records market data: SELECT and INSERT only, never UPDATE or DELETE.
+        Grant("kbot_ingest", "usage", SCHEMA, "market"),
+        *(Grant("kbot_ingest", "select", TABLE, table) for table in MARKET_TABLES),
+        *(Grant("kbot_ingest", "insert", TABLE, table) for table in MARKET_TABLES),
     }
 )
 

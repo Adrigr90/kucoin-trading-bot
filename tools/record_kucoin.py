@@ -1,4 +1,4 @@
-"""Record real public KuCoin responses as fixtures for the contract tests (07 §2 E1, A4).
+"""Record real public KuCoin responses as fixtures for the contract tests (07 §2 E1, F2-A4).
 
 Usage, from the repository root:  uv run python -m tools.record_kucoin
 
@@ -32,6 +32,9 @@ from kbot.kucoin.ws import ConnectionPacer, PublicStream, Subscription
 SPOT_SYMBOL = "BTC-USDT"
 FUTURES_SYMBOL = "XBTUSDTM"
 KEEP_ITEMS = 3
+# D04 (approved on 7 November 2026): UTA V2 plus Classic. V1 is no longer in the whitelist;
+# its answers recorded on 6 November 2026 are kept in tests/fixtures/kucoin/evidencia_d04_v1.
+VERSIONS = ("v2",)
 FIXTURES = Path("tests/fixtures/kucoin")
 
 
@@ -115,7 +118,7 @@ def rest_cases(now_ms: int) -> list[Case]:
     spot = {"tradeType": "SPOT", "symbol": SPOT_SYMBOL}
     fut = {"tradeType": "FUTURES", "symbol": FUTURES_SYMBOL}
     cases: list[Case] = []
-    for version in ("v1", "v2"):
+    for version in VERSIONS:
         for label, base in (("spot", spot), ("futures", fut)):
             cases += [
                 Case(f"{version}_instrument_{label}", f"uta.{version}.instrument", base),
@@ -126,8 +129,6 @@ def rest_cases(now_ms: int) -> list[Case]:
             Case(f"{version}_funding", f"uta.{version}.funding", {"symbol": FUTURES_SYMBOL})
         )
     cases += [
-        Case("v1_kline_spot", "uta.v1.kline", {**spot, "interval": "1min"}),
-        Case("v1_kline_futures", "uta.v1.kline", {**fut, "interval": "1min"}),
         Case("v2_kline_spot", "uta.v2.kline", {**spot, "interval": "1min"}),
         Case("v2_kline_futures", "uta.v2.kline", {**fut, "interval": "1min"}),
     ]
@@ -160,7 +161,7 @@ def rest_cases(now_ms: int) -> list[Case]:
         "startAt": str(now_ms - 2 * 86_400_000),
         "endAt": str(now_ms),
     }
-    for version in ("v1", "v2"):
+    for version in VERSIONS:
         cases.append(Case(f"{version}_funding_history", f"uta.{version}.funding_history", history))
     return cases
 
@@ -373,12 +374,12 @@ async def record_ws(out: Path, seconds_after_minute: float) -> tuple[dict[str, A
 
 
 async def record_minute_candles(client: KucoinRestClient, out: Path, minute: int) -> None:
-    """REST V1 and V2 candles of the minute heard on the WebSocket."""
+    """REST candles of the minute heard on the WebSocket."""
     for label, trade_type, symbol in (
         ("spot", "SPOT", SPOT_SYMBOL),
         ("futures", "FUTURES", FUTURES_SYMBOL),
     ):
-        for version in ("v1", "v2"):
+        for version in VERSIONS:
             params = {
                 "tradeType": trade_type,
                 "symbol": symbol,

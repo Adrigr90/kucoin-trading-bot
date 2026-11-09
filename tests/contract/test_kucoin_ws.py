@@ -1,4 +1,4 @@
-"""Contract tests for the public WebSocket messages (07 A4; B1, B2, B8, B31)."""
+"""Contract tests for the public WebSocket messages (07 F2-A4; B1, B2, B8, B31)."""
 
 from __future__ import annotations
 

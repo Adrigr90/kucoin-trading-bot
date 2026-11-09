@@ -1,6 +1,6 @@
-"""Merkle Tree Hash (RFC 6962 §2.1) and acceptance test A5.
+"""Merkle Tree Hash (RFC 6962 §2.1) and acceptance test F1-A5.
 
-A5: two independent implementations (Python hashlib and OpenSSL) give the RC14 values.
+F1-A5: two independent implementations (Python hashlib and OpenSSL) give the RC14 values.
 A third reference, the published test vectors of the transparency-dev project, checks the
 tree structure: https://github.com/transparency-dev/merkle/blob/main/testonly/constants.go
 (Apache License 2.0), consulted on 6 November 2026.

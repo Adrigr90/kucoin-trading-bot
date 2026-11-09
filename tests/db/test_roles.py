@@ -1,4 +1,4 @@
-"""Acceptance test A6: roles, authentication and privileges (spec 02 §9).
+"""Acceptance test F1-A6: roles, authentication and privileges (spec 02 §9).
 
 (a) every role has no password and the login, connection limit and statement_timeout of
     the role attributes table, and a real session of each service sees its timeout;
@@ -33,7 +33,7 @@ EXPECTED_ATTRIBUTES = {
 }
 
 
-def test_a6a_role_attributes(admin: psycopg.Connection) -> None:
+def test_f1_a6a_role_attributes(admin: psycopg.Connection) -> None:
     rows = admin.execute(
         """
         SELECT a.rolname, a.rolcanlogin, a.rolconnlimit, a.rolpassword IS NULL,
@@ -54,13 +54,13 @@ def test_a6a_role_attributes(admin: psycopg.Connection) -> None:
 
 
 @pytest.mark.parametrize("role", [*SERVICE_ROLES, "kbot_backup"])
-def test_a6a_each_session_sees_its_statement_timeout(connect: Connect, role: str) -> None:
+def test_f1_a6a_each_session_sees_its_statement_timeout(connect: Connect, role: str) -> None:
     expected = "0" if role == "kbot_backup" else "30s"
     with connect(role) as conn:
         assert conn.execute("SHOW statement_timeout").fetchone() == (expected,)
 
 
-def test_a6a_connection_limit_is_enforced(connect: Connect) -> None:
+def test_f1_a6a_connection_limit_is_enforced(connect: Connect) -> None:
     opened = [connect("kbot_web") for _ in range(5)]
     try:
         with pytest.raises(psycopg.OperationalError, match="too many connections"):
@@ -70,7 +70,7 @@ def test_a6a_connection_limit_is_enforced(connect: Connect) -> None:
             conn.close()
 
 
-def test_a6b_pg_hba_has_only_local_peer_rules(admin: psycopg.Connection) -> None:
+def test_f1_a6b_pg_hba_has_only_local_peer_rules(admin: psycopg.Connection) -> None:
     rules = admin.execute(
         "SELECT type, auth_method, error FROM pg_hba_file_rules ORDER BY rule_number"
     ).fetchall()
@@ -80,7 +80,7 @@ def test_a6b_pg_hba_has_only_local_peer_rules(admin: psycopg.Connection) -> None
         assert (rule_type, method) == ("local", "peer")
 
 
-def test_a6c_no_tcp_listener(admin: psycopg.Connection) -> None:
+def test_f1_a6c_no_tcp_listener(admin: psycopg.Connection) -> None:
     assert admin.execute("SHOW listen_addresses").fetchone() == ("",)
     sockets = subprocess.run(
         ["sudo", "-n", "ss", "-H", "-l", "-t", "-n", "-p"],
@@ -92,7 +92,7 @@ def test_a6c_no_tcp_listener(admin: psycopg.Connection) -> None:
     assert "postgres" not in sockets.stdout, sockets.stdout
 
 
-def test_a6d_a_system_user_outside_the_map_is_rejected(pghost: str) -> None:
+def test_f1_a6d_a_system_user_outside_the_map_is_rejected(pghost: str) -> None:
     result = subprocess.run(
         [
             "sudo",
@@ -122,12 +122,12 @@ def test_a6d_a_system_user_outside_the_map_is_rejected(pghost: str) -> None:
 
 
 @pytest.mark.parametrize("role", OWNER_ROLES)
-def test_a6d_owners_cannot_log_in(connect: Connect, role: str) -> None:
+def test_f1_a6d_owners_cannot_log_in(connect: Connect, role: str) -> None:
     with pytest.raises(psycopg.OperationalError, match="not permitted to log in"):
         connect(role)
 
 
-def test_a6e_no_create_privilege_anywhere(admin: psycopg.Connection) -> None:
+def test_f1_a6e_no_create_privilege_anywhere(admin: psycopg.Connection) -> None:
     roles = [*SERVICE_ROLES, "kbot_backup", "kbot_fn_owner"]
     schema_create = admin.execute(
         """
@@ -150,7 +150,7 @@ def test_a6e_no_create_privilege_anywhere(admin: psycopg.Connection) -> None:
     assert temporary == []
 
 
-def test_a6e_public_has_no_rights(admin: psycopg.Connection) -> None:
+def test_f1_a6e_public_has_no_rights(admin: psycopg.Connection) -> None:
     schemas = admin.execute(
         """
         SELECT n.nspname, a.privilege_type
@@ -177,6 +177,6 @@ def test_a6e_public_has_no_rights(admin: psycopg.Connection) -> None:
         "CREATE SCHEMA intruder",
     ],
 )
-def test_a6e_a_real_service_session_cannot_create(connect: Connect, statement: str) -> None:
+def test_f1_a6e_a_real_service_session_cannot_create(connect: Connect, statement: str) -> None:
     with connect("kbot_ingest") as conn, pytest.raises(errors.InsufficientPrivilege):
         conn.execute(statement)

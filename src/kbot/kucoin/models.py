@@ -1,4 +1,4 @@
-"""Contracts of the KuCoin payloads that the bot reads (07 §2 E1, A4).
+"""Contracts of the KuCoin payloads that the bot reads (07 §2 E1, F2-A4).
 
 The models are strict about types so that a format change fails loudly: UTA V2 sends
 every decimal as a string, Classic Futures sends JSON numbers, and timestamps are

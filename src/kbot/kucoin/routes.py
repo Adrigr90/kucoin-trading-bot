@@ -2,9 +2,9 @@
 
 Spec 02 §2 and §3.2. Every weight was measured on 6 November 2026 with the
 ``gw-ratelimit-remaining`` header of real responses; the contract tests check them against
-the recorded fixtures (docs/kucoin/matriz_v1_v2.md). Both V1 and V2 stay listed until the
-owner decides D04. Order-book REST endpoints are left out on purpose: depth comes from
-the WebSocket snapshots (02 §3.1).
+the recorded fixtures (docs/kucoin/matriz_v1_v2.md). D04 (approved on 7 November 2026): UTA V2
+plus Classic Futures; the V1 routes are not listed. Order-book REST endpoints are left out
+on purpose: depth comes from the WebSocket snapshots (02 §3.1).
 """
 
 from __future__ import annotations
@@ -62,17 +62,11 @@ def _uta(name: str, version: str, endpoint: str, weight: int, *params: str) -> R
 _KLINE = ("tradeType", "symbol", "interval", "startAt", "endAt")
 
 _ROUTES = (
-    _uta("instrument", "v1", "instrument", 4, "tradeType", "symbol"),
     _uta("instrument", "v2", "instrument", 4, "tradeType", "symbol"),
-    _uta("ticker", "v1", "ticker", 15, "tradeType", "symbol"),
     _uta("ticker", "v2", "ticker", 15, "tradeType", "symbol"),
-    _uta("kline", "v1", "kline", 3, *_KLINE),
     _uta("kline", "v2", "kline", 3, *_KLINE, "klineType"),
-    _uta("trades", "v1", "trade", 3, "tradeType", "symbol"),
     _uta("trades", "v2", "trade", 3, "tradeType", "symbol"),
-    _uta("funding", "v1", "funding-rate", 2, "symbol"),
     _uta("funding", "v2", "funding-rate", 2, "symbol", "productType"),
-    _uta("funding_history", "v1", "funding-rate-history", 5, "symbol", "startAt", "endAt"),
     _uta("funding_history", "v2", "funding-rate-history", 5, "symbol", "startAt", "endAt"),
     Route("futures.contracts", FUTURES_HOST, "/api/v1/contracts/active", 3),
     Route("futures.risk_limit", FUTURES_HOST, "/api/v1/contracts/risk-limit/{symbol}", 5),

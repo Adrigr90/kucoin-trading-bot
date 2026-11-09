@@ -261,6 +261,9 @@ class PublicStream:
         self._reconnect_delay = reconnect_delay
         self._max_session = max_session_seconds
         self._ids = itertools.count(1)
+        # Wall time of the last message received in the current session: the last proof
+        # that the connection was alive.
+        self._last_alive: datetime | None = None
 
     async def run(self, stop: asyncio.Event) -> None:
         while not stop.is_set():
@@ -273,7 +276,11 @@ class PublicStream:
                 ProtocolViolation,
                 SessionRotation,
             ) as exc:
-                self._on_state("disconnected", self._wall.now(), f"{type(exc).__name__}: {exc}")
+                # The connection is reported down from its last proof of life, not from the
+                # moment the failure was noticed: nothing in between may count as healthy.
+                down_since = self._last_alive or self._wall.now()
+                self._last_alive = None
+                self._on_state("disconnected", down_since, f"{type(exc).__name__}: {exc}")
             if stop.is_set():
                 break
             with suppress(TimeoutError):
@@ -295,7 +302,8 @@ class PublicStream:
             if welcome.get("message") != "welcome":
                 raise ProtocolViolation(f"unexpected first message: {str(welcome)[:200]}")
             ping_interval = _ping_interval_seconds(welcome)
-            self._on_control(welcome, self._wall.now())
+            self._last_alive = self._wall.now()
+            self._on_control(welcome, self._last_alive)
             budget = MessageBudget(clock=self._clock, sleep=self._sleep)
             pending_acks: set[str] = set()
             for subscription in self._subscriptions:
@@ -329,6 +337,7 @@ class PublicStream:
                 except TimeoutError:
                     continue
                 received_at = self._wall.now()
+                self._last_alive = received_at
                 message = _decode(raw)
                 if message.get("type") == "pong":
                     pong_deadline = None

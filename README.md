@@ -6,7 +6,7 @@ Bot de **análisis y paper trading** de criptomonedas en KuCoin (Spot y Futures 
 
 ## Estado
 
-**Fase 2 (recopilación y almacenamiento de datos), etapa E1.** La Fase 1 dejó la base: el proyecto Python, el núcleo de cálculo, la base de datos con su seguridad y la integración continua. La etapa E1 añade el cliente de KuCoin de solo lectura (REST y WebSocket públicos, sin claves). Todavía no guarda datos ni simula operaciones.
+**Fase 2 (recopilación y almacenamiento de datos), etapa E2.** La Fase 1 dejó la base: el proyecto Python, el núcleo de cálculo, la base de datos con su seguridad y la integración continua. La etapa E1 añadió el cliente de KuCoin de solo lectura (REST y WebSocket públicos, sin claves; API UTA V2 más Classic, según D04). La etapa E2 añade el esquema `market` y el grabador de datos de mercado. Todavía no simula operaciones.
 
 La especificación vigente y el Documento Maestro están en [`docs/especificacion/`](docs/especificacion/). El Documento Maestro es la fuente de verdad: nada puede contradecirlo.
 
@@ -27,13 +27,16 @@ Los límites de riesgo viven en la tabla `config.risk_limits`, que solo puede es
 | `src/kbot/core/` | Núcleo de cálculo: decimales sin redondeos ocultos, JSON canónico (RFC 8785), árbol de Merkle (RFC 6962) y reloj inyectable |
 | `src/kbot/limits.py` | Límites de riesgo del Documento Maestro y su huella SHA-256 |
 | `src/kbot/kucoin/` | Cliente de KuCoin de solo lectura: REST solo GET con lista blanca de rutas y límite de peso, WebSocket público con lista blanca de mensajes, y contratos de los datos |
+| `src/kbot/market/` | Lógica de los datos de mercado: profundidad cada 10 s, velas de last, mark e index, huecos, universo, cierre diario y escritura en PostgreSQL (solo inserciones) |
+| `src/kbot/ingest/` | El grabador (`svc-ingest`): une las conexiones de KuCoin, el reloj y la base de datos. `uv run python -m kbot.ingest --sink file --out CARPETA --minutes 15` lo prueba en un PC sin PostgreSQL |
 | `sql/roles.sql` | Roles de PostgreSQL y base de datos. Ningún rol tiene contraseña |
 | `migrations/` | Migraciones de Alembic. Todo su SQL está en archivos `.sql` revisados |
 | `tools/` | Comprobaciones de la integración continua (lista blanca de SQL y límites) y grabador de respuestas públicas de KuCoin (`record_kucoin.py`) |
 | `ci/` | Instalación de PostgreSQL 18 y gitleaks en la integración continua |
 | `tests/` | Pruebas unitarias, de propiedades, de contrato (respuestas reales de KuCoin en `tests/fixtures/kucoin/`), de la integración continua y de PostgreSQL |
 | `docs/especificacion/` | Documento Maestro y especificación vigente |
-| `docs/kucoin/` | Matriz de revisión V1/V2 de la API de KuCoin (evidencia para D04) |
+| `docs/kucoin/` | Matriz de revisión V1/V2 de la API de KuCoin (evidencia de D04, ya decidida) |
+| `docs/informes/` | Informe de la Fase 1 y tabla de trazabilidad de las pruebas de aceptación (F1-A# y F2-A#) |
 
 ## Cómo ejecutar las pruebas
 

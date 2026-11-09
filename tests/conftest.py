@@ -12,8 +12,14 @@ import os
 import shutil
 from collections.abc import Callable
 from pathlib import Path
+from unittest.mock import patch
 
+import httpx
 import pytest
+
+from kbot.kucoin import rest as rest_module
+from kbot.kucoin.ratelimit import RestRateLimiter
+from kbot.kucoin.rest import KucoinRestClient
 
 REPO = Path(__file__).resolve().parents[1]
 IN_CI = os.environ.get("KBOT_CI") == "1"
@@ -101,3 +107,28 @@ def _escape_data(text: str) -> str:
 
 def _escape_property(text: str) -> str:
     return _escape_data(text).replace(":", "%3A").replace(",", "%2C")
+
+
+# --- test-only construction of REST clients (R-E1-03) -------------------------------------
+# KucoinRestClient takes neither a budget nor a transport: production code always gets the
+# machine-wide budget and the real network. Tests replace both module functions with
+# unittest.mock.patch, only while the client is being built.
+
+ClientFactory = Callable[..., KucoinRestClient]
+
+
+@pytest.fixture
+def test_client() -> ClientFactory:
+    def build(
+        transport: httpx.AsyncBaseTransport,
+        limiter: RestRateLimiter | None = None,
+        **options: object,
+    ) -> KucoinRestClient:
+        budget = limiter if limiter is not None else rest_module.shared_limiter()
+        with (
+            patch.object(rest_module, "_network_transport", lambda: transport),
+            patch.object(rest_module, "shared_limiter", lambda: budget),
+        ):
+            return KucoinRestClient(**options)  # type: ignore[arg-type]
+
+    return build

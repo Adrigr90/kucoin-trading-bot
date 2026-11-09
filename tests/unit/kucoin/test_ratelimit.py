@@ -1,4 +1,4 @@
-"""Acceptance A2 (07 §2 E1): at most half of the pool, waits on 429, never fast retries."""
+"""Acceptance F2-A2 (07 §2 E1): at most half of the pool, waits on 429, never fast retries."""
 
 from __future__ import annotations
 

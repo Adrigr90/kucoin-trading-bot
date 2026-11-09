@@ -1,10 +1,11 @@
-"""Contract tests for the REST payloads, version by version (07 A4; H08, B4-B6, B14 a)."""
+"""Contract tests for the REST payloads, version by version (07 F2-A4; H08, B4-B6, B14 a)."""
 
 from __future__ import annotations
 
 import itertools
 from collections.abc import Callable
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -29,8 +30,10 @@ from kbot.kucoin.models import (
     TickerList,
     TradeList,
 )
-from kbot.kucoin.rest import check_request
+from kbot.kucoin.rest import ForbiddenRequest, check_request
 from kbot.kucoin.routes import ROUTES
+
+V1_EVIDENCE = Path(__file__).resolve().parents[1] / "fixtures" / "kucoin" / "evidencia_d04_v1"
 
 Load = Callable[[str], Any]
 
@@ -43,7 +46,7 @@ def body(recorded: Load, name: str) -> Any:
 
 def test_every_recording_went_through_the_whitelist(recorded: Load, fixture_names: list[str]):
     rest = [name for name in fixture_names if not name.startswith("ws_")]
-    assert len(rest) >= 30
+    assert len(rest) >= 19
     for name in rest:
         fixture = recorded(name)
         route = check_request(httpx.Request("GET", fixture["request"]))
@@ -152,7 +155,17 @@ def test_v2_funding_history(recorded: Load) -> None:
     assert all(t % (8 * 3600 * 1000) == 0 for t in times)
 
 
-# --- V1, kept as evidence for D04 ---------------------------------------------------------
+# --- V1, kept as evidence for D04 (approved: V2 plus Classic) --------------------------
+
+
+def test_d04_v1_is_no_longer_whitelisted(recorded: Load) -> None:
+    """D04: the V1 answers stay as evidence, but a V1 request is now refused."""
+    assert not [name for name in ROUTES if name.startswith("uta.v1.")]
+    v1_files = sorted(p.stem for p in V1_EVIDENCE.glob("*.json"))
+    assert len(v1_files) == 12
+    for name in v1_files:
+        with pytest.raises(ForbiddenRequest, match="whitelist"):
+            check_request(httpx.Request("GET", recorded(name)["request"]))
 
 
 def test_v1_funding_uses_another_symbol_and_json_numbers(recorded: Load) -> None:

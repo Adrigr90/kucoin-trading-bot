@@ -1,6 +1,6 @@
-"""CI workflow rules and acceptance test A10.
+"""CI workflow rules and acceptance test F1-A10.
 
-A10: the repository is public (P2) and GitHub's standard hosted runners are free in public
+F1-A10: the repository is public (P2) and GitHub's standard hosted runners are free in public
 repositories (spec 02 §16, GitHub billing documentation). The CI checks both conditions:
 the repository visibility that GitHub reports in the event of the run, and that only
 standard runners are used. Every action is pinned to a full commit SHA (supply chain, 02 §9).
@@ -19,26 +19,26 @@ VISIBILITY_WIRING = "KBOT_REPO_VISIBILITY: ${{ github.event.repository.visibilit
 
 
 def repository_visibility_problem(visibility: str | None) -> str | None:
-    """A10 holds only for a public repository: standard runners are free only there."""
+    """F1-A10 holds only for a public repository: standard runners are free only there."""
     if visibility == "public":
         return None
-    return f"A10 needs a public repository; GitHub reports {visibility!r}"
+    return f"F1-A10 needs a public repository; GitHub reports {visibility!r}"
 
 
 @pytest.mark.parametrize(
     ("visibility", "passes"),
     [("public", True), ("private", False), ("internal", False), ("", False), (None, False)],
 )
-def test_a10_visibility_rule(visibility: str | None, passes: bool) -> None:
+def test_f1_a10_visibility_rule(visibility: str | None, passes: bool) -> None:
     assert (repository_visibility_problem(visibility) is None) is passes
 
 
-def test_a10_the_repository_is_public(ci_environment: Callable[[str], str]) -> None:
+def test_f1_a10_the_repository_is_public(ci_environment: Callable[[str], str]) -> None:
     visibility = ci_environment("KBOT_REPO_VISIBILITY")
     assert repository_visibility_problem(visibility) is None, visibility
 
 
-def test_a10_the_workflow_reports_the_visibility(workflows: dict[str, str]) -> None:
+def test_f1_a10_the_workflow_reports_the_visibility(workflows: dict[str, str]) -> None:
     assert any(VISIBILITY_WIRING in text for text in workflows.values())
 
 
@@ -50,7 +50,7 @@ def workflows(repo_root: Path) -> dict[str, str]:
     return {path.name: path.read_text(encoding="utf-8") for path in files}
 
 
-def test_a10_only_standard_runners(workflows: dict[str, str]) -> None:
+def test_f1_a10_only_standard_runners(workflows: dict[str, str]) -> None:
     for name, text in workflows.items():
         runners = re.findall(r"^\s*runs-on:\s*(\S+)\s*$", text, re.MULTILINE)
         assert runners, f"{name}: no runs-on found"

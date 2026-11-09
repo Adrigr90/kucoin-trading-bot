@@ -31,8 +31,8 @@ jobs:
         with:
           version: "0.13.7"
 
-      - name: A1 - instalar exactamente uv.lock
-        run: bash ci/step.sh "A1 uv sync --frozen" uv sync --frozen
+      - name: F1-A1 - instalar exactamente uv.lock
+        run: bash ci/step.sh "F1-A1 uv sync --frozen" uv sync --frozen
 
       - name: Estilo (ruff)
         run: bash ci/step.sh "ruff" bash -c "uv run ruff check . && uv run ruff format --check ."

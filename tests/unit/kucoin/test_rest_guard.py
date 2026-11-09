@@ -1,4 +1,4 @@
-"""Acceptance A2 (07 §2 E1): only whitelisted public GETs ever reach the network."""
+"""Acceptance F2-A2 (07 §2 E1): only whitelisted public GETs ever reach the network."""
 
 from __future__ import annotations
 
@@ -67,6 +67,8 @@ def test_other_methods_never_reach_the_network(method: str) -> None:
         f"https://{UTA_HOST}/api/v1/withdrawals",
         f"https://{UTA_HOST}/api/v1/bullet-public",
         f"https://{UTA_HOST}/api/ua/v1/market/orderbook",
+        f"https://{UTA_HOST}/api/ua/v1/market/kline",
+        f"https://{UTA_HOST}/api/ua/v1/market/funding-rate",
         f"https://{UTA_HOST}/api/ua/v3/market/kline",
         f"https://{FUTURES_HOST}/api/v1/orders",
         f"https://{FUTURES_HOST}/api/v1/contracts/risk-limit/XBTUSDTM/extra",
@@ -147,9 +149,7 @@ def test_every_route_is_public_market_data() -> None:
     assert len(ROUTES) == len({(r.host, r.path) for r in ROUTES.values()})
     for route in ROUTES.values():
         assert route.host in (UTA_HOST, FUTURES_HOST)
-        assert route.path.startswith(
-            ("/api/ua/v1/market/", "/api/ua/v2/market/")
-        ) or route.path in (
+        assert route.path.startswith(("/api/ua/v2/market/",)) or route.path in (
             "/api/v1/contracts/active",
             "/api/v1/contracts/risk-limit/{symbol}",
             "/api/v1/mark-price/{symbol}/current",
@@ -213,7 +213,7 @@ def test_numbers_are_parsed_exactly(test_client: Factory) -> None:
 
     async def go() -> object:
         async with test_client(Funding()) as client:
-            response = await client.get("uta.v1.funding", params={"symbol": "XBTUSDTM"})
+            response = await client.get("uta.v2.funding", params={"symbol": "XBTUSDTM"})
             return response.data
 
     data = asyncio.run(go())

@@ -85,12 +85,14 @@ class Observed:
     states: list[tuple[str, str]] = field(default_factory=list)
     control: list[dict[str, Any]] = field(default_factory=list)
     targets: list[str] = field(default_factory=list)
+    moments: list[tuple[str, datetime]] = field(default_factory=list)
 
     def on_message(self, message: dict[str, Any], at: datetime) -> None:
         self.messages.append((message, at))
 
-    def on_state(self, state: str, _at: datetime, detail: str) -> None:
+    def on_state(self, state: str, at: datetime, detail: str) -> None:
         self.states.append((state, detail))
+        self.moments.append((state, at))
 
     def on_control(self, message: dict[str, Any], _at: datetime) -> None:
         self.control.append(message)
@@ -191,6 +193,11 @@ def test_a_missing_pong_drops_and_reopens_the_connection() -> None:
     observed = run_stream(server, lambda _o: len(server.received) >= 2)
     disconnects = [detail for state, detail in observed.states if state == "disconnected"]
     assert disconnects and "no pong" in disconnects[0]
+    # Reported down from the last message received, not from when the missing pong was
+    # noticed (about a second later): nothing in between counts as healthy.
+    down_at = next(at for state, at in observed.moments if state == "disconnected")
+    last_message_at = max(at for _m, at in observed.messages if at <= down_at)
+    assert down_at == last_message_at
 
 
 def test_a_refused_subscription_drops_the_connection() -> None:

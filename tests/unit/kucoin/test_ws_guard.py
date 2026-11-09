@@ -1,4 +1,4 @@
-"""Acceptance A3 (07 §2 E1): only pings and public market subscriptions leave the process."""
+"""Acceptance F2-A3 (07 §2 E1): only pings and public market subscriptions leave the process."""
 
 from __future__ import annotations
 

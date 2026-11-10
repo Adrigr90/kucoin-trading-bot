@@ -120,7 +120,7 @@ def test_the_twelve_tables_are_partitioned_by_range_of_their_time(
 
 
 def test_prepare_keeps_the_recovery_range_in_utc_from_any_session(
-    connect: Connect, admin: psycopg.Connection
+    connect: Connect, admin: psycopg.Connection, recovery_range: None
 ) -> None:
     """[today - 30, today + 14] in UTC, owned by kbot_owner, the same from sessions in
     Madrid and New York; a second call creates nothing (review of the E3 design)."""
@@ -151,7 +151,7 @@ def test_prepare_keeps_the_recovery_range_in_utc_from_any_session(
 
 
 def test_a_table_in_the_place_of_a_partition_stops_prepare(
-    connect: Connect, admin: psycopg.Connection
+    connect: Connect, admin: psycopg.Connection, recovery_range: None
 ) -> None:
     """The catalog check: a relation with an expected name that is not that day's partition
     of its table stops the function instead of being taken for it."""

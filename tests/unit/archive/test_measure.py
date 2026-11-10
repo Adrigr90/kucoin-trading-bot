@@ -118,7 +118,7 @@ def test_a_recording_is_measured_end_to_end(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(measure_archive, "RUNS", 1)
-    monkeypatch.setattr(measure_archive, "HOT_DAYS", 1)
+    monkeypatch.setattr(measure_archive, "QUERY_DAYS", 1)
     spot = InstrumentSpec("SPOT", "BTC-USDT", Decimal("0.1"), Decimal(1), l50=True)
     futures = InstrumentSpec(
         "FUTURES", "XBTUSDTM", Decimal("0.1"), Decimal("0.001"), l50=True, index_symbol=".KXBT"
@@ -147,4 +147,9 @@ def test_a_recording_is_measured_end_to_end(
     written = pq.read_table(out / "zstd3" / "depth_metrics" / "2026-11-11.parquet")
     assert written.num_rows == metrics["days"]["2026-11-11"]
     assert "series, 1 days (360 copies)" in summary["duckdb_ms"]
-    assert "Per year (365 days)" in capsys.readouterr().out
+    printed = capsys.readouterr().out
+    assert "Per year (365 days)" in printed
+    assert "90 hot days" in printed
+    database = summary["postgres_bytes"]
+    assert database["day"] == database["heap"] + database["toast"] + database["index"]
+    assert database["year_2"] - database["year_1"] == pytest.approx(database["parquet_year"])

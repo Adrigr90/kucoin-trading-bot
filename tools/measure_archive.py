@@ -16,7 +16,10 @@ What the recording does not hold is made up, close to its real value:
   of each instrument's trade flow, with data and its candle (``datos``);
 - a column no INSERT names takes its constant default, as in PostgreSQL.
 
-The sizes per day are those of the recording scaled to 1,440 minutes.
+The sizes per day are those of the recording scaled to 1,440 minutes. With the bytes per row
+that a CI test measured in PostgreSQL 18 (``tests/db/test_storage_scale.py``), it also projects
+the 90 hot days of the database and the data volume after one and two years (02 §3.1 and
+§10.3).
 
 Usage: ``uv run python -m tools.measure_archive <recording folder> [--out <folder>]``
 """
@@ -53,7 +56,8 @@ VARIANTS: dict[str, tuple[str, int | None]] = {
     "zstd3": ("zstd", 3),
     "zstd9": ("zstd", 9),
 }
-HOT_DAYS = 90
+HOT_DAYS = 90  # in PostgreSQL (02 §3.9)
+QUERY_DAYS = HOT_DAYS  # the DuckDB queries also run over this many days of copies
 RUNS = 5
 MINUTES_PER_DAY = 1440
 INSERT_DELAY = timedelta(seconds=70)
@@ -69,6 +73,26 @@ SQL_TYPES = {
     "date": "date",
 }
 BOOK_LEVEL = pa.struct([("price", pa.decimal128(38, 18)), ("size", pa.decimal128(38, 18))])
+
+# Bytes per row in PostgreSQL 18 (heap, TOAST, indexes), measured in the CI by
+# tests/db/test_storage_scale.py on 11 Nov 2026 (commit 2d071b6), with an hour of a realistic
+# universe. A table it does not fill (rare rows, and data_gaps) takes the largest total.
+POSTGRES_ROW_BYTES: dict[str, tuple[int, int, int]] = {
+    "data_quality_minute": (102, 6, 199),
+    "candles": (190, 8, 228),
+    "ws_candles": (137, 14, 96),
+    "minute_status": (123, 14, 82),
+    "depth_slot_status": (96, 2, 186),
+    "depth_metrics": (207, 2, 84),
+    "depth_snapshots": (777, 11, 84),
+}
+LARGEST_ROW = max(POSTGRES_ROW_BYTES.values(), key=sum)
+WAL_BYTES_PER_ROW = 487  # written, same test
+EMPTY_PARTITION_BYTES = 24_621  # files of its indexes and TOAST, and catalog rows; same CI
+PARTITIONS = 12 * (HOT_DAYS + 1 + 14)  # the hot days, today and the 14 prepared ahead
+WAL_KEPT_BYTES = 1 << 30  # max_wal_size by default: the WAL PostgreSQL keeps on disk
+MARGIN = 1.2  # the margin of the estimate of 02 §3.1
+DATA_VOLUME_GB = 110  # 02 §10.3, option B
 
 
 @dataclass(frozen=True)
@@ -308,15 +332,15 @@ def timed(
 def queries(out: Path, symbol: str, minutes: int) -> dict[str, tuple[float, float]]:
     """Two typical queries over ``depth_metrics`` (one instrument's series, and the whole
     universe aggregated), over the recorded minutes and over as many copies of them as
-    make ``HOT_DAYS`` days; and the first bid size of every snapshot, from the JCS text and
+    make ``QUERY_DAYS`` days; and the first bid size of every snapshot, from the JCS text and
     from the typed lists."""
 
     def files(folder: str, table: str) -> list[str]:
         return [str(p) for p in sorted((out / folder / table).glob("*.parquet"))]
 
     metrics = files("zstd3", "depth_metrics")
-    copies = math.ceil(HOT_DAYS * MINUTES_PER_DAY / minutes)
-    days = f"{HOT_DAYS} days ({copies} copies)"
+    copies = math.ceil(QUERY_DAYS * MINUTES_PER_DAY / minutes)
+    days = f"{QUERY_DAYS} days ({copies} copies)"
     connection = duckdb.connect()
     return {
         "series, recorded": timed(connection, SERIES, metrics, symbol),
@@ -367,6 +391,53 @@ def report(minutes: int, measures: dict[str, Measure], times: dict[str, Any]) ->
     return lines
 
 
+def postgres(
+    minutes: int, measures: dict[str, Measure], gaps: int, parquet_per_day: float
+) -> tuple[list[str], dict[str, float]]:
+    """The 90 hot days in PostgreSQL, with the bytes per row measured in the CI and the
+    margins for the partitions, the WAL and the 20 % of 02 §3.1, and the data volume of
+    02 §10.3 after one and two years of Parquet (``parquet_per_day``, in bytes)."""
+    scale = MINUTES_PER_DAY / minutes
+    per_day = {name: m.rows * scale for name, m in measures.items()}
+    per_day["data_gaps"] = gaps * scale
+    heap, toast, index = (
+        sum(
+            rows * POSTGRES_ROW_BYTES.get(name, LARGEST_ROW)[part] for name, rows in per_day.items()
+        )
+        for part in range(3)
+    )
+    day = heap + toast + index
+    hot = day * HOT_DAYS + PARTITIONS * EMPTY_PARTITION_BYTES + WAL_KEPT_BYTES
+    database = hot * MARGIN
+    year = parquet_per_day * 365
+    values = {
+        "day": day,
+        "heap": heap,
+        "toast": toast,
+        "index": index,
+        "wal_per_day": sum(per_day.values()) * WAL_BYTES_PER_ROW,
+        "hot": hot,
+        "database": database,
+        "parquet_year": year,
+        "year_1": database + year,
+        "year_2": database + 2 * year,
+    }
+    gb = {name: value / 1e9 for name, value in values.items()}
+    lines = [
+        "PostgreSQL, with the bytes per row measured in the CI (heap + TOAST + indexes):",
+        f"  per day {day / 1e6:.0f} MB: heap {heap / 1e6:.0f}, TOAST {toast / 1e6:.0f},"
+        f" indexes {index / 1e6:.0f}; WAL written {values['wal_per_day'] / 1e6:.0f} MB per day",
+        f"  {HOT_DAYS} hot days {day * HOT_DAYS / 1e9:.1f} GB + {PARTITIONS} partitions"
+        f" {PARTITIONS * EMPTY_PARTITION_BYTES / 1e9:.2f} + WAL kept"
+        f" {WAL_KEPT_BYTES / 1e9:.2f} = {gb['hot']:.1f} GB;"
+        f" with {MARGIN - 1:.0%} more, {gb['database']:.1f} GB",
+        f"Data volume of {DATA_VOLUME_GB} GB (02 §10.3), with Parquet zstd 3:"
+        f" year 1 {gb['database']:.1f} + {gb['parquet_year']:.1f} = {gb['year_1']:.1f} GB;"
+        f" year 2 {gb['year_2']:.1f} GB",
+    ]
+    return lines, values
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else None)
     parser.add_argument("recording", type=Path, help="folder written by --sink rows")
@@ -376,18 +447,24 @@ def main(argv: list[str] | None = None) -> int:
     arguments = parser.parse_args(argv)
     out = arguments.out or arguments.recording / "parquet"
     minutes, measures = measure(arguments.recording, out)
+    gaps_file = arguments.recording / "data_gaps.jsonl"
+    gaps = len(read_rows(gaps_file)) if gaps_file.exists() else 0
     metrics = measures.get("depth_metrics")
     symbol = "BTC-USDT"
     times = queries(out, symbol, minutes) if metrics is not None else {}
     lines = report(minutes, measures, times)
-    print("\n".join(lines))
+    parquet_per_day = sum(m.bytes["zstd3"] for m in measures.values()) * MINUTES_PER_DAY / minutes
+    projection, values = postgres(minutes, measures, gaps, parquet_per_day)
+    print("\n".join([*lines, "", *projection]))
     summary = {
         "minutes": minutes,
         "tables": {
             name: {"rows": m.rows, "days": m.days, "bytes": dict(m.bytes)}
             for name, m in measures.items()
         },
+        "data_gaps_rows": gaps,
         "duckdb_ms": {name: {"first": f, "median": md} for name, (f, md) in times.items()},
+        "postgres_bytes": values,
     }
     (out / "measure.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     return 0

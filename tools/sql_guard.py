@@ -11,22 +11,28 @@ Usage: ``python -m tools.sql_guard`` from the repository root.
 from __future__ import annotations
 
 import ast
+import json
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from pglast import ast as pg
 from pglast import parse_sql
 from pglast.enums import (
     A_Expr_Kind,
+    AlterTableType,
     ConstrType,
+    DropBehavior,
     GrantTargetType,
     ObjectType,
+    PartitionStrategy,
     RoleSpecType,
     RoleStmtType,
+    VariableSetKind,
 )
-from pglast.parser import ParseError
+from pglast.parser import ParseError, parse_plpgsql_json
 
 from kbot.db import roles
 from tools import grant_policy
@@ -71,7 +77,6 @@ FOREIGN_KEY_ACTIONS = frozenset({"a", "r"})
 TABLE_OPTIONS = (
     "inhRelations",
     "partbound",
-    "partspec",
     "ofTypename",
     "options",
     "tablespacename",
@@ -80,6 +85,49 @@ TABLE_OPTIONS = (
 )
 COLUMN_OPTIONS = ("collClause", "compression", "storage_name", "fdwoptions", "raw_default")
 INDEX_OPTIONS = ("options", "indexspace", "indexname", "including", "without_overlaps")
+
+# Phase 2, stage E3 (02 §3.9): the twelve market tables partitioned by UTC day, the one
+# migration that rebuilds them from 0002 and the three SECURITY DEFINER functions.
+PARTITIONED_TABLES = frozenset(name.split(".", 1)[1] for name in grant_policy.PARTITIONED_TABLES)
+REBUILD_MIGRATION = "migrations/versions/0003_particiones.sql"
+ACCESS_EXCLUSIVE = 8  # LockStmt.mode of IN ACCESS EXCLUSIVE MODE
+# Functions a CHECK may call, each with a constant first argument from its set: enough to
+# align a timestamp to the UTC minute, and all immutable.
+CHECK_CALLS: Mapping[tuple[str, ...], frozenset[str]] = {
+    ("date_trunc",): frozenset({"minute"}),
+    ("pg_catalog", "timezone"): frozenset({"UTC"}),
+}
+DEFINER_FUNCTIONS = frozenset(grant_policy.PARTITION_FUNCTIONS)
+DEFINER_SETTINGS = {
+    "search_path": ("market", "pg_temp"),
+    "timezone": ("UTC",),
+    "lock_timeout": ("5s",),
+}
+# The only statements a SECURITY DEFINER function may build, always with format() and its
+# %I and %L: create a day's partition, seal it, count it, detach it and drop it.
+DYNAMIC_TEMPLATES = frozenset(
+    {
+        "CREATE TABLE market.%I PARTITION OF market.%I FOR VALUES FROM (%L) TO (%L)",
+        "ALTER TABLE market.%I ADD CONSTRAINT %I CHECK (false) NOT VALID",
+        "SELECT count(*) FROM market.%I",
+        "ALTER TABLE market.%I DETACH PARTITION market.%I",
+        "DROP TABLE market.%I",
+    }
+)
+# Static statements of those functions: reads, and their own bookkeeping rows.
+DEFINER_INSERTS = frozenset({("market", "archive_seals"), ("market", "archive_retirements")})
+# PL/pgSQL statements no SECURITY DEFINER function may contain: dynamic loops, cursors and
+# queries, procedure calls and transaction control.
+DEFINER_FORBIDDEN = frozenset(
+    {
+        "PLpgSQL_stmt_dynfors",
+        "PLpgSQL_stmt_open",
+        "PLpgSQL_stmt_return_query",
+        "PLpgSQL_stmt_call",
+        "PLpgSQL_stmt_commit",
+        "PLpgSQL_stmt_rollback",
+    }
+)
 
 MIGRATION_IMPORTS = frozenset({("pathlib", "Path"), ("kbot.db.sqlfile", "execute_sql_file")})
 MIGRATION_SETTINGS = frozenset({"revision", "down_revision", "branch_labels", "depends_on"})
@@ -120,18 +168,33 @@ def check_roles_sql(text: str, source: str = "sql/roles.sql") -> list[Violation]
 
 
 def check_migration_sql(text: str, source: str) -> list[Violation]:
-    """Objects inside the project database, created by the migrations."""
-    return _check_statements(
-        text,
-        source,
-        {
-            "CreateSchemaStmt": _create_schema,
-            "CreateStmt": _create_table,
-            "GrantStmt": _grant_in_database,
-            "InsertStmt": _insert,
-            "CommentStmt": lambda _stmt: [],
-        },
-    )
+    """Objects inside the project database, created by the migrations.
+
+    The migration that rebuilds the twelve partitioned tables (``REBUILD_MIGRATION``) may
+    also lock them, set its lock timeout, check that they are empty and drop them; no other
+    migration may. Every SECURITY DEFINER function is checked with its PL/pgSQL body, and
+    must be revoked from PUBLIC in the same file (02 §9 and §3.9)."""
+    allowed: dict[str, Checker] = {
+        "CreateSchemaStmt": _create_schema,
+        "CreateStmt": _create_table,
+        "GrantStmt": _grant_in_database,
+        "InsertStmt": _insert,
+        "CommentStmt": lambda _stmt: [],
+        "CreateFunctionStmt": lambda _stmt: [],  # checked with its text, below
+    }
+    if source == REBUILD_MIGRATION:
+        allowed |= {
+            "LockStmt": _lock,
+            "VariableSetStmt": _set_lock_timeout,
+            "AlterTableStmt": _check_empty,
+            "DropStmt": _drop_partitioned,
+        }
+    problems = _check_statements(text, source, allowed)
+    try:
+        statements = parse_sql(text)
+    except ParseError:
+        return problems  # already reported
+    return problems + _check_definer_functions(text, statements, source)
 
 
 def check_migration_module(text: str, source: str) -> list[Violation]:
@@ -324,6 +387,8 @@ def _create_table(stmt: pg.CreateStmt) -> list[str]:
         for option in TABLE_OPTIONS
         if getattr(stmt, option, None)
     ]
+    if stmt.partspec is not None:
+        problems += _partition_spec(stmt)
     for element in stmt.tableElts or ():
         if isinstance(element, pg.ColumnDef):
             problems += _column(element)
@@ -332,6 +397,28 @@ def _create_table(stmt: pg.CreateStmt) -> list[str]:
         else:
             problems.append(f"table element not allowed: {type(element).__name__}")
     return problems
+
+
+def _partition_spec(stmt: pg.CreateStmt) -> list[str]:
+    """PARTITION BY RANGE of one timestamptz column, only on the tables of 02 §3.9."""
+    relation, spec = stmt.relation, stmt.partspec
+    if relation.schemaname != "market" or relation.relname not in PARTITIONED_TABLES:
+        return [f"only the twelve market tables of 02 §3.9 are partitioned: {relation.relname}"]
+    params = spec.partParams or ()
+    if (
+        spec.strategy != PartitionStrategy.PARTITION_STRATEGY_RANGE
+        or len(params) != 1
+        or not params[0].name
+    ):
+        return ["partition only BY RANGE of one plain column"]
+    columns = {
+        element.colname: [_string_value(name) for name in element.typeName.names or ()]
+        for element in stmt.tableElts or ()
+        if isinstance(element, pg.ColumnDef)
+    }
+    if columns.get(params[0].name, [])[-1:] != ["timestamptz"]:
+        return [f"the partition key must be a timestamptz column: {params[0].name}"]
+    return []
 
 
 def _column(column: pg.ColumnDef) -> list[str]:
@@ -368,7 +455,7 @@ def _constraint(constraint: pg.Constraint) -> list[str]:
     if kind == ConstrType.CONSTR_DEFAULT:
         return _expression(constraint.raw_expr, "DEFAULT", DEFAULT_FUNCTIONS)
     if kind == ConstrType.CONSTR_CHECK:
-        return _expression(constraint.raw_expr, "CHECK", frozenset())
+        return _expression(constraint.raw_expr, "CHECK", frozenset(), CHECK_CALLS)
     if kind in (ConstrType.CONSTR_PRIMARY, ConstrType.CONSTR_UNIQUE):
         return [
             f"{kind.name}: option not allowed: {option}"
@@ -387,9 +474,16 @@ def _constraint(constraint: pg.Constraint) -> list[str]:
     return [f"constraint not allowed: {kind.name}"]
 
 
-def _expression(node: object, context: str, functions: frozenset[str]) -> list[str]:
-    """Check a CHECK or DEFAULT expression against a whitelist of node kinds."""
+def _expression(
+    node: object,
+    context: str,
+    functions: frozenset[str],
+    calls: Mapping[tuple[str, ...], frozenset[str]] | None = None,
+) -> list[str]:
+    """Check a CHECK or DEFAULT expression against a whitelist of node kinds. ``functions``
+    may be called without arguments; ``calls`` with two, the first a constant of its set."""
     problems: list[str] = []
+    calls = calls or {}
 
     def visit(item: object) -> None:
         if item is None or isinstance(item, pg.A_Const):
@@ -417,17 +511,28 @@ def _expression(node: object, context: str, functions: frozenset[str]) -> list[s
             problems.extend(f"{context}: {problem}" for problem in _type(item.typeName))
             visit(item.arg)
         elif isinstance(item, pg.FuncCall):
-            name = ".".join(str(_string_value(part)) for part in item.funcname or ())
-            plain_call = not (
-                item.args
-                or item.agg_order
+            parts = tuple(str(_string_value(part)) for part in item.funcname or ())
+            name = ".".join(parts)
+            modifiers = (
+                item.agg_order
                 or item.agg_filter
                 or item.over
                 or item.agg_star
                 or item.agg_distinct
                 or item.func_variadic
             )
-            if name not in functions or not plain_call:
+            constants = calls.get(parts)
+            if constants is not None and not modifiers and len(item.args or ()) == 2:
+                first = item.args[0]
+                if (
+                    isinstance(first, pg.A_Const)
+                    and isinstance(first.val, pg.String)
+                    and first.val.sval in constants
+                ):
+                    visit(item.args[1:])
+                else:
+                    problems.append(f"{context}: {name}() needs a first argument in {constants}")
+            elif name not in functions or item.args or modifiers:
                 problems.append(f"{context} may not call {name}()")
         else:
             problems.append(f"{context}: expression not allowed: {type(item).__name__}")
@@ -452,6 +557,14 @@ def _grant_in_database(stmt: pg.GrantStmt) -> list[str]:
             if schema not in PROJECT_SCHEMAS:
                 problems.append("table grants need an explicit project schema")
             targets.append((grant_policy.TABLE, f"{schema}.{getattr(obj, 'relname', None)}"))
+    elif stmt.objtype == ObjectType.OBJECT_FUNCTION:
+        problems = _grant_common(stmt, grant_policy.FUNCTION_PRIVILEGES)
+        targets = []
+        for obj in stmt.objects or ():
+            signature = _function_signature(obj.objname, obj.objargs)
+            if signature not in DEFINER_FUNCTIONS:
+                problems.append(f"privileges only on the functions of 02 §3.9: {signature}")
+            targets.append((grant_policy.FUNCTION, signature))
     else:
         return [f"grants on {stmt.objtype.name} are not allowed"]
 
@@ -514,6 +627,231 @@ def _insert(stmt: pg.InsertStmt) -> list[str]:
             if not isinstance(value, pg.A_Const) or value.isnull:
                 problems.append("INSERT values must be non-null constants")
     return problems
+
+
+# --- the rebuild migration (REBUILD_MIGRATION only) --------------------------------------
+
+
+def _partitioned(relation: pg.RangeVar) -> bool:
+    return relation.schemaname == "market" and relation.relname in PARTITIONED_TABLES
+
+
+def _lock(stmt: pg.LockStmt) -> list[str]:
+    problems = [] if stmt.mode == ACCESS_EXCLUSIVE else ["LOCK only IN ACCESS EXCLUSIVE MODE"]
+    problems += [
+        f"LOCK only the twelve partitioned tables: {relation.relname}"
+        for relation in stmt.relations or ()
+        if not _partitioned(relation)
+    ]
+    return problems
+
+
+def _set_lock_timeout(stmt: pg.VariableSetStmt) -> list[str]:
+    if stmt.kind != VariableSetKind.VAR_SET_VALUE or not stmt.is_local:
+        return ["only SET LOCAL lock_timeout is allowed"]
+    return [] if stmt.name == "lock_timeout" else ["only SET LOCAL lock_timeout is allowed"]
+
+
+def _check_empty(stmt: pg.AlterTableStmt) -> list[str]:
+    """ALTER TABLE only to add a validated CHECK (false): it fails if the table has a row."""
+    if not _partitioned(stmt.relation) or stmt.objtype != ObjectType.OBJECT_TABLE:
+        return [f"ALTER TABLE only on the twelve partitioned tables: {stmt.relation.relname}"]
+    commands = stmt.cmds or ()
+    command = commands[0] if len(commands) == 1 else None
+    constraint = getattr(command, "def_", None)
+    if (
+        command is None
+        or command.subtype != AlterTableType.AT_AddConstraint
+        or not isinstance(constraint, pg.Constraint)
+        or constraint.contype != ConstrType.CONSTR_CHECK
+        or constraint.skip_validation
+        or not _is_false(constraint.raw_expr)
+    ):
+        return ["ALTER TABLE may only add a validated CHECK (false), to prove the table empty"]
+    return []
+
+
+def _is_false(node: object) -> bool:
+    if isinstance(node, pg.TypeCast):  # older grammars: 'f'::bool
+        node = node.arg
+        return isinstance(node, pg.A_Const) and _string_value(node.val) in {"f", "false"}
+    return (
+        isinstance(node, pg.A_Const)
+        and isinstance(node.val, pg.Boolean)
+        and node.val.boolval is False
+    )
+
+
+def _drop_partitioned(stmt: pg.DropStmt) -> list[str]:
+    if stmt.removeType != ObjectType.OBJECT_TABLE:
+        return ["DROP only tables"]
+    problems = []
+    if stmt.behavior != DropBehavior.DROP_RESTRICT:
+        problems.append("DROP ... CASCADE is not allowed")
+    if stmt.missing_ok:
+        problems.append("DROP ... IF EXISTS is not allowed")
+    for obj in stmt.objects or ():
+        names = [_string_value(name) for name in obj]
+        if len(names) != 2 or names[0] != "market" or names[1] not in PARTITIONED_TABLES:
+            problems.append(f"DROP only the twelve partitioned tables: {'.'.join(map(str, names))}")
+    return problems
+
+
+# --- SECURITY DEFINER functions (02 §9 and §3.9) ------------------------------------------
+
+
+def _check_definer_functions(text: str, statements: Any, source: str) -> list[Violation]:
+    """Each function created is one of the three of 02 §3.9, hardened, with only approved
+    dynamic statements, and revoked from PUBLIC in the same migration."""
+    problems: list[Violation] = []
+    created: dict[str, int] = {}
+    revoked: set[str] = set()
+    for number, raw in enumerate(statements, start=1):
+        stmt = raw.stmt
+        if isinstance(stmt, pg.CreateFunctionStmt):
+            # pglast gives the statement's place in characters of the text, not in bytes.
+            start = raw.stmt_location or 0
+            end = start + raw.stmt_len if raw.stmt_len else len(text)
+            signature = _function_signature(stmt.funcname, stmt.parameters)
+            created.setdefault(signature, number)
+            statement = text[start:end]
+            problems += [
+                Violation(source, number, message)
+                for message in _create_function(stmt, signature, statement)
+            ]
+        elif (
+            isinstance(stmt, pg.GrantStmt)
+            and not stmt.is_grant
+            and stmt.objtype == ObjectType.OBJECT_FUNCTION
+            and stmt.privileges is None
+            and any(g.roletype == RoleSpecType.ROLESPEC_PUBLIC for g in stmt.grantees or ())
+        ):
+            revoked |= {_function_signature(o.objname, o.objargs) for o in stmt.objects or ()}
+    for signature, number in created.items():
+        if signature not in revoked:
+            problems.append(
+                Violation(source, number, f"{signature}: REVOKE ALL FROM PUBLIC missing")
+            )
+    return problems
+
+
+def _create_function(stmt: pg.CreateFunctionStmt, signature: str, statement: str) -> list[str]:
+    if signature not in DEFINER_FUNCTIONS:
+        return [f"function not allowed: {signature} (only those of 02 §3.9)"]
+    problems = []
+    if stmt.replace or stmt.is_procedure:
+        problems.append(f"{signature}: CREATE OR REPLACE and procedures are not allowed")
+    language = security = None
+    settings: dict[str, tuple[str, ...]] = {}
+    for option in stmt.options or ():
+        if option.defname == "language":
+            language = _string_value(option.arg)
+        elif option.defname == "security":
+            security = getattr(option.arg, "boolval", None)
+        elif (
+            option.defname == "set"
+            and isinstance(option.arg, pg.VariableSetStmt)
+            and option.arg.kind == VariableSetKind.VAR_SET_VALUE
+        ):
+            settings[option.arg.name.lower()] = tuple(
+                str(_string_value(arg.val)) for arg in option.arg.args or ()
+            )
+        elif option.defname != "as":
+            problems.append(f"{signature}: function option not allowed: {option.defname}")
+    if language != "plpgsql":
+        problems.append(f"{signature}: LANGUAGE plpgsql only")
+    if security is not True:
+        problems.append(f"{signature}: must be SECURITY DEFINER")
+    if settings != DEFINER_SETTINGS:
+        problems.append(f"{signature}: its SET must be exactly {DEFINER_SETTINGS}")
+    return problems + [f"{signature}: {message}" for message in _definer_body(statement)]
+
+
+def _definer_body(statement: str) -> list[str]:
+    try:
+        tree = json.loads(parse_plpgsql_json(statement))
+    except (ParseError, ValueError) as exc:
+        return [f"its PL/pgSQL body does not parse: {exc}"]
+    problems: list[str] = []
+    for kind, node in _plpgsql_statements(tree):
+        if kind in DEFINER_FORBIDDEN:
+            problems.append(f"{kind} is not allowed")
+        elif kind == "PLpgSQL_stmt_dynexecute":
+            problems += _dynamic_statement(node.get("query"))
+        elif kind == "PLpgSQL_stmt_execsql":
+            problems += _static_statement(node.get("sqlstmt"))
+    return problems
+
+
+def _plpgsql_statements(node: Any) -> Iterator[tuple[str, dict[str, Any]]]:
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key.startswith("PLpgSQL_stmt_") and isinstance(value, dict):
+                yield key, value
+            yield from _plpgsql_statements(value)
+    elif isinstance(node, list):
+        for item in node:
+            yield from _plpgsql_statements(item)
+
+
+def _expression_text(expr: Any) -> str | None:
+    inner = expr.get("PLpgSQL_expr") if isinstance(expr, dict) else None
+    query = inner.get("query") if isinstance(inner, dict) else None
+    return query if isinstance(query, str) else None
+
+
+def _dynamic_statement(expr: Any) -> list[str]:
+    """EXECUTE format('<approved template>', ...): nothing else builds a statement."""
+    query = _expression_text(expr)
+    try:
+        statements = parse_sql(f"SELECT {query}") if query else ()
+    except ParseError:
+        statements = ()
+    select = statements[0].stmt if len(statements) == 1 else None
+    targets = select.targetList if isinstance(select, pg.SelectStmt) else None
+    call = targets[0].val if targets and len(targets) == 1 else None
+    if (
+        not isinstance(call, pg.FuncCall)
+        or [_string_value(part) for part in call.funcname or ()] != ["format"]
+        or not call.args
+        or not isinstance(call.args[0], pg.A_Const)
+        or not isinstance(call.args[0].val, pg.String)
+    ):
+        return [f"EXECUTE must build its statement with format() and a template: {query!r}"]
+    template = call.args[0].val.sval
+    return [] if template in DYNAMIC_TEMPLATES else [f"EXECUTE template not approved: {template!r}"]
+
+
+def _static_statement(expr: Any) -> list[str]:
+    """Reads, and the function's own bookkeeping rows, inserted with VALUES."""
+    query = _expression_text(expr)
+    try:
+        statements = parse_sql(query) if query else ()
+    except ParseError:
+        return [f"statement does not parse: {query!r}"]
+    problems = []
+    for raw in statements:
+        stmt = raw.stmt
+        if isinstance(stmt, pg.SelectStmt) and stmt.intoClause is None:
+            continue
+        if (
+            isinstance(stmt, pg.InsertStmt)
+            and (stmt.relation.schemaname, stmt.relation.relname) in DEFINER_INSERTS
+            and not (stmt.onConflictClause or stmt.withClause or stmt.returningClause)
+        ):
+            continue
+        problems.append(f"statement not allowed in a SECURITY DEFINER function: {query!r}")
+    return problems if statements else [f"empty statement: {query!r}"]
+
+
+def _function_signature(names: Any, arguments: Any) -> str:
+    qualified = ".".join(str(_string_value(name)) for name in names or ())
+    types = []
+    for argument in arguments or ():
+        type_name = argument.argType if isinstance(argument, pg.FunctionParameter) else argument
+        parts = [_string_value(name) for name in getattr(type_name, "names", None) or ()]
+        types.append(str(parts[-1]) if parts else "?")
+    return f"{qualified}({', '.join(types)})"
 
 
 def _check_migration_function(node: ast.FunctionDef) -> list[str]:

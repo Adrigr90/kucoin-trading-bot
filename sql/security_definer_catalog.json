@@ -1,1 +1,32 @@
-[]
+[
+  {
+    "signature": "market.prepare_partitions()",
+    "owner": "kbot_owner",
+    "config": [
+      "search_path=market, pg_temp",
+      "TimeZone=UTC",
+      "lock_timeout=5s"
+    ],
+    "body_sha256": "a72f6109ced08b4efaeca49f0739a474abd4b0ad1dd42f50bc75ca31e362a7dd"
+  },
+  {
+    "signature": "market.retire_day(date)",
+    "owner": "kbot_owner",
+    "config": [
+      "search_path=market, pg_temp",
+      "TimeZone=UTC",
+      "lock_timeout=5s"
+    ],
+    "body_sha256": "ebd9c2b5b1ad4d6cfc5e8a2f75004e94b921e54c7e49ed890d7712c80b640db6"
+  },
+  {
+    "signature": "market.seal_day(date)",
+    "owner": "kbot_owner",
+    "config": [
+      "search_path=market, pg_temp",
+      "TimeZone=UTC",
+      "lock_timeout=5s"
+    ],
+    "body_sha256": "721726771882cea23dffe75e022df3063949a68d6aeeeb91e012c121c51a0ab1"
+  }
+]

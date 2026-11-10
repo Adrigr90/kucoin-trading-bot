@@ -21,9 +21,11 @@ from kbot.db import roles
 
 SCHEMA = "schema"
 TABLE = "table"
+FUNCTION = "function"
 
 SCHEMA_PRIVILEGES = frozenset({"usage"})
 TABLE_PRIVILEGES = frozenset({"select", "insert"})
+FUNCTION_PRIVILEGES = frozenset({"execute"})
 
 
 @dataclass(frozen=True, order=True)
@@ -58,6 +60,43 @@ MARKET_TABLES = (
     "market.universe_snapshots",
 )
 
+# Phase 2, stage E3 (02 §3.9): the twelve market tables partitioned by UTC day, and the
+# tables of the historical archive.
+PARTITIONED_TABLES = (
+    "market.data_quality_minute",
+    "market.candles",
+    "market.ws_candles",
+    "market.exhausted_index_rebuilds",
+    "market.minute_status",
+    "market.depth_slot_status",
+    "market.depth_metrics",
+    "market.depth_snapshots",
+    "market.depth_late_books",
+    "market.trading_seen_late",
+    "market.late_ws_candles",
+    "market.late_ws_repeats",
+)
+ARCHIVE_TABLES = (
+    "market.archive_seals",
+    "market.archive_generations",
+    "market.archive_files",
+    "market.archive_generation_states",
+    "market.archive_retirements",
+)
+# kbot_archive writes the generations it publishes; seals and retirements are written only
+# by the SECURITY DEFINER functions, in the same transaction as their DDL.
+ARCHIVE_WRITABLE = frozenset(
+    {"market.archive_generations", "market.archive_files", "market.archive_generation_states"}
+)
+# The only SECURITY DEFINER functions (02 §3.9, owner decision of 9 November 2026). Nobody
+# may retire a day until stage E4 has passed a full restore test.
+PARTITION_FUNCTIONS = (
+    "market.prepare_partitions()",
+    "market.seal_day(date)",
+    "market.retire_day(date)",
+)
+ARCHIVE_EXECUTABLE = frozenset({"market.prepare_partitions()", "market.seal_day(date)"})
+
 ALLOWED_GRANTS: frozenset[Grant] = frozenset(
     {
         # Risk applies the DM limits and the watchdog checks them (02 §6.1).
@@ -69,6 +108,15 @@ ALLOWED_GRANTS: frozenset[Grant] = frozenset(
         Grant("kbot_ingest", "usage", SCHEMA, "market"),
         *(Grant("kbot_ingest", "select", TABLE, table) for table in MARKET_TABLES),
         *(Grant("kbot_ingest", "insert", TABLE, table) for table in MARKET_TABLES),
+        # svc-archive (02 §3.9): reads what it archives, publishes its generations, and
+        # prepares and seals partitions only through its two functions.
+        Grant("kbot_archive", "usage", SCHEMA, "market"),
+        *(
+            Grant("kbot_archive", "select", TABLE, table)
+            for table in (*PARTITIONED_TABLES, *ARCHIVE_TABLES)
+        ),
+        *(Grant("kbot_archive", "insert", TABLE, table) for table in ARCHIVE_WRITABLE),
+        *(Grant("kbot_archive", "execute", FUNCTION, name) for name in ARCHIVE_EXECUTABLE),
     }
 )
 
@@ -98,6 +146,15 @@ def section_9_conflict(grant: Grant) -> str | None:
         return f"{grant.role} is not a login role and receives no grants"
     if grant.role == roles.BACKUP:
         return "kbot_backup reads through pg_read_all_data only and never writes"
+    if grant.kind == FUNCTION and grant.role != roles.ARCHIVE:
+        return "only kbot_archive executes the partition functions (02 §3.9)"
+    if grant.role == roles.ARCHIVE:
+        if schema != "market":
+            return "kbot_archive has nothing outside market (02 §3.9)"
+        if writes and grant.target not in ARCHIVE_WRITABLE:
+            return f"kbot_archive only writes its archive tables, not {grant.target}"
+        if grant.kind == FUNCTION and grant.target not in ARCHIVE_EXECUTABLE:
+            return f"kbot_archive cannot execute {grant.target}: retiring waits for E4"
     if schema in FORBIDDEN_SCHEMAS.get(grant.role, frozenset()):
         return f"§9: {grant.role} has nothing in {schema}"
     if writes and schema == "config":
@@ -130,7 +187,11 @@ def check_policy(grants: Iterable[Grant] = ALLOWED_GRANTS) -> list[str]:
             grant.privilege not in TABLE_PRIVILEGES or grant.target.count(".") != 1
         ):
             problems.append(f"{grant}: malformed table grant")
-        elif grant.kind not in {SCHEMA, TABLE}:
+        elif grant.kind == FUNCTION and (
+            grant.privilege not in FUNCTION_PRIVILEGES or grant.target not in PARTITION_FUNCTIONS
+        ):
+            problems.append(f"{grant}: malformed function grant")
+        elif grant.kind not in {SCHEMA, TABLE, FUNCTION}:
             problems.append(f"{grant}: unknown object kind")
         conflict = section_9_conflict(grant)
         if conflict:

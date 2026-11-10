@@ -9,15 +9,46 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable, Iterator
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import psycopg
 import pytest
+from psycopg import sql
 
 from kbot.db.roles import DATABASE, SOCKET_DIR
+from tools.grant_policy import PARTITIONED_TABLES
 
 # Below every date a fixed test writes (2026-11-07 and later), and below them goes on.
 FIRST_FREE_DAY = datetime(2026, 1, 1, tzinfo=UTC)
+
+# The twelve market tables partitioned by UTC day (02 §3.9). In production their
+# partitions come from market.prepare_partitions(), which only keeps [today - 30, today +
+# 14]; the tests write on days of their own, so they create those days' partitions as
+# kbot_owner, with the same names and bounds as the function.
+PARTITIONED = tuple(name.split(".", 1)[1] for name in PARTITIONED_TABLES)
+
+
+def create_partitions(admin: psycopg.Connection, first: date, last: date) -> None:
+    admin.execute("SET ROLE kbot_owner")
+    try:
+        day = first
+        while day <= last:
+            start = datetime(day.year, day.month, day.day, tzinfo=UTC)
+            for table in PARTITIONED:
+                admin.execute(
+                    sql.SQL(
+                        "CREATE TABLE IF NOT EXISTS market.{} PARTITION OF market.{}"
+                        " FOR VALUES FROM ({}) TO ({})"
+                    ).format(
+                        sql.Identifier(f"{table}_p{day:%Y%m%d}"),
+                        sql.Identifier(table),
+                        sql.Literal(start),
+                        sql.Literal(start + timedelta(days=1)),
+                    )
+                )
+            day += timedelta(days=1)
+    finally:
+        admin.execute("RESET ROLE")
 
 
 @pytest.fixture(scope="session")
@@ -43,8 +74,30 @@ def admin(connect: Callable[..., psycopg.Connection]) -> Iterator[psycopg.Connec
         yield conn
 
 
+Partitions = Callable[[date, date], None]
+
+
 @pytest.fixture(scope="session")
-def free_day(connect: Callable[..., psycopg.Connection]) -> Callable[[], datetime]:
+def partitions(connect: Callable[..., psycopg.Connection]) -> Partitions:
+    """Creates the partitions of the days from ``first`` to ``last``, both included."""
+
+    def create(first: date, last: date) -> None:
+        with connect("postgres") as conn:
+            create_partitions(conn, first, last)
+
+    return create
+
+
+@pytest.fixture(scope="session", autouse=True)
+def fixed_test_days(partitions: Partitions) -> None:
+    """The days of the tests with fixed dates: T0 (7 November 2026) and around it."""
+    partitions(date(2026, 11, 1), date(2026, 11, 20))
+
+
+@pytest.fixture(scope="session")
+def free_day(
+    connect: Callable[..., psycopg.Connection], partitions: Partitions
+) -> Callable[[], datetime]:
     """A UTC midnight of its own for each run of the recorder (review of E2, sixth round,
     R6-E2-04).
 
@@ -64,6 +117,8 @@ def free_day(connect: Callable[..., psycopg.Connection]) -> Callable[[], datetim
         lowest = min([*stored, *handed_out, FIRST_FREE_DAY])
         day = datetime(lowest.year, lowest.month, lowest.day, tzinfo=UTC) - timedelta(days=10)
         handed_out.append(day)
+        # The recorder may also write the day before (its resume point) and a few after.
+        partitions(day.date() - timedelta(days=1), day.date() + timedelta(days=4))
         return day
 
     return allocate

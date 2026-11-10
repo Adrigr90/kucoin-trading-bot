@@ -68,14 +68,24 @@ def test_planning_and_maintenance_with_the_partitions_of_production(
     recovery_range: None,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    def database_size() -> int:
+        with connect("postgres") as admin:
+            row = admin.execute("SELECT pg_database_size(current_database())").fetchone()
+            assert row is not None
+            return int(row[0])
+
     with connect("postgres") as admin:
         row = admin.execute("SELECT (now() AT TIME ZONE 'UTC')::date").fetchone()
         assert row is not None
         today: date = row[0]
     # The hot days that prepare_partitions() no longer covers: [today - 90, today - 31].
+    # What they add to the database, still empty, is what each partition costs on disk:
+    # the files of its indexes and its TOAST table, and its rows in the catalog.
+    empty = database_size()
     started = time.perf_counter()
     partitions(today - timedelta(days=HOT_DAYS), today - timedelta(days=31))
     older = time.perf_counter() - started
+    empty = (database_size() - empty) // ((HOT_DAYS - 30) * 12)
     with connect("kbot_archive") as archive:
         started = time.perf_counter()
         row = archive.execute("SELECT market.prepare_partitions()").fetchone()
@@ -119,7 +129,7 @@ def test_planning_and_maintenance_with_the_partitions_of_production(
     lines = [
         f"{total} partitions of the market schema",
         f"{(HOT_DAYS - 30) * 12} partitions of [today - 90, today - 31] created by the tests"
-        f" in {older:.1f} s",
+        f" in {older:.1f} s; each one, empty, adds {empty} bytes to the database",
         f"prepare_partitions(): {created} created in {prepared:.1f} s"
         f" ({prepared / max(created, 1) * 1000:.1f} ms each); run again, 0 created"
         f" in {daily:.2f} s",

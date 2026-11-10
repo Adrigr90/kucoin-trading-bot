@@ -262,23 +262,32 @@ CREATE TABLE market.depth_snapshots (
     CHECK (date_trunc('minute', minute_start AT TIME ZONE 'UTC') = minute_start AT TIME ZONE 'UTC')
 ) PARTITION BY RANGE (minute_start);
 
+-- Evidence never crosses a day (review of the E3 design, second round): a late book whose
+-- range of slots, from the slot of its P to the last slot closed when it arrived, crosses
+-- midnight is stored as one row per UTC day it affects. Each row names only slots of its own
+-- day (first_slot_start to last_slot_start), so retiring a day never changes what the slots
+-- of another day count as. slot_start keeps the slot of the book's P.
 CREATE TABLE market.depth_late_books (
     market text NOT NULL,
     symbol text NOT NULL,
     depth int2 NOT NULL,
     slot_start timestamptz NOT NULL,
+    first_slot_start timestamptz NOT NULL,
     last_slot_start timestamptz NOT NULL,
     sequence int8 NOT NULL CHECK (sequence >= 0),
     published_at timestamptz NOT NULL,
     received_at timestamptz NOT NULL,
     recorded_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-    PRIMARY KEY (market, symbol, depth, slot_start, sequence),
-    FOREIGN KEY (market, symbol, depth, slot_start)
+    PRIMARY KEY (market, symbol, depth, first_slot_start, sequence),
+    FOREIGN KEY (market, symbol, depth, first_slot_start)
         REFERENCES market.depth_slot_status (market, symbol, depth, slot_start),
     FOREIGN KEY (market, symbol, depth, last_slot_start)
         REFERENCES market.depth_slot_status (market, symbol, depth, slot_start),
-    CHECK (published_at >= slot_start AND last_slot_start >= slot_start)
-) PARTITION BY RANGE (slot_start);
+    CHECK (published_at >= slot_start AND first_slot_start >= slot_start
+        AND last_slot_start >= first_slot_start),
+    CHECK (date_trunc('day', first_slot_start AT TIME ZONE 'UTC')
+        = date_trunc('day', last_slot_start AT TIME ZONE 'UTC'))
+) PARTITION BY RANGE (first_slot_start);
 
 CREATE TABLE market.trading_seen_late (
     market text NOT NULL CHECK (market IN ('SPOT', 'FUTURES')),
@@ -622,13 +631,15 @@ REVOKE ALL ON FUNCTION market.prepare_partitions() FROM PUBLIC;
 REVOKE ALL ON FUNCTION market.seal_day(date) FROM PUBLIC;
 REVOKE ALL ON FUNCTION market.retire_day(date) FROM PUBLIC;
 
--- kbot_ingest keeps exactly its 0002 privileges on the twelve tables (02 §9).
+-- kbot_ingest keeps exactly its 0002 privileges on the twelve tables (02 §9), and reads the
+-- seals: it does not write late evidence of a sealed day (02 §3.9).
 GRANT SELECT, INSERT ON TABLE
     market.data_quality_minute, market.candles, market.ws_candles,
     market.exhausted_index_rebuilds, market.minute_status, market.depth_slot_status,
     market.depth_metrics, market.depth_snapshots, market.depth_late_books,
     market.trading_seen_late, market.late_ws_candles, market.late_ws_repeats
     TO kbot_ingest;
+GRANT SELECT ON TABLE market.archive_seals TO kbot_ingest;
 
 -- kbot_archive (02 §3.9): reads what it archives, publishes its generations, and prepares
 -- and seals partitions only through its two functions. Retiring stays with nobody.

@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import psycopg
+import structlog
 from psycopg import sql
 from psycopg.types.json import Jsonb
 
@@ -39,6 +40,8 @@ from kbot.market.last_candles import (
 from kbot.market.mark_candles import Evidence, FlowState, IndexMinute, OwnCandle
 from kbot.market.reference import FundingRow, InstrumentRow, RiskTierRow, changed_instruments
 from kbot.market.universe import UniverseEntry
+
+_log = structlog.get_logger()
 
 
 def depth_channel_name(depth: int) -> str:
@@ -135,28 +138,73 @@ def write_depth(
         )
 
 
+def late_book_rows(book: LateBook) -> list[tuple[object, ...]]:
+    """The rows of a late book: one per UTC day of its range of slots, from the slot of its P
+    to the last slot closed when it arrived (02 §3.9). Each row names only slots of its own
+    day, so retiring a day never changes what the slots of another day count as."""
+    rows: list[tuple[object, ...]] = []
+    first = book.slot_start.astimezone(UTC)
+    final = book.last_slot_start.astimezone(UTC)
+    while True:
+        day_end = datetime(first.year, first.month, first.day, tzinfo=UTC) + timedelta(days=1)
+        last = min(final, day_end - timedelta(seconds=SLOT_SECONDS))
+        rows.append(
+            (
+                book.market,
+                book.symbol,
+                book.depth,
+                book.slot_start,
+                first,
+                last,
+                book.sequence,
+                book.published_at,
+                book.received_at,
+            )
+        )
+        if last >= final:
+            return rows
+        first = day_end
+
+
 def write_late_books(conn: psycopg.Connection, books: Iterable[LateBook]) -> None:
-    """Books that arrived after their slot was closed (review of E2, fourth round). Both
-    slots they name were closed, and written, before the book arrived."""
+    """Books that arrived after their slot was closed (review of E2, fourth round), one row
+    per day they affect. Every slot they name was closed, and written, before the book
+    arrived. A row of a sealed day is not written: the seal forbids it (02 §3.9)."""
+    rows = [row for book in books for row in late_book_rows(book)]
     with conn.transaction(), conn.cursor() as cur:
+        sealed = sealed_days(conn, (_day(row[4]) for row in rows))
+        for row in rows:
+            if _day(row[4]) in sealed:
+                _log.warning(
+                    "late_book_of_a_sealed_day", market=row[0], symbol=row[1], slot=str(row[4])
+                )
         cur.executemany(
             "INSERT INTO market.depth_late_books (market, symbol, depth, slot_start,"
-            " last_slot_start, sequence, published_at, received_at)"
-            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
-            [
-                (
-                    b.market,
-                    b.symbol,
-                    b.depth,
-                    b.slot_start,
-                    b.last_slot_start,
-                    b.sequence,
-                    b.published_at,
-                    b.received_at,
-                )
-                for b in books
-            ],
+            " first_slot_start, last_slot_start, sequence, published_at, received_at)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
+            [row for row in rows if _day(row[4]) not in sealed],
         )
+
+
+def sealed_days(conn: psycopg.Connection, days: Iterable[date]) -> set[date]:
+    """The days among ``days`` that are sealed (02 §3.9): their partitions take no new row."""
+    wanted = sorted(set(days))
+    if not wanted:
+        return set()
+    rows = conn.execute(
+        "SELECT day FROM market.archive_seals WHERE day = ANY(%s)", (wanted,)
+    ).fetchall()
+    return {row[0] for row in rows}
+
+
+def _day(moment: object) -> date:
+    if not isinstance(moment, datetime):
+        raise TypeError(f"not a moment: {moment!r}")
+    return moment.astimezone(UTC).date()
+
+
+def _late_minute(item: LateEvidence) -> datetime:
+    return item.minute if isinstance(item, LateTrade) else item.candle.open_time
 
 
 # What the database holds about the WebSocket in the minute of ``q`` (a trade row of
@@ -227,9 +275,20 @@ def write_late_minutes(
 
     Returns what was kept, which the recorder uses only now (``RecorderCore.late_kept``)."""
     kept: list[KeptEvidence] = []
+    items = list(items)
     with conn.transaction():
+        sealed = sealed_days(conn, (_late_minute(item).astimezone(UTC).date() for item in items))
         for item in items:
-            minute = item.minute if isinstance(item, LateTrade) else item.candle.open_time
+            minute = _late_minute(item)
+            if minute.astimezone(UTC).date() in sealed:
+                _log.warning(
+                    "late_evidence_of_a_sealed_day",
+                    market=item.market,
+                    symbol=item.symbol,
+                    minute=minute.isoformat(),
+                    kind=type(item).__name__,
+                )
+                continue
             row = conn.execute(_LATE_STATE, (item.market, item.symbol, minute)).fetchone()
             if row is None:
                 continue  # no flow row: the minute was never recorded here
@@ -315,7 +374,7 @@ def slot_states(
     rows = conn.execute(
         "SELECT s.slot_start, CASE WHEN s.state IN ('valida', 'no_recibida') AND EXISTS ("
         "   SELECT 1 FROM market.depth_late_books AS l WHERE l.market = s.market"
-        "   AND l.symbol = s.symbol AND l.depth = s.depth AND l.slot_start <= s.slot_start"
+        "   AND l.symbol = s.symbol AND l.depth = s.depth AND l.first_slot_start <= s.slot_start"
         "   AND l.last_slot_start >= s.slot_start) THEN 'fuera_de_plazo' ELSE s.state END"
         " FROM market.depth_slot_status AS s WHERE s.market = %s AND s.symbol = %s"
         " AND s.depth = %s AND s.slot_start >= %s AND s.slot_start < %s ORDER BY s.slot_start",

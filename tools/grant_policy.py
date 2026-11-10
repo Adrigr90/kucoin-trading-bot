@@ -108,6 +108,8 @@ ALLOWED_GRANTS: frozenset[Grant] = frozenset(
         Grant("kbot_ingest", "usage", SCHEMA, "market"),
         *(Grant("kbot_ingest", "select", TABLE, table) for table in MARKET_TABLES),
         *(Grant("kbot_ingest", "insert", TABLE, table) for table in MARKET_TABLES),
+        # It reads the seals so as not to write late evidence of a sealed day (02 §3.9).
+        Grant("kbot_ingest", "select", TABLE, "market.archive_seals"),
         # svc-archive (02 §3.9): reads what it archives, publishes its generations, and
         # prepares and seals partitions only through its two functions.
         Grant("kbot_archive", "usage", SCHEMA, "market"),

@@ -96,7 +96,7 @@ ACCESS_EXCLUSIVE = 8  # LockStmt.mode of IN ACCESS EXCLUSIVE MODE
 # Functions a CHECK may call, each with a constant first argument from its set: enough to
 # align a timestamp to the UTC minute, and all immutable.
 CHECK_CALLS: Mapping[tuple[str, ...], frozenset[str]] = {
-    ("date_trunc",): frozenset({"minute"}),
+    ("date_trunc",): frozenset({"minute", "day"}),
     ("pg_catalog", "timezone"): frozenset({"UTC"}),
 }
 DEFINER_FUNCTIONS = frozenset(grant_policy.PARTITION_FUNCTIONS)

@@ -19,6 +19,9 @@ import psycopg
 import pytest
 from psycopg import errors, sql
 
+from kbot.market import store
+from kbot.market.depth import LateBook
+from kbot.market.last_candles import LateTrade
 from tools.grant_policy import PARTITION_FUNCTIONS
 
 pytestmark = pytest.mark.db
@@ -35,7 +38,7 @@ KEYS = {
     "depth_slot_status": "slot_start",
     "depth_metrics": "slot_start",
     "depth_snapshots": "minute_start",
-    "depth_late_books": "slot_start",
+    "depth_late_books": "first_slot_start",
     "trading_seen_late": "minute_start",
     "late_ws_candles": "open_time",
     "late_ws_repeats": "open_time",
@@ -293,30 +296,111 @@ def test_retire_refuses_and_changes_nothing(
         assert all(exists(admin, partition(table, day)) for table in KEYS), day
 
 
-def test_a_reference_from_the_day_before_stops_the_retirement(
-    connect: Connect, partitions: Partitions, admin: psycopg.Connection
+def test_a_late_book_row_never_names_slots_of_two_days(
+    connect: Connect, partitions: Partitions
 ) -> None:
-    """A late book of the 15th whose range reaches the first slot of the 16th: retiring the
-    16th first fails and changes nothing; in chronological order both go (review of E3)."""
+    """Second review of the E3 design: a row of depth_late_books names slots of one UTC day
+    only, so the database refuses a row that crosses midnight."""
     first, second = date(2019, 8, 15), date(2019, 8, 16)
     partitions(first, second)
     before, after = midnight(second) - timedelta(seconds=10), midnight(second)
     with connect("kbot_ingest") as ingest:
         slot(ingest, before)
         slot(ingest, after)
-        ingest.execute(
-            "INSERT INTO market.depth_late_books (market, symbol, depth, slot_start,"
-            " last_slot_start, sequence, published_at, received_at)"
-            " VALUES ('SPOT', %s, 5, %s, %s, 1, %s, %s)",
-            (SYMBOL, before, after, before + timedelta(seconds=1), after + timedelta(seconds=5)),
-        )
+        with pytest.raises(errors.CheckViolation):
+            ingest.execute(
+                "INSERT INTO market.depth_late_books (market, symbol, depth, slot_start,"
+                " first_slot_start, last_slot_start, sequence, published_at, received_at)"
+                " VALUES ('SPOT', %s, 5, %s, %s, %s, 1, %s, %s)",
+                (SYMBOL, before, before, after, before + timedelta(seconds=1), after),
+            )
+
+
+def test_retiring_a_day_never_changes_what_the_next_one_counts_as(
+    connect: Connect, partitions: Partitions, admin: psycopg.Connection
+) -> None:
+    """The reviewer's case (second review of the E3 design): a late book of the 15th whose
+    range reaches the first slot of the 16th is stored as one row per day, so retiring the
+    15th leaves that slot of the 16th counted as fuera_de_plazo."""
+    first, second = date(2019, 8, 15), date(2019, 8, 16)
+    partitions(first, second)
+    before, after = midnight(second) - timedelta(seconds=10), midnight(second)
+    book = LateBook(
+        "SPOT",
+        SYMBOL,
+        5,
+        before,
+        after,
+        1,
+        before + timedelta(seconds=1),
+        after + timedelta(seconds=5),
+    )
+    with connect("kbot_ingest") as ingest:
+        slot(ingest, before)
+        slot(ingest, after)
+        store.write_late_books(ingest, [book])
+        rows = ingest.execute(
+            "SELECT slot_start, first_slot_start, last_slot_start FROM market.depth_late_books"
+            " WHERE symbol = %s ORDER BY first_slot_start",
+            (SYMBOL,),
+        ).fetchall()
+        assert rows == [(before, before, before), (before, after, after)]
     archive_day(connect, first)
     archive_day(connect, second)
-    with pytest.raises(psycopg.Error):
-        admin.execute("SELECT market.retire_day(%s)", (second,))
-    assert all(exists(admin, partition(table, second)) for table in KEYS)
     assert admin.execute("SELECT market.retire_day(%s)", (first,)).fetchone() == (12,)
+    with connect("kbot_ingest") as ingest:
+        states = store.slot_states(ingest, "SPOT", SYMBOL, 5, after, after + timedelta(seconds=10))
+        assert states == {after: "fuera_de_plazo"}
     assert admin.execute("SELECT market.retire_day(%s)", (second,)).fetchone() == (12,)
+
+
+def test_late_evidence_of_a_sealed_day_is_left_out(
+    connect: Connect, partitions: Partitions
+) -> None:
+    """02 §3.9: the recorder writes no late evidence of a sealed day. The seal would refuse
+    it, and with it the whole tick; it is left out and logged instead."""
+    day = date(2018, 7, 10)
+    partitions(day, day)
+    start = midnight(day)
+    last = start + timedelta(minutes=1439)
+    with connect("kbot_ingest") as ingest:
+        closed_minutes(ingest, "SEALED-USDT", start, 1439)
+        ingest.execute(
+            "INSERT INTO market.data_quality_minute (market, symbol, channel, minute_start,"
+            " flow_state, messages, anomalies, sequence_breaks, reconnections)"
+            " VALUES ('SPOT', 'SEALED-USDT', 'trade', %s, 'S1', 0, 0, 0, 0)",
+            (last,),
+        )
+        ingest.execute(
+            "INSERT INTO market.minute_status (market, symbol, minute_start, status,"
+            " candle_state, flow_channel, flow_state) VALUES ('SPOT', 'SEALED-USDT', %s,"
+            " 'sin_operaciones_probable', 'ausencia_sin_trades_probable', 'trade', 'S1')",
+            (last,),
+        )
+        slot(ingest, start + timedelta(seconds=10), symbol="SEALED-USDT")
+    with connect("kbot_archive") as archive:
+        assert archive.execute("SELECT market.seal_day(%s)", (day,)).fetchone() == (12,)
+    with connect("kbot_ingest") as ingest:
+        trade = LateTrade("SPOT", "SEALED-USDT", last, last + timedelta(minutes=5))
+        assert store.write_late_minutes(ingest, [trade]) == []
+        late = LateBook(
+            "SPOT",
+            "SEALED-USDT",
+            5,
+            start + timedelta(seconds=10),
+            start + timedelta(seconds=10),
+            3,
+            start + timedelta(seconds=11),
+            start + timedelta(seconds=30),
+        )
+        store.write_late_books(ingest, [late])
+        for table in ("trading_seen_late", "depth_late_books"):
+            counted = ingest.execute(
+                sql.SQL("SELECT count(*) FROM market.{} WHERE symbol = 'SEALED-USDT'").format(
+                    sql.Identifier(table)
+                )
+            )
+            assert counted.fetchone() == (0,), table
 
 
 def test_minutes_are_utc_minutes_and_a_snapshot_stays_in_its_minute(connect: Connect) -> None:

@@ -468,10 +468,11 @@ def late_book(
 ) -> None:
     conn.execute(
         "INSERT INTO market.depth_late_books (market, symbol, depth, slot_start,"
-        " last_slot_start, sequence, published_at, received_at)"
-        " VALUES ('SPOT', %s, 5, %s, %s, 8, %s, %s)",
+        " first_slot_start, last_slot_start, sequence, published_at, received_at)"
+        " VALUES ('SPOT', %s, 5, %s, %s, %s, 8, %s, %s)",
         (
             symbol,
+            first,
             first,
             last,
             published if published is not None else first + timedelta(seconds=9.5),

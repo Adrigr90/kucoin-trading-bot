@@ -66,6 +66,17 @@ class ArchiveMismatch(Exception):
     """A file read back does not hold the rows it was written from."""
 
 
+class ArchiveRootMissing(Exception):
+    """The root of the archive does not exist. It is created beforehand, durably, by the
+    installation of the server (stage E4), never by the archiver: a directory it created
+    itself would be an entry of a parent it never syncs (review of E3b, E3b-02)."""
+
+
+def require_root(root: Path) -> None:
+    if not root.is_dir():
+        raise ArchiveRootMissing(f"the archive root does not exist: {root}")
+
+
 @dataclass(frozen=True)
 class Table:
     name: str
@@ -182,7 +193,11 @@ def archive_day(
     generation = uuid.uuid4()
     day_dir = root / "market" / day.isoformat()
     temporary = day_dir / f".g{generation}.tmp"
-    temporary.mkdir(parents=True)
+    require_root(root)
+    # One level at a time inside the root: each new entry lies in a directory synced below.
+    for directory in (day_dir.parent, day_dir):
+        directory.mkdir(exist_ok=True)
+    temporary.mkdir()
     files: list[ArchivedFile] = []
     with connect() as conn:
         conn.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
@@ -326,6 +341,7 @@ def remove_orphans(conn: psycopg.Connection, root: Path) -> list[Path]:
 
 def archive_pending(connect: Connect, root: Path) -> list[uuid.UUID] | None:
     """Archives every sealed day without a generation. None if another archiver runs."""
+    require_root(root)
     with connect() as lock:
         row = lock.execute("SELECT pg_try_advisory_lock(%s)", (ARCHIVER_LOCK,)).fetchone()
         if not row or not row[0]:

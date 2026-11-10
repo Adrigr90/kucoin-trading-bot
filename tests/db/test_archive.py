@@ -213,3 +213,48 @@ def test_a_json_null_is_archived_as_json_null_and_never_as_a_missing_value(
     ((generation, _state),) = generations(connect, day)
     path = tmp_path / "market" / day.isoformat() / f"g{generation}" / "depth_snapshots.parquet"
     assert pq.read_table(path).column("bids").to_pylist() == ["null"]
+
+
+def test_an_archive_root_that_does_not_exist_is_refused_before_anything(
+    connect: Connect, partitions: Partitions, tmp_path: Path
+) -> None:
+    """E3b-02, second round: the archiver never creates its root, whose entry would lie in a
+    parent it never syncs; the installation of the server creates it (stage E4)."""
+    day = date(2017, 10, 10)
+    sealed_day(connect, partitions, day)
+    missing = tmp_path / "no" / "root"
+    with pytest.raises(archiver.ArchiveRootMissing):
+        archiver.archive_pending(lambda: connect("kbot_archive"), missing)
+    with pytest.raises(archiver.ArchiveRootMissing):
+        archiver.archive_day(lambda: connect("kbot_archive"), missing, day)
+    assert not (tmp_path / "no").exists()
+    assert generations(connect, day) == []
+
+
+@pytest.mark.parametrize("failing", ["generation", "day", "market", "root"])
+def test_an_io_error_in_any_directory_of_the_chain_stops_the_publication(
+    connect: Connect,
+    partitions: Partitions,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failing: str,
+) -> None:
+    """E3b-02, second round: an EIO syncing any directory that holds a new entry, from the
+    generation to the root, leaves nothing published."""
+    day = date(2017, 11, 10) + timedelta(
+        days=["generation", "day", "market", "root"].index(failing)
+    )
+    sealed_day(connect, partitions, day)
+    day_dir = tmp_path / "market" / day.isoformat()
+    targets = {"day": day_dir, "market": day_dir.parent, "root": tmp_path}
+    real_sync = parquet.sync
+
+    def sync(path: Path) -> None:
+        if (failing == "generation" and path.name.startswith(".g")) or path == targets.get(failing):
+            raise OSError(errno.EIO, "input/output error")
+        real_sync(path)
+
+    monkeypatch.setattr(parquet, "sync", sync)
+    with pytest.raises(OSError):
+        archiver.archive_day(lambda: connect("kbot_archive"), tmp_path, day)
+    assert generations(connect, day) == []

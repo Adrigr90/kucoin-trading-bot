@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import errno
+import os
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -71,3 +73,17 @@ def test_a_file_with_other_columns_is_refused(tmp_path: Path) -> None:
 def test_a_type_without_a_parquet_form_is_refused() -> None:
     with pytest.raises(TypeError):
         _ = Column("x", "uuid").arrow_type
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows cannot open a directory to sync it")
+def test_an_error_syncing_a_directory_is_raised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """E3b-02: on the server, an I/O error syncing a directory stops the archive."""
+
+    def eio(descriptor: int) -> None:
+        raise OSError(errno.EIO, "input/output error")
+
+    monkeypatch.setattr(parquet.os, "fsync", eio)
+    with pytest.raises(OSError):
+        parquet.sync(tmp_path)

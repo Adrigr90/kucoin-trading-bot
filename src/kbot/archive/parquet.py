@@ -110,19 +110,16 @@ def sha256(path: Path) -> str:
 
 
 def sync(path: Path) -> None:
-    """Flushes a file, or a directory where the system allows it, to the disk."""
+    """Flushes a file, or the entries of a directory, to the disk. Every error of the system
+    is raised (review of E3b, E3b-02): a generation is published only after all its syncs.
+    The one exception is a directory on Windows, which cannot be opened to sync it; the
+    archive runs on the Linux server, and Windows is only the owner's PC for tests."""
+    if path.is_dir() and os.name == "nt":
+        return
     # A file is opened for writing too: Windows refuses to sync a read-only descriptor.
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) if path.is_dir() else os.O_RDWR
-    try:
-        descriptor = os.open(path, flags)
-    except OSError:
-        if path.is_dir():
-            return  # Windows cannot open a directory: the rename is what makes it visible
-        raise
+    descriptor = os.open(path, flags)
     try:
         os.fsync(descriptor)
-    except OSError:
-        if not path.is_dir():
-            raise
     finally:
         os.close(descriptor)

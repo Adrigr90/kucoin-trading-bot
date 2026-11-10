@@ -652,3 +652,68 @@ def test_a_partition_with_another_owner_or_grants_stops_prepare(
             admin.execute(sql.SQL(undo).format(target))
     with connect("kbot_archive") as archive:
         assert archive.execute("SELECT market.prepare_partitions()").fetchone() == (0,)
+
+
+def test_a_day_sealed_after_the_check_undoes_only_its_own_evidence(
+    connect: Connect, partitions: Partitions, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """E3b-01: the day is sealed between the recorder's check and its insert (here the check
+    answers «not sealed»). Only the evidence of the sealed day is left out; the rest of the
+    transaction, as the rest of a tick, is kept, and nothing is raised."""
+    sealed, healthy = date(2018, 8, 10), date(2018, 8, 12)
+    partitions(sealed, sealed)
+    partitions(healthy, healthy)
+    last = midnight(sealed) + timedelta(minutes=1439)
+    late = midnight(healthy) + timedelta(hours=1)
+    with connect("kbot_ingest") as ingest:
+        closed_minutes(ingest, "RACE2-USDT", midnight(sealed), 1439)
+        for minute in (last, late):
+            ingest.execute(
+                "INSERT INTO market.data_quality_minute (market, symbol, channel, minute_start,"
+                " flow_state, messages, anomalies, sequence_breaks, reconnections)"
+                " VALUES ('SPOT', 'RACE2-USDT', 'trade', %s, 'S1', 0, 0, 0, 0)",
+                (minute,),
+            )
+        ingest.execute(
+            "INSERT INTO market.minute_status (market, symbol, minute_start, status,"
+            " candle_state, flow_channel, flow_state) VALUES ('SPOT', 'RACE2-USDT', %s,"
+            " 'sin_operaciones_probable', 'ausencia_sin_trades_probable', 'trade', 'S1')",
+            (last,),
+        )
+        for day in (sealed, healthy):
+            slot(ingest, midnight(day) + timedelta(seconds=10), symbol="RACE2-USDT")
+    with connect("kbot_archive") as archive:
+        assert archive.execute("SELECT market.seal_day(%s)", (sealed,)).fetchone() == (12,)
+    monkeypatch.setattr(store, "sealed_days", lambda conn, days: set())
+
+    def book(day: date) -> LateBook:
+        at = midnight(day) + timedelta(seconds=10)
+        published, received = at + timedelta(seconds=1), at + timedelta(seconds=30)
+        return LateBook("SPOT", "RACE2-USDT", 5, at, at, 4, published, received)
+
+    with connect("kbot_ingest") as ingest, ingest.transaction():
+        slot(ingest, midnight(healthy) + timedelta(seconds=20), symbol="RACE2-USDT")
+        kept = store.write_late_minutes(
+            ingest,
+            [
+                LateTrade("SPOT", "RACE2-USDT", last, last + timedelta(minutes=5)),
+                LateTrade("SPOT", "RACE2-USDT", late, late + timedelta(minutes=5)),
+            ],
+        )
+        store.write_late_books(ingest, [book(sealed), book(healthy)])
+    assert [item.minute for item in kept if isinstance(item, LateTrade)] == [late]
+    with connect("kbot_ingest") as ingest:
+        seen = ingest.execute(
+            "SELECT minute_start FROM market.trading_seen_late WHERE symbol = 'RACE2-USDT'"
+        ).fetchall()
+        books = ingest.execute(
+            "SELECT first_slot_start FROM market.depth_late_books WHERE symbol = 'RACE2-USDT'"
+        ).fetchall()
+        healthy_slots = ingest.execute(
+            "SELECT count(*) FROM market.depth_slot_status WHERE symbol = 'RACE2-USDT'"
+            " AND slot_start >= %s",
+            (midnight(healthy),),
+        ).fetchone()
+    assert seen == [(late,)]
+    assert books == [(midnight(healthy) + timedelta(seconds=10),)]
+    assert healthy_slots == (2,), "the healthy row of the same transaction is kept"

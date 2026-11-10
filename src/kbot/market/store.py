@@ -13,7 +13,7 @@ from datetime import UTC, date, datetime, timedelta
 
 import psycopg
 import structlog
-from psycopg import sql
+from psycopg import errors, sql
 from psycopg.types.json import Jsonb
 
 from kbot.market.depth import SLOT_SECONDS, LateBook, MinuteSnapshot, SlotResult
@@ -169,21 +169,25 @@ def late_book_rows(book: LateBook) -> list[tuple[object, ...]]:
 def write_late_books(conn: psycopg.Connection, books: Iterable[LateBook]) -> None:
     """Books that arrived after their slot was closed (review of E2, fourth round), one row
     per day they affect. Every slot they name was closed, and written, before the book
-    arrived. A row of a sealed day is not written: the seal forbids it (02 §3.9)."""
+    arrived. A row of a sealed day is not written: the seal forbids it (02 §3.9), also if the
+    day is sealed between the check and the insert (``_inserted``, review of E3b)."""
     rows = [row for book in books for row in late_book_rows(book)]
-    with conn.transaction(), conn.cursor() as cur:
+    with conn.transaction():
         sealed = sealed_days(conn, (_day(row[4]) for row in rows))
         for row in rows:
             if _day(row[4]) in sealed:
                 _log.warning(
                     "late_book_of_a_sealed_day", market=row[0], symbol=row[1], slot=str(row[4])
                 )
-        cur.executemany(
-            "INSERT INTO market.depth_late_books (market, symbol, depth, slot_start,"
-            " first_slot_start, last_slot_start, sequence, published_at, received_at)"
-            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
-            [row for row in rows if _day(row[4]) not in sealed],
-        )
+            else:
+                _inserted(
+                    conn,
+                    "INSERT INTO market.depth_late_books (market, symbol, depth, slot_start,"
+                    " first_slot_start, last_slot_start, sequence, published_at, received_at)"
+                    " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)"
+                    " ON CONFLICT DO NOTHING RETURNING 1",
+                    row,
+                )
 
 
 def sealed_days(conn: psycopg.Connection, days: Iterable[date]) -> set[date]:
@@ -356,7 +360,19 @@ def write_late_minutes(
 
 
 def _inserted(conn: psycopg.Connection, query: str, params: tuple[object, ...]) -> bool:
-    return conn.execute(query, params).fetchone() is not None  # type: ignore[arg-type]
+    """INSERT ... RETURNING 1 of a piece of late evidence, in its own savepoint. If its day was
+    sealed after it was checked (the seal's CHECK, named ``*_sellada``), only that row is
+    undone and left out with a warning, and the rest of the tick stays; any other error is
+    raised (review of E3b, E3b-01)."""
+    try:
+        with conn.transaction():
+            return conn.execute(query, params).fetchone() is not None  # type: ignore[arg-type]
+    except errors.CheckViolation as error:
+        constraint = error.diag.constraint_name or ""
+        if not constraint.endswith("_sellada"):
+            raise
+        _log.warning("late_evidence_of_a_day_sealed_meanwhile", constraint=constraint)
+        return False
 
 
 def slot_states(

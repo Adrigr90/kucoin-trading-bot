@@ -8,11 +8,13 @@ published, and the next one removes what it left; two archivers never work at on
 
 from __future__ import annotations
 
+import errno
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import psycopg
+import pyarrow.parquet as pq
 import pytest
 
 from kbot.archive import archiver, parquet
@@ -30,7 +32,9 @@ def midnight(day: date) -> datetime:
     return datetime(day.year, day.month, day.day, tzinfo=UTC)
 
 
-def sealed_day(connect: Connect, partitions: Partitions, day: date) -> None:
+def sealed_day(
+    connect: Connect, partitions: Partitions, day: date, bids: str = '[["100", "2"]]'
+) -> None:
     """A closed day (no trade minute, no universe) with rows in four of its tables, sealed."""
     partitions(day, day)
     start = midnight(day)
@@ -60,7 +64,7 @@ def sealed_day(connect: Connect, partitions: Partitions, day: date) -> None:
                 start,
                 start + timedelta(seconds=1),
                 start + timedelta(seconds=2),
-                '[["100", "2"]]',
+                bids,
                 '[["101", "3"]]',
             ),
         )
@@ -161,3 +165,51 @@ def test_the_daily_check_finds_a_changed_or_unsealed_partition(
         f"{slots}: it has no seal",
         f"{slots}: 2 rows now, not those of generation {generations(connect, day)[0][0]}",
     ]
+
+
+def test_a_generation_is_published_only_after_every_sync(
+    connect: Connect, partitions: Partitions, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """E3b-02: the twelve files, then the directory that holds them, then, after the rename,
+    the day, market and the root. An I/O error in any of them stops the publication, and
+    the next run removes what was left and publishes."""
+    day = date(2017, 8, 10)
+    sealed_day(connect, partitions, day)
+    synced: list[Path] = []
+    real_sync = parquet.sync
+
+    def failing(path: Path) -> None:
+        synced.append(path)
+        if path.name.startswith(".g"):
+            raise OSError(errno.EIO, "input/output error")
+        real_sync(path)
+
+    def recording(path: Path) -> None:
+        synced.append(path)
+        real_sync(path)
+
+    monkeypatch.setattr(parquet, "sync", failing)
+    with pytest.raises(OSError):
+        archiver.archive_day(lambda: connect("kbot_archive"), tmp_path, day)
+    assert generations(connect, day) == []
+    monkeypatch.setattr(parquet, "sync", recording)
+    synced.clear()
+    assert archiver.archive_pending(lambda: connect("kbot_archive"), tmp_path)
+    ((generation, _state),) = generations(connect, day)
+    day_dir = tmp_path / "market" / day.isoformat()
+    assert [p.name for p in synced[:12]] == [f"{name}.parquet" for name in archiver.TABLES]
+    assert synced[12].name.startswith(".g") and synced[12].parent == day_dir
+    assert synced[13:] == [day_dir, day_dir.parent, tmp_path]
+    assert [p.name for p in day_dir.iterdir()] == [f"g{generation}"], "the failed run is gone"
+
+
+def test_a_json_null_is_archived_as_json_null_and_never_as_a_missing_value(
+    connect: Connect, partitions: Partitions, tmp_path: Path
+) -> None:
+    """E3b-03: 'null'::jsonb is a value, not SQL NULL. It is archived as its JCS text."""
+    day = date(2017, 9, 10)
+    sealed_day(connect, partitions, day, bids="null")
+    assert archiver.archive_pending(lambda: connect("kbot_archive"), tmp_path)
+    ((generation, _state),) = generations(connect, day)
+    path = tmp_path / "market" / day.isoformat() / f"g{generation}" / "depth_snapshots.parquet"
+    assert pq.read_table(path).column("bids").to_pylist() == ["null"]

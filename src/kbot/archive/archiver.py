@@ -22,6 +22,7 @@ backups and nothing is retired (02 §3.9, until stage E4).
 
 from __future__ import annotations
 
+import json
 import shutil
 import uuid
 from collections.abc import Callable, Iterator, Sequence
@@ -137,24 +138,32 @@ def describe(conn: psycopg.Connection, name: str) -> Table:
 
 
 def _batches(conn: psycopg.Connection, table: Table, day: date) -> Iterator[list[Sequence[Any]]]:
-    """The rows of the day, in primary key order, with jsonb as its JCS text."""
+    """The rows of the day, in primary key order, with jsonb as its JCS text. A jsonb is read
+    as text, so the JSON null stays the text null and only an SQL NULL is None (review of
+    E3b, E3b-03)."""
+    json_columns = {i for i, c in enumerate(table.columns) if c.sql_type == "jsonb"}
+    selected = [
+        sql.SQL("{}::text").format(sql.Identifier(c.name))
+        if i in json_columns
+        else sql.Identifier(c.name)
+        for i, c in enumerate(table.columns)
+    ]
     start = datetime(day.year, day.month, day.day, tzinfo=UTC)
     query = sql.SQL(
         "SELECT {columns} FROM market.{table} WHERE {key} >= %s AND {key} < %s ORDER BY {order}"
     ).format(
-        columns=sql.SQL(", ").join(sql.Identifier(c.name) for c in table.columns),
+        columns=sql.SQL(", ").join(selected),
         table=sql.Identifier(table.name),
         key=sql.Identifier(table.key),
         order=sql.SQL(", ").join(sql.Identifier(c) for c in table.primary_key),
     )
-    json_columns = {i for i, c in enumerate(table.columns) if c.sql_type == "jsonb"}
     with conn.cursor(name=f"archive_{table.name}") as cursor:
         cursor.execute(query, (start, start + timedelta(days=1)))
         while batch := cursor.fetchmany(BATCH):
             if json_columns:
                 batch = [
                     tuple(
-                        json_text(v) if i in json_columns and v is not None else v
+                        json_text(json.loads(v)) if i in json_columns and v is not None else v
                         for i, v in enumerate(row)
                     )
                     for row in batch
@@ -204,9 +213,14 @@ def archive_day(
                         path.stat().st_size,
                     )
                 )
+    # The files were synced as they were written. Now the directory that holds them, and,
+    # after the rename, every directory up to the root, so that the generation is on disk
+    # before it is published; any error stops it (review of E3b, E3b-02).
+    parquet.sync(temporary)
     final = day_dir / f"g{generation}"
     temporary.rename(final)
-    parquet.sync(day_dir)
+    for directory in (day_dir, day_dir.parent, root):
+        parquet.sync(directory)
     before_publish()
     with connect() as conn, conn.transaction():
         conn.execute(

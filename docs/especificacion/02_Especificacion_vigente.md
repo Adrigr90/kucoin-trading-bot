@@ -434,22 +434,22 @@ Este documento **sustituye, para leer y auditar**, al Informe V4 y a los anexos 
 - **Bibliotecas:** `pyarrow` para escribir y verificar, y DuckDB para las consultas de la medición.
 
 **7. Funciones y roles** (decisión 1, con las condiciones de las dos revisiones)
-- **Tres funciones `SECURITY DEFINER` propiedad de `kbot_owner`:** `market.prepare_partitions(día)`, `market.seal_day(día)` y `market.retire_day(día)`.
+- **Tres funciones `SECURITY DEFINER` propiedad de `kbot_owner`:** `market.prepare_partitions()`, `market.seal_day(día)` y `market.retire_day(día)`.
 
-  La de sellar se añade a las dos de la propuesta, dentro de la opción A [R: el propietario la confirma]. Las excepciones a §9 (propietario `kbot_owner` y SQL dinámico acotado) valen **solo para estas tres**.
+  La de sellar se añade a las dos de la propuesta, dentro de la opción A; el propietario la confirmó el 10 nov 2026. Las excepciones a §9 (propietario `kbot_owner` y SQL dinámico acotado) valen **solo para estas tres**.
 - **Cada función:**
   - trabaja sobre una lista fija de las doce tablas, escrita dentro de la función;
-  - recibe un argumento `date` validado para su operación, sin nombres que aporte quien llama;
-  - fija `SET search_path = market, pg_temp` y `SET TimeZone = 'UTC'`, y escribe todos los objetos con su esquema;
-  - solo ejecuta `format()` con `%I` y `%L` y una de las cuatro plantillas aprobadas: crear una partición, sellarla, separarla y borrarla. Nunca `CASCADE`;
+  - recibe un argumento `date` validado (sellar y retirar) o ninguno (preparar, que siempre trabaja sobre su rango), sin nombres que aporte quien llama;
+  - fija `SET search_path = market, pg_temp`, `SET TimeZone = 'UTC'` y `SET lock_timeout = '5s'`, y escribe todos los objetos con su esquema;
+  - solo ejecuta `format()` con `%I` y `%L` y una de las cinco plantillas aprobadas: crear una partición, sellarla, contar sus filas, separarla y borrarla. Nunca `CASCADE`;
   - toma un bloqueo consultivo (`pg_advisory_xact_lock`) contra dos ejecuciones simultáneas y usa `lock_timeout`;
   - se crea con su `REVOKE ALL ... FROM PUBLIC` en la misma transacción [H].
 - **`EXECUTE`:** `kbot_archive`, solo en preparar y sellar. Retirar no lo tiene nadie en E3.
 - **`kbot_archive`:** LOGIN, conexión `peer` desde su propio usuario del sistema y sin pertenecer a ningún rol. Tiene `SELECT` en `market` e `INSERT` solo en las tablas del archivo (estados, generaciones y manifiesto).
 - **`sql_guard`** admite, en las migraciones:
   - `PARTITION BY RANGE` de una columna `timestamptz` en esas doce tablas, y particiones con límites constantes;
-  - `CREATE FUNCTION` solo `SECURITY DEFINER` en PL/pgSQL, con esas dos opciones `SET`, su `REVOKE` obligatorio y `GRANT EXECUTE` solo según la matriz;
-  - dentro de esas funciones, `EXECUTE` solo con las cuatro plantillas;
+  - `CREATE FUNCTION` solo `SECURITY DEFINER` en PL/pgSQL, con esas tres opciones `SET`, su `REVOKE` obligatorio y `GRANT EXECUTE` solo según la matriz;
+  - dentro de esas funciones, `EXECUTE` solo con las cinco plantillas, y como sentencias fijas solo lecturas e inserciones en sus propias tablas (sellos y retiradas);
   - `LOCK`, `SET LOCAL lock_timeout`, `CHECK (false)` y `DROP TABLE` sin `CASCADE`, solo en la `0003` y solo sobre las doce tablas;
   - en un `CHECK`, solo `date_trunc` y `timezone` con argumentos constantes.
 
@@ -497,6 +497,26 @@ Este documento **sustituye, para leer y auditar**, al Informe V4 y a los anexos 
 - **Formato:** las pruebas de los decimales y la equivalencia de `--sink rows`.
 
 **Condición expresa:** ningún proceso borra particiones de producción hasta superar una prueba integral de restauración (E4).
+
+**Implementado en E3a** (10 nov 2026, pendiente de revisión):
+- **La migración `0003`**, las cinco tablas del archivo (sellos, generaciones, archivos, estados de la generación y retiradas), las tres funciones y el rol `kbot_archive`.
+- **La ampliación de `sql_guard`.** Analiza el cuerpo PL/pgSQL de las funciones con `pglast`.
+- **La huella de las funciones** en `sql/security_definer_catalog.json`.
+- **Las pruebas** de las migraciones congeladas, de la lista blanca y de la matriz, y en PostgreSQL 18: particiones, funciones, sello, retirada y la `0003` sobre una base nueva con datos y con contención.
+
+Lo aprendido al probarlo:
+- **PostgreSQL impide separar una partición a la que todavía apunta otra de otro día** [H, CI]: retirar el día D+1 antes que D falla sin cambiar nada, y en orden cronológico se retiran los dos.
+- **Una partición referenciada no se puede borrar sin separarla antes** (`DependentObjectsStillExist`) [H, CI]. Por eso retirar separa primero y borra después.
+- **Una consulta sobre una tabla particionada bloquea cada partición que no puede descartar**, con sus índices. Con unas 3.000 particiones de prueba, la CI agotó la tabla de bloqueos («out of shared memory») [H, CI]. Por eso:
+  - las pruebas crean y borran sus propias particiones;
+  - la CI usa `max_locks_per_transaction = 256` [R: el mismo valor en el servidor, E4; con unas 1.250 particiones activas se mide en E5].
+
+**Falta, para E3b y E3c:**
+- que la evidencia no cruce de día (`depth_late_books` por día);
+- que el grabador descarte la evidencia de un día sellado;
+- el archivador (generación, huella canónica, verificación y publicación);
+- `--sink rows` y su equivalencia con `DatabaseSink`;
+- la medición del Parquet.
 
 ## 4. Eventos y recuperación
 
@@ -1623,4 +1643,5 @@ $$\Delta Cap=\underbrace{8}_{\text{distancia mark-stop de lo cerrado}}+\underbra
 | 9 nov 2026 | **Cabecera al día:** estado de implementación y de validación de la Fase 1 y de las etapas E1 y E2 de la Fase 2 | Claude |
 | 9 nov 2026 | **E3: histórico público de KuCoin medido** (3.7). El índice de Classic solo cubre unos 100 días (B3). Las velas de un par deslistado solo se conservan unas semanas tras su retirada (B13). Detalle y herramienta en `docs/kucoin/historico.md` y `tools/kucoin_history.py` | Claude (alcance aprobado de la F2); **pendiente de revisión** |
 | 9 nov 2026 | **Propuesta de E3, almacenamiento histórico** (3.9): particiones por día UTC en doce tablas de `market`, archivo en Parquet con SHA-256 y manifiesto, borrado a los 90 días, formato Parquet exacto, ampliación de la lista blanca y medición con datos reales. **Dos decisiones del propietario:** quién crea y borra las particiones (recomendación: dos funciones acotadas y un rol `kbot_archive`, con dos excepciones de §9) y cómo se cambia el esquema (recomendación: corregir la `0002`, que ninguna base ha aplicado) | Claude (alcance aprobado de la F2); **revisada el 9 nov 2026 (fila siguiente)** |
-| 9 nov 2026 | **Revisión del diseño de E3, en dos rondas** (la primera, con el modelo anterior del revisor; la segunda, con el auditor actual): **APROBABLE CON CORRECCIONES DE DISEÑO**. Hallazgos:<br>· **E3-D01 (ALTO):** archivar no es tener una copia recuperable, así que no se excluye ni se retira nada sin un Parquet verificado fuera del servidor.<br>· **E3-D02:** estados persistentes, una instantánea coherente, recuperación idempotente y una huella canónica.<br>· **E3-D03:** pruebas reales de las claves foráneas entre días, y nunca `CASCADE`.<br>· **E3-D04:** no modificar la `0002`.<br>Condiciones de la segunda ronda:<br>· la evidencia tardía puede cambiar un día archivado, y por eso se sella el día;<br>· retirar el día D mejoraba los estados de D+1, y por eso la evidencia ya no cruza de día;<br>· generaciones completas con referencias fijas;<br>· bloquear las doce tablas antes de comprobar que están vacías, y alinear los minutos a UTC;<br>· preparar el rango de recuperación y fijar UTC.<br>**Decisiones del propietario:** funciones `SECURITY DEFINER` acotadas con el rol `kbot_archive` (opción A) y una migración nueva, la `0003` (opción B). §3.9 reescrito con todo ello. Se añade una tercera función, la de sellar, dentro de la opción A | Revisor y propietario; **pendiente de implementar y de que el propietario confirme la función de sellar** |
+| 9 nov 2026 | **Revisión del diseño de E3, en dos rondas** (la primera, con el modelo anterior del revisor; la segunda, con el auditor actual): **APROBABLE CON CORRECCIONES DE DISEÑO**. Hallazgos:<br>· **E3-D01 (ALTO):** archivar no es tener una copia recuperable, así que no se excluye ni se retira nada sin un Parquet verificado fuera del servidor.<br>· **E3-D02:** estados persistentes, una instantánea coherente, recuperación idempotente y una huella canónica.<br>· **E3-D03:** pruebas reales de las claves foráneas entre días, y nunca `CASCADE`.<br>· **E3-D04:** no modificar la `0002`.<br>Condiciones de la segunda ronda:<br>· la evidencia tardía puede cambiar un día archivado, y por eso se sella el día;<br>· retirar el día D mejoraba los estados de D+1, y por eso la evidencia ya no cruza de día;<br>· generaciones completas con referencias fijas;<br>· bloquear las doce tablas antes de comprobar que están vacías, y alinear los minutos a UTC;<br>· preparar el rango de recuperación y fijar UTC.<br>**Decisiones del propietario:** funciones `SECURITY DEFINER` acotadas con el rol `kbot_archive` (opción A) y una migración nueva, la `0003` (opción B). §3.9 reescrito con todo ello. Se añade una tercera función, la de sellar, dentro de la opción A | Revisor y propietario; **función de sellar confirmada por el propietario el 10 nov 2026; implementación en la fila siguiente** |
+| 10 nov 2026 | **E3a implementada** (3.9):<br>· la migración `0003`, que rehace las doce tablas particionadas por día UTC si están vacías;<br>· las tablas del archivo;<br>· `prepare_partitions()`, `seal_day(date)` y `retire_day(date)`, esta última sin `EXECUTE` para nadie;<br>· el rol `kbot_archive`;<br>· `sql_guard`, que analiza el cuerpo PL/pgSQL de las funciones con cinco plantillas;<br>· las migraciones de `main` congeladas por SHA-256.<br>Comprobado en la CI: PostgreSQL impide separar una partición referenciada desde otro día, y hacen falta más bloqueos por transacción (`max_locks_per_transaction = 256`) | Claude; **pendiente de revisión** |

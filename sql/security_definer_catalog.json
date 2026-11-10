@@ -7,7 +7,7 @@
       "TimeZone=UTC",
       "lock_timeout=5s"
     ],
-    "body_sha256": "0ee5ab87640db74322ed27bf09230767ac83d8a1645c83095a3043db98757636"
+    "body_sha256": "bd0b01c364847275fac4cd87fb9e39be0fbedaa716abeaf6a581ad21d0c167e2"
   },
   {
     "signature": "market.retire_day(date)",

@@ -401,7 +401,8 @@ CREATE TABLE market.archive_retirements (
 -- The partitions of [today - 30, today + 14] in UTC: the recovery horizon of the recorder
 -- and two weeks ahead. A day that was sealed is never prepared again. A partition that
 -- exists must be the one expected: same parent and bounds, owned by kbot_owner and with no
--- privilege for any other role (review of E3a).
+-- privilege for any other role, PUBLIC included, on the table or on any of its columns
+-- (review of E3a, E3a-04).
 CREATE FUNCTION market.prepare_partitions() RETURNS int4
     LANGUAGE plpgsql
     SECURITY DEFINER
@@ -451,6 +452,11 @@ BEGIN
                   AND NOT EXISTS (
                       SELECT 1 FROM pg_catalog.aclexplode(c.relacl) a
                       WHERE a.grantee <> c.relowner
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM pg_catalog.pg_attribute t, pg_catalog.aclexplode(t.attacl) a
+                      WHERE t.attrelid = c.oid AND t.attnum > 0 AND a.grantee <> c.relowner
                   )
             ) THEN
                 RAISE EXCEPTION

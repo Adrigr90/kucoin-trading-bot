@@ -539,7 +539,8 @@ def test_a_partition_with_another_owner_or_grants_stops_prepare(
     connect: Connect, admin: psycopg.Connection, recovery_range: None
 ) -> None:
     """E3a-04: the catalog check also covers the owner and the privileges of a partition;
-    once both are restored, prepare goes on finding nothing to create."""
+    also a privilege on one of its columns, for a role or for PUBLIC (E3a-04, third round); once
+    each is undone, prepare goes on finding nothing to create."""
     with connect("kbot_archive") as archive:
         archive.execute("SELECT market.prepare_partitions()")
     admin.execute("SET TimeZone = 'UTC'")
@@ -547,6 +548,14 @@ def test_a_partition_with_another_owner_or_grants_stops_prepare(
     for change, undo in (
         ("ALTER TABLE market.{} OWNER TO kbot_ingest", "ALTER TABLE market.{} OWNER TO kbot_owner"),
         ("GRANT DELETE ON market.{} TO kbot_ingest", "REVOKE DELETE ON market.{} FROM kbot_ingest"),
+        (
+            "GRANT UPDATE (close) ON market.{} TO kbot_archive",
+            "REVOKE UPDATE (close) ON market.{} FROM kbot_archive",
+        ),
+        (
+            "GRANT SELECT (close) ON market.{} TO PUBLIC",
+            "REVOKE SELECT (close) ON market.{} FROM PUBLIC",
+        ),
     ):
         admin.execute(sql.SQL(change).format(target))
         try:

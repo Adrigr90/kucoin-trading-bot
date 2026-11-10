@@ -77,15 +77,39 @@ def admin(connect: Callable[..., psycopg.Connection]) -> Iterator[psycopg.Connec
 Partitions = Callable[[date, date], None]
 
 
+# The order of market.retire_day: the partitions that reference before the referenced ones.
+RETIRE_ORDER = (
+    "minute_status",
+    "candles",
+    "ws_candles",
+    "exhausted_index_rebuilds",
+    "trading_seen_late",
+    "late_ws_candles",
+    "late_ws_repeats",
+    "depth_metrics",
+    "depth_snapshots",
+    "depth_late_books",
+    "data_quality_minute",
+    "depth_slot_status",
+)
+
+
 def drop_partitions(admin: psycopg.Connection, days: list[date]) -> None:
-    """Drops, all at once, the twelve partitions of each day that exist."""
-    names = [
-        sql.SQL("market.{}").format(sql.Identifier(f"{table}_p{day:%Y%m%d}"))
-        for day in days
-        for table in PARTITIONED
-    ]
-    if names:
-        admin.execute(sql.SQL("DROP TABLE IF EXISTS {}").format(sql.SQL(", ").join(names)))
+    """Detaches and drops the partitions of these days that exist, as market.retire_day
+    does: a partition that a foreign key points at cannot be dropped while attached."""
+    for table in RETIRE_ORDER:
+        for day in days:
+            name = f"{table}_p{day:%Y%m%d}"
+            row = admin.execute("SELECT to_regclass(%s) IS NOT NULL", (f"market.{name}",))
+            found = row.fetchone()
+            if found is None or not found[0]:
+                continue
+            admin.execute(
+                sql.SQL("ALTER TABLE market.{} DETACH PARTITION market.{}").format(
+                    sql.Identifier(table), sql.Identifier(name)
+                )
+            )
+            admin.execute(sql.SQL("DROP TABLE market.{}").format(sql.Identifier(name)))
 
 
 @pytest.fixture

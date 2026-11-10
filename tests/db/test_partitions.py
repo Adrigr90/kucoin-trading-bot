@@ -8,6 +8,8 @@ test, so here only the administrator calls it.
 
 from __future__ import annotations
 
+import threading
+import time
 import uuid
 from collections.abc import Callable, Iterator
 from datetime import UTC, date, datetime, timedelta
@@ -410,3 +412,150 @@ def test_0003_on_empty_tables_partitions_the_twelve(connect: Connect, scratch: s
         conn.execute(rebuild())
         conn.commit()
         assert partitioned_tables(conn) == 12
+
+
+# --- review of E3a: closed days, sealing under the fences, catalog --------------------------
+
+
+@pytest.fixture
+def test_universe(admin: psycopg.Connection) -> Iterator[None]:
+    """The universe rows a test adds, removed when it ends: the universe in force on any
+    later day is the latest evaluation before it."""
+    yield
+    admin.execute("DELETE FROM market.universe_snapshots WHERE criteria_version = 'prueba-e3'")
+
+
+def in_universe(conn: psycopg.Connection, symbol: str, evaluated_at: datetime) -> None:
+    conn.execute(
+        "INSERT INTO market.universe_snapshots (evaluated_at, market, symbol, rank, in_universe,"
+        " l50_candidate, quote_volume_24h, criteria_version)"
+        " VALUES (%s, 'SPOT', %s, 1, true, false, 1, 'prueba-e3')",
+        (evaluated_at, symbol),
+    )
+
+
+def closed_minutes(conn: psycopg.Connection, symbol: str, first: datetime, count: int) -> None:
+    """``count`` trade minutes from ``first``, S2, each with its terminal status."""
+    span = (first, first + timedelta(minutes=count - 1))
+    conn.execute(
+        "INSERT INTO market.data_quality_minute (market, symbol, channel, minute_start,"
+        " flow_state, messages, anomalies, sequence_breaks, reconnections)"
+        " SELECT 'SPOT', %s, 'trade', g, 'S2', 0, 0, 0, 0"
+        " FROM generate_series(%s::timestamptz, %s::timestamptz, interval '1 minute') AS g",
+        (symbol, *span),
+    )
+    conn.execute(
+        "INSERT INTO market.minute_status (market, symbol, minute_start, status, candle_state,"
+        " flow_channel, flow_state) SELECT 'SPOT', %s, g, 'sin_explicar',"
+        " 'ausencia_no_verificable', 'trade', 'S2'"
+        " FROM generate_series(%s::timestamptz, %s::timestamptz, interval '1 minute') AS g",
+        (symbol, *span),
+    )
+
+
+def test_a_day_is_closed_only_with_every_minute_of_every_instrument(
+    connect: Connect, partitions: Partitions, test_universe: None
+) -> None:
+    """E3a-02: an instrument of the day's universe with no minute, or with one minute and
+    its status, keeps the day open; with its 1,440 statuses, the day is sealed."""
+    empty, one, full = date(2018, 3, 10), date(2018, 3, 11), date(2018, 3, 12)
+    partitions(empty, full)
+    with connect("kbot_ingest") as ingest:
+        in_universe(ingest, "UNIV-USDT", midnight(empty))
+        closed_minutes(ingest, "UNIV-USDT", midnight(one), 1)
+        closed_minutes(ingest, "UNIV-USDT", midnight(full), 1440)
+    with connect("kbot_archive") as archive:
+        for day in (empty, one):
+            with pytest.raises(errors.RaiseException, match="not closed"):
+                archive.execute("SELECT market.seal_day(%s)", (day,))
+        assert archive.execute("SELECT market.seal_day(%s)", (full,)).fetchone() == (12,)
+        sealed = archive.execute(
+            "SELECT day FROM market.archive_seals WHERE day BETWEEN %s AND %s", (empty, full)
+        )
+        assert sealed.fetchall() == [(full,)]
+
+
+def test_a_write_committed_while_sealing_stops_the_seal(
+    connect: Connect, partitions: Partitions, admin: psycopg.Connection
+) -> None:
+    """E3a-03: a writer holds an uncommitted trade minute; the sealer waits for it at its
+    first fence, the writer commits, and the closure check, made after the fences, sees the
+    minute without its status: no seal and no fence is left."""
+    day = date(2018, 5, 20)
+    partitions(day, day)
+    outcome: dict[str, object] = {}
+
+    def seal() -> None:
+        with connect("kbot_archive") as archive:
+            try:
+                outcome["result"] = archive.execute("SELECT market.seal_day(%s)", (day,)).fetchone()
+            except psycopg.Error as error:
+                outcome["error"] = error
+
+    writer = connect("kbot_ingest", autocommit=False)
+    try:
+        writer.execute(
+            "INSERT INTO market.data_quality_minute (market, symbol, channel, minute_start,"
+            " flow_state, messages, anomalies, sequence_breaks, reconnections)"
+            " VALUES ('SPOT', 'RACE-USDT', 'trade', %s, 'S1', 1, 0, 0, 0)",
+            (midnight(day) + timedelta(hours=1),),
+        )
+        sealer = threading.Thread(target=seal)
+        sealer.start()
+        for _ in range(50):  # until the sealer waits at its first fence
+            waiting = admin.execute(
+                "SELECT count(*) FROM pg_stat_activity"
+                " WHERE wait_event_type = 'Lock' AND query LIKE '%seal_day%'"
+            ).fetchone()
+            if waiting and waiting[0]:
+                break
+            time.sleep(0.1)
+        writer.commit()
+        sealer.join(timeout=30)
+    finally:
+        writer.close()
+    assert isinstance(outcome.get("error"), errors.RaiseException), outcome
+    assert admin.execute(
+        "SELECT count(*) FROM market.archive_seals WHERE day = %s", (day,)
+    ).fetchone() == (0,)
+    fences = admin.execute(
+        "SELECT count(*) FROM pg_constraint WHERE conname LIKE %s", (f"%_p{day:%Y%m%d}_sellada",)
+    )
+    assert fences.fetchone() == (0,)
+
+
+def test_seal_runs_only_in_read_committed(connect: Connect, partitions: Partitions) -> None:
+    """E3a-03: a snapshot taken before the fences would miss the writes they waited for."""
+    day = date(2018, 6, 20)
+    partitions(day, day)
+    with connect("kbot_archive", autocommit=False) as archive:
+        archive.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        with pytest.raises(errors.RaiseException, match="READ COMMITTED"):
+            archive.execute("SELECT market.seal_day(%s)", (day,))
+        archive.rollback()
+
+
+def test_a_partition_with_another_owner_or_grants_stops_prepare(
+    connect: Connect, admin: psycopg.Connection, recovery_range: None
+) -> None:
+    """E3a-04: the catalog check also covers the owner and the privileges of a partition;
+    once both are restored, prepare goes on finding nothing to create."""
+    with connect("kbot_archive") as archive:
+        archive.execute("SELECT market.prepare_partitions()")
+    admin.execute("SET TimeZone = 'UTC'")
+    target = sql.Identifier(partition("candles", utc_today(admin) + timedelta(days=14)))
+    for change, undo in (
+        ("ALTER TABLE market.{} OWNER TO kbot_ingest", "ALTER TABLE market.{} OWNER TO kbot_owner"),
+        ("GRANT DELETE ON market.{} TO kbot_ingest", "REVOKE DELETE ON market.{} FROM kbot_ingest"),
+    ):
+        admin.execute(sql.SQL(change).format(target))
+        try:
+            with (
+                connect("kbot_archive") as archive,
+                pytest.raises(errors.RaiseException, match="is not the partition"),
+            ):
+                archive.execute("SELECT market.prepare_partitions()")
+        finally:
+            admin.execute(sql.SQL(undo).format(target))
+    with connect("kbot_archive") as archive:
+        assert archive.execute("SELECT market.prepare_partitions()").fetchone() == (0,)

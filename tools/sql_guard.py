@@ -11,6 +11,8 @@ Usage: ``python -m tools.sql_guard`` from the repository root.
 from __future__ import annotations
 
 import ast
+import functools
+import hashlib
 import json
 import sys
 from collections.abc import Callable, Iterator, Mapping
@@ -116,6 +118,10 @@ DYNAMIC_TEMPLATES = frozenset(
 )
 # Static statements of those functions: reads, and their own bookkeeping rows.
 DEFINER_INSERTS = frozenset({("market", "archive_seals"), ("market", "archive_retirements")})
+# Closed validation (review of E3a, E3a-01): a SECURITY DEFINER function is accepted only
+# with one of the bodies approved in this file, which the CI also compares with the live
+# catalog (tests/db/test_security_definer.py). A new body is a reviewed change of it.
+APPROVED_BODIES = REPO / "sql" / "security_definer_catalog.json"
 # PL/pgSQL statements no SECURITY DEFINER function may contain: dynamic loops, cursors and
 # queries, procedure calls and transaction control.
 DEFINER_FORBIDDEN = frozenset(
@@ -722,6 +728,7 @@ def _check_definer_functions(text: str, statements: Any, source: str) -> list[Vi
         elif (
             isinstance(stmt, pg.GrantStmt)
             and not stmt.is_grant
+            and not stmt.grant_option  # REVOKE GRANT OPTION FOR keeps EXECUTE
             and stmt.objtype == ObjectType.OBJECT_FUNCTION
             and stmt.privileges is None
             and any(g.roletype == RoleSpecType.ROLESPEC_PUBLIC for g in stmt.grantees or ())
@@ -764,7 +771,18 @@ def _create_function(stmt: pg.CreateFunctionStmt, signature: str, statement: str
         problems.append(f"{signature}: must be SECURITY DEFINER")
     if settings != DEFINER_SETTINGS:
         problems.append(f"{signature}: its SET must be exactly {DEFINER_SETTINGS}")
+    body = next((option.arg for option in stmt.options or () if option.defname == "as"), None)
+    source = _string_value(body[0]) if isinstance(body, tuple) and body else None
+    digest = hashlib.sha256(source.encode("utf-8")).hexdigest() if source is not None else None
+    if digest is None or digest != _approved_bodies().get(signature):
+        problems.append(f"{signature}: its body is not the approved one ({APPROVED_BODIES.name})")
     return problems + [f"{signature}: {message}" for message in _definer_body(statement)]
+
+
+@functools.cache
+def _approved_bodies() -> dict[str, str]:
+    entries = json.loads(APPROVED_BODIES.read_text(encoding="utf-8"))
+    return {entry["signature"]: entry["body_sha256"] for entry in entries}
 
 
 def _definer_body(statement: str) -> list[str]:
@@ -780,7 +798,32 @@ def _definer_body(statement: str) -> list[str]:
             problems += _dynamic_statement(node.get("query"))
         elif kind == "PLpgSQL_stmt_execsql":
             problems += _static_statement(node.get("sqlstmt"))
+        elif kind == "PLpgSQL_stmt_perform":
+            problems += _perform(node.get("expr"))
     return problems
+
+
+def _perform(expr: Any) -> list[str]:
+    """PERFORM only takes the advisory lock: pg_advisory_xact_lock(<integer constant>)."""
+    query = _expression_text(expr)
+    try:
+        statements = parse_sql(query) if query else ()
+    except ParseError:
+        statements = ()
+    select = statements[0].stmt if len(statements) == 1 else None
+    targets = select.targetList if isinstance(select, pg.SelectStmt) else None
+    call = targets[0].val if targets and len(targets) == 1 else None
+    if (
+        isinstance(select, pg.SelectStmt)
+        and not (select.fromClause or select.withClause or select.whereClause)
+        and isinstance(call, pg.FuncCall)
+        and [_string_value(part) for part in call.funcname or ()] == ["pg_advisory_xact_lock"]
+        and len(call.args or ()) == 1
+        and isinstance(call.args[0], pg.A_Const)
+        and isinstance(call.args[0].val, pg.Integer)
+    ):
+        return []
+    return [f"PERFORM may only take the advisory lock: {query!r}"]
 
 
 def _plpgsql_statements(node: Any) -> Iterator[tuple[str, dict[str, Any]]]:
@@ -832,6 +875,10 @@ def _static_statement(expr: Any) -> list[str]:
     problems = []
     for raw in statements:
         stmt = raw.stmt
+        ctes = stmt.withClause.ctes if getattr(stmt, "withClause", None) else ()
+        if any(not isinstance(cte.ctequery, pg.SelectStmt) for cte in ctes or ()):
+            problems.append(f"WITH may not modify data in a SECURITY DEFINER function: {query!r}")
+            continue
         if isinstance(stmt, pg.SelectStmt) and stmt.intoClause is None:
             continue
         if (

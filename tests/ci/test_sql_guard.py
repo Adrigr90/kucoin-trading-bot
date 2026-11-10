@@ -238,7 +238,7 @@ REBUILD = "migrations/versions/0003_particiones.sql"
 DEFINER = (
     "CREATE FUNCTION market.seal_day(p_day date) RETURNS int4 LANGUAGE plpgsql"
     " SECURITY DEFINER SET search_path = market, pg_temp SET TimeZone = 'UTC'"
-    " SET lock_timeout = '5s' AS $$ BEGIN {body} RETURN 1; END $$;"
+    " SET lock_timeout = '5s' AS $$ DECLARE n int8; BEGIN {body} RETURN 1; END $$;"
 )
 REVOKE = "REVOKE ALL ON FUNCTION market.seal_day(date) FROM PUBLIC;"
 
@@ -247,12 +247,46 @@ def definer(body: str = "") -> str:
     return DEFINER.format(body=body) + REVOKE
 
 
-def test_an_approved_definer_function_is_accepted() -> None:
-    body = (
-        "EXECUTE format('DROP TABLE market.%I', 'x');"
-        " INSERT INTO market.archive_seals (day) VALUES (p_day);"
+def test_a_definer_body_that_was_not_approved_is_rejected() -> None:
+    """Closed validation (review of E3a, E3a-01): even a harmless body is rejected unless
+    it is one of the bodies approved in sql/security_definer_catalog.json."""
+    problems = [str(p) for p in check_migration_sql(definer(), "test.sql")]
+    assert any("not the approved one" in problem for problem in problems), problems
+
+
+def test_one_change_in_an_approved_body_is_rejected(repo_root: Path) -> None:
+    text = (repo_root / REBUILD).read_text(encoding="utf-8")
+    assert check_migration_sql(text, REBUILD) == []
+    changed = text.replace("RETURN v_created;", "RETURN v_created + 0;")
+    assert changed != text
+    problems = [str(p) for p in check_migration_sql(changed, REBUILD)]
+    assert any("prepare_partitions(): its body is not" in p for p in problems), problems
+
+
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        (
+            "WITH gone AS (DELETE FROM config.risk_limits RETURNING 1)"
+            " SELECT count(*) INTO n FROM gone;",
+            "WITH may not modify",
+        ),
+        ("PERFORM pg_catalog.pg_terminate_backend(1);", "PERFORM may only take"),
+        ("EXECUTE format('TRUNCATE market.%I', 'x');", "template not approved"),
+        ("UPDATE market.archive_seals SET day = p_day;", "not allowed in a SECURITY DEFINER"),
+    ],
+)
+def test_the_body_checks_hold_also_without_the_closed_list(body: str, message: str) -> None:
+    problems = [str(p) for p in check_migration_sql(definer(body), "test.sql")]
+    assert any(message in problem for problem in problems), problems
+
+
+def test_revoking_only_the_grant_option_does_not_count() -> None:
+    sql = DEFINER.format(body="") + (
+        "REVOKE GRANT OPTION FOR ALL ON FUNCTION market.seal_day(date) FROM PUBLIC;"
     )
-    assert check_migration_sql(definer(body), "test.sql") == []
+    problems = [str(p) for p in check_migration_sql(sql, "test.sql")]
+    assert any("REVOKE ALL FROM PUBLIC missing" in p for p in problems), problems
 
 
 @pytest.mark.parametrize(
@@ -281,6 +315,12 @@ def test_an_approved_definer_function_is_accepted() -> None:
         definer("UPDATE market.archive_seals SET day = p_day;"),
         definer("DELETE FROM market.candles;"),
         definer("INSERT INTO market.candles (series) VALUES ('last');"),
+        definer(
+            "WITH gone AS (DELETE FROM config.risk_limits RETURNING 1)"
+            " SELECT count(*) INTO n FROM gone;"
+        ),
+        definer("EXECUTE format('DROP TABLE market.%I', 'instruments');"),
+        definer("PERFORM pg_catalog.pg_terminate_backend(1);"),
         "GRANT EXECUTE ON FUNCTION market.seal_day(date) TO PUBLIC;",
         "GRANT EXECUTE ON FUNCTION market.retire_day(date) TO kbot_archive;",
         "GRANT EXECUTE ON FUNCTION market.seal_day(date) TO kbot_ingest;",

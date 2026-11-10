@@ -400,7 +400,8 @@ CREATE TABLE market.archive_retirements (
 
 -- The partitions of [today - 30, today + 14] in UTC: the recovery horizon of the recorder
 -- and two weeks ahead. A day that was sealed is never prepared again. A partition that
--- exists must be the one expected: same parent and same bounds.
+-- exists must be the one expected: same parent and bounds, owned by kbot_owner and with no
+-- privilege for any other role (review of E3a).
 CREATE FUNCTION market.prepare_partitions() RETURNS int4
     LANGUAGE plpgsql
     SECURITY DEFINER
@@ -446,8 +447,14 @@ BEGIN
                 WHERE i.inhrelid = to_regclass(format('market.%I', v_name))
                   AND i.inhparent = to_regclass(format('market.%I', v_table))
                   AND pg_catalog.pg_get_expr(c.relpartbound, c.oid) = v_bounds
+                  AND c.relowner = 'kbot_owner'::regrole
+                  AND NOT EXISTS (
+                      SELECT 1 FROM pg_catalog.aclexplode(c.relacl) a
+                      WHERE a.grantee <> c.relowner
+                  )
             ) THEN
-                RAISE EXCEPTION 'prepare_partitions: % is not the partition of % for %',
+                RAISE EXCEPTION
+                    'prepare_partitions: % is not the partition of % for %, owned by kbot_owner and with no other grants',
                     v_name, v_table, v_day;
             END IF;
         END LOOP;
@@ -456,9 +463,16 @@ BEGIN
 END
 $$;
 
--- Seal day D: at least 72 h after its end (a REST candle can wait 48 h) and closed for
--- every instrument, that is, every trade minute recorded has its terminal status. Its
--- twelve partitions get CHECK (false) NOT VALID: the rows stay and no new row can enter.
+-- Seal day D, at least 72 h after its end (a REST candle can wait 48 h). Its twelve
+-- partitions get CHECK (false) NOT VALID: the rows stay and no new row can enter. The
+-- fences go first: each ALTER waits for the writers of its partition. Only then the day
+-- must be closed, read in READ COMMITTED so that every write committed before the fences
+-- is seen; otherwise the whole call is undone, fences included (review of E3a).
+--
+-- Closed means that every instrument of the day has its 1,440 terminal statuses. The
+-- instruments of the day are those of market.store.universe_members (the evaluation in
+-- force when the day started and every one made during it), and any with a trade minute
+-- recorded in the day. A day without any of them is empty, and closed.
 CREATE FUNCTION market.seal_day(p_day date) RETURNS int4
     LANGUAGE plpgsql
     SECURITY DEFINER
@@ -469,28 +483,21 @@ AS $$
 DECLARE
     v_table text;
     v_name text;
+    v_start timestamptz;
+    v_end timestamptz;
 BEGIN
     IF p_day IS NULL OR clock_timestamp() < (p_day + 4)::timestamp AT TIME ZONE 'UTC' THEN
         RAISE EXCEPTION 'seal_day: % ended less than 72 h ago', p_day;
+    END IF;
+    IF current_setting('transaction_isolation') <> 'read committed' THEN
+        RAISE EXCEPTION 'seal_day: runs only in READ COMMITTED, to see every write before its fences';
     END IF;
     PERFORM pg_advisory_xact_lock(9301);
     IF EXISTS (SELECT 1 FROM market.archive_seals s WHERE s.day = p_day) THEN
         RETURN 0;
     END IF;
-    IF EXISTS (
-        SELECT 1
-        FROM market.data_quality_minute q
-        WHERE q.channel = 'trade'
-          AND q.minute_start >= p_day::timestamp AT TIME ZONE 'UTC'
-          AND q.minute_start < (p_day + 1)::timestamp AT TIME ZONE 'UTC'
-          AND NOT EXISTS (
-              SELECT 1 FROM market.minute_status m
-              WHERE m.market = q.market AND m.symbol = q.symbol
-                AND m.minute_start = q.minute_start
-          )
-    ) THEN
-        RAISE EXCEPTION 'seal_day: % is not closed for every instrument', p_day;
-    END IF;
+    v_start := p_day::timestamp AT TIME ZONE 'UTC';
+    v_end := (p_day + 1)::timestamp AT TIME ZONE 'UTC';
     FOREACH v_table IN ARRAY ARRAY[
         'data_quality_minute', 'candles', 'ws_candles', 'exhausted_index_rebuilds',
         'minute_status', 'depth_slot_status', 'depth_metrics', 'depth_snapshots',
@@ -505,6 +512,31 @@ BEGIN
             v_name, v_name || '_sellada'
         );
     END LOOP;
+    IF EXISTS (
+        SELECT 1
+        FROM (
+            SELECT u.market, u.symbol
+            FROM market.universe_snapshots u
+            WHERE u.in_universe
+              AND u.evaluated_at < v_end
+              AND u.evaluated_at >= coalesce(
+                  (SELECT max(e.evaluated_at) FROM market.universe_snapshots e
+                   WHERE e.evaluated_at <= v_start),
+                  v_start
+              )
+            UNION
+            SELECT q.market, q.symbol
+            FROM market.data_quality_minute q
+            WHERE q.channel = 'trade' AND q.minute_start >= v_start AND q.minute_start < v_end
+        ) AS i
+        WHERE (
+            SELECT count(*) FROM market.minute_status m
+            WHERE m.market = i.market AND m.symbol = i.symbol
+              AND m.minute_start >= v_start AND m.minute_start < v_end
+        ) <> 1440
+    ) THEN
+        RAISE EXCEPTION 'seal_day: % is not closed for every instrument', p_day;
+    END IF;
     INSERT INTO market.archive_seals (day) VALUES (p_day);
     RETURN 12;
 END

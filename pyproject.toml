@@ -8,6 +8,7 @@ dependencies = [
     "alembic>=1.14,<2",
     "httpx>=0.28,<1",
     "psycopg[binary]>=3.2,<4",
+    "pyarrow>=26,<27",
     "pydantic>=2.9,<3",
     "sqlalchemy>=2.0,<3",
     "structlog>=24.1",

@@ -525,6 +525,39 @@ Lo aprendido al probarlo:
 - `--sink rows` y su equivalencia con `DatabaseSink`;
 - la medición del Parquet.
 
+**Implementado en E3b** (10 nov 2026, pendiente de revisión):
+- **La evidencia no cruza de día** [H, CI]. `depth_late_books` tiene `first_slot_start`, que es su clave de partición:
+  - cada fila nombra intervalos de un solo día UTC, con claves foráneas a `first_slot_start` y `last_slot_start` y un `CHECK` del mismo día;
+  - `slot_start` guarda el intervalo de su `P`;
+  - `write_late_books` parte por días el libro que cruza la medianoche, y `slot_states` lee el rango de cada fila.
+
+  Retirar el día D ya no cambia lo que cuentan los intervalos de D+1.
+- **El grabador no escribe evidencia de un día sellado:** `write_late_minutes` y `write_late_books` la descartan con un aviso en el registro, sin fallar. Por eso `kbot_ingest` puede leer `archive_seals`.
+- **El archivador** (`kbot.archive`, que se ejecuta como `kbot_archive`) tiene cuatro pasos:
+  - `prepare` llama a `market.prepare_partitions()`;
+  - `seal` sella cada día de [hoy − 30, hoy − 3] cerrado y no sellado;
+  - `archive` da a cada día sellado una generación:
+    - sus doce archivos salen de una sola instantánea `REPEATABLE READ`;
+    - se escriben en un directorio temporal, se sincronizan con el disco, se releen y se comparan con sus filas, por número y por huella;
+    - el directorio se renombra a su generación, y solo entonces se publica, en una transacción;
+    - lo que deja un intento que no llegó a publicarse se borra en la siguiente ejecución;
+    - un bloqueo consultivo de sesión impide que trabajen dos archivadores a la vez;
+  - `verify` es la comprobación diaria: cada día archivado que sigue en la base conserva el sello en sus doce particiones y la huella de su última generación.
+
+  La comprobación diaria detecta y avisa; no rehace generaciones por su cuenta, porque con el sello solo un administrador puede cambiar un día sellado [R].
+- **Formato en E3b:**
+  - `numeric` como `decimal128(38, 18)`, exacto o rechazado, nunca redondeado;
+  - marcas de tiempo UTC en microsegundos;
+  - `jsonb` como su texto JCS (la medición de E3c lo compara con las listas tipadas);
+  - zstd de nivel 3, provisional.
+
+  La huella canónica está en `kbot/archive/canonical.py`. Dependencia nueva: `pyarrow` 26.
+
+**Falta, para E3c:**
+- `--sink rows` y su equivalencia con `DatabaseSink`;
+- la grabación en el PC;
+- la medición: tamaño por tabla y día con zstd 3 y 9, consultas con DuckDB y tiempo de planificación con unas 1.250 particiones.
+
 ## 4. Eventos y recuperación
 
 ### 4.1 Eventos (C01)
@@ -1655,3 +1688,4 @@ $$\Delta Cap=\underbrace{8}_{\text{distancia mark-stop de lo cerrado}}+\underbra
 | 10 nov 2026 | **Revisión de E3a (commit `bc9af63`), del auditor actual: APROBABLE CON CORRECCIONES.** Confirma las 960 pruebas y, en su entorno con PostgreSQL 18, 958 correctas (las dos restantes necesitan `sudo`).<br>· **E3a-01 (ALTO):** `sql_guard` aceptaba, dentro de una función, un `DELETE` en un `WITH`, una plantilla aprobada aplicada a otra tabla, un `PERFORM` con efectos y un `REVOKE GRANT OPTION FOR`. Corregido con la validación cerrada de los cuerpos aprobados.<br>· **E3a-02:** `seal_day` sellaba días incompletos. Ahora exige 1.440 estados por instrumento del día.<br>· **E3a-03:** una escritura podía colarse entre la comprobación y las barreras. Ahora las barreras van primero y se exige READ COMMITTED.<br>· **E3a-04 (BAJO):** el catálogo no miraba propietario ni permisos. Ahora sí.<br>Además, se precisan los `SELECT` de `kbot_archive` (3.9) | Revisor; correcciones de Claude **revisadas el 10 nov 2026 (fila siguiente)** |
 | 10 nov 2026 | **Segunda revisión de E3a (commit `7654ec1`): APROBABLE CON CORRECCIONES MENORES.** E3a-01, E3a-02 y E3a-03 RESUELTOS; la ampliación de la lista blanca queda conforme para los tres cuerpos aprobados. El revisor repitió la batería sobre una base limpia: 971 correctas (las dos restantes necesitan `sudo`). **E3a-04, parcial (BAJO):** faltaban los permisos de columna (`pg_attribute.attacl`). Corregido: el catálogo los comprueba también, para cualquier otro rol y para `PUBLIC` (3.9) | Revisor; corrección de Claude **confirmada el 10 nov 2026 (fila siguiente)** |
 | 10 nov 2026 | **Tercera revisión de E3a (commit `47630aa`): E3a-04 RESUELTO. Dictamen final: APROBADO.** Los cuatro hallazgos E3a-01 a E3a-04 cerrados, sin reaperturas ni defectos nuevos; la ampliación de la lista blanca, conforme para los tres cuerpos aprobados. El revisor ejecutó 184 pruebas y contrastó la CI (973 pruebas, gitleaks sin hallazgos). La aprobación cubre E3a; E3b y E3c se revisan aparte | Revisor |
+| 10 nov 2026 | **E3b implementada** (3.9):<br>· `depth_late_books` parte por días la evidencia (`first_slot_start`), y retirar un día ya no cambia el siguiente;<br>· el grabador no escribe evidencia de días sellados;<br>· el archivador `kbot.archive` (`prepare`, `seal`, `archive` y `verify`) escribe generaciones de doce archivos Parquet desde una sola instantánea, verificadas por filas y huella canónica, publicadas en una transacción, con limpieza de lo no publicado y un solo archivador a la vez;<br>· dependencia `pyarrow` 26 | Claude; **pendiente de revisión** |

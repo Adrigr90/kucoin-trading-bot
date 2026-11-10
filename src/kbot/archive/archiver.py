@@ -5,6 +5,8 @@ It runs as kbot_archive. Each step can be repeated safely:
 * **prepare:** ``market.prepare_partitions()`` keeps the partitions of [today - 30, today + 14];
 * **seal:** ``market.seal_day(day)`` for each day of [today - 30, today - 3] not sealed yet. A
   day that is not closed, or not 72 h old, is left for a later run;
+* **verify:** the daily check: archived days keep their seals and the fingerprint of
+  their generation;
 * **archive:** every sealed day without a published generation gets one. Its twelve files,
   also the empty ones, are read from one REPEATABLE READ snapshot. They are written in a
   temporary directory, synced, read back and compared with the rows (count and canonical
@@ -33,7 +35,7 @@ import structlog
 from psycopg import errors, sql
 
 from kbot.archive import parquet
-from kbot.archive.canonical import json_text
+from kbot.archive.canonical import Fingerprint, json_text
 
 # The twelve partitioned tables and the column of their partition key (migration 0003).
 TABLES: dict[str, str] = {
@@ -228,6 +230,58 @@ def archive_day(
         )
     log.info("day_archived", day=day.isoformat(), generation=str(generation))
     return generation
+
+
+def verify(connect: Connect, days: Sequence[date] | None = None) -> list[str]:
+    """The daily check (02 §3.9). Every archived day still in the database must keep the seal
+    on its twelve partitions, and their rows must still have the count and the canonical
+    fingerprint of its latest generation. Read in one REPEATABLE READ snapshot. Returns the
+    problems found, also logged as errors; an empty list means everything matches. ``days``
+    limits the check to those days."""
+    problems: list[str] = []
+    with connect() as conn:
+        conn.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
+        with conn.transaction():
+            latest = conn.execute(
+                "SELECT DISTINCT ON (g.day) g.day, g.generation_id"
+                " FROM market.archive_generations g"
+                " WHERE NOT EXISTS (SELECT 1 FROM market.archive_retirements r WHERE r.day = g.day)"
+                " ORDER BY g.day, g.recorded_at DESC"
+            ).fetchall()
+            for day, generation in latest:
+                if days is not None and day not in days:
+                    continue
+                stored = {
+                    row[0]: (row[1], row[2])
+                    for row in conn.execute(
+                        "SELECT table_name, row_count, fingerprint FROM market.archive_files"
+                        " WHERE generation_id = %s",
+                        (generation,),
+                    ).fetchall()
+                }
+                for name in TABLES:
+                    partition = f"{name}_p{day:%Y%m%d}"
+                    sealed = conn.execute(
+                        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint c"
+                        " WHERE c.conrelid = to_regclass(%s) AND c.conname = %s"
+                        " AND c.contype = 'c' AND NOT c.convalidated)",
+                        (f"market.{partition}", f"{partition}_sellada"),
+                    ).fetchone()
+                    if not sealed or not sealed[0]:
+                        problems.append(f"{partition}: it has no seal")
+                    table = describe(conn, name)
+                    running = Fingerprint([c.name for c in table.columns])
+                    for batch in _batches(conn, table, day):
+                        for row in batch:
+                            running.add(row)
+                    if (running.rows, running.hexdigest()) != stored.get(name):
+                        problems.append(
+                            f"{partition}: {running.rows} rows now, not those of generation"
+                            f" {generation}"
+                        )
+    for problem in problems:
+        log.error("archive_check_failed", problem=problem)
+    return problems
 
 
 def remove_orphans(conn: psycopg.Connection, root: Path) -> list[Path]:

@@ -142,3 +142,22 @@ def test_two_archivers_never_work_at_once(
         other.execute("SELECT pg_advisory_unlock(%s)", (archiver.ARCHIVER_LOCK,))
     assert archiver.archive_pending(lambda: connect("kbot_archive"), tmp_path)
     assert len(generations(connect, day)) == 1
+
+
+def test_the_daily_check_finds_a_changed_or_unsealed_partition(
+    connect: Connect, partitions: Partitions, tmp_path: Path, admin: psycopg.Connection
+) -> None:
+    """02 §3.9: an archived day keeps its seal and the fingerprint of its generation. Only
+    an administrator could break either; the check reports it."""
+    day = date(2017, 7, 10)
+    sealed_day(connect, partitions, day)
+    assert archiver.archive_pending(lambda: connect("kbot_archive"), tmp_path)
+    assert archiver.verify(lambda: connect("kbot_archive"), [day]) == []
+    slots = f"depth_slot_status_p{day:%Y%m%d}"
+    admin.execute(f"DELETE FROM market.{slots} WHERE sequence = 3")
+    admin.execute(f"ALTER TABLE market.{slots} DROP CONSTRAINT {slots}_sellada")
+    problems = archiver.verify(lambda: connect("kbot_archive"), [day])
+    assert problems == [
+        f"{slots}: it has no seal",
+        f"{slots}: 2 rows now, not those of generation {generations(connect, day)[0][0]}",
+    ]

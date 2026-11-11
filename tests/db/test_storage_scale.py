@@ -148,17 +148,19 @@ def test_planning_and_maintenance_with_the_partitions_of_production(
 
 
 # An hour of a small realistic universe: prices, sizes and ticks of real instruments, so
-# that the numeric values take the room they take in production.
+# that the numeric values take the room they take in production. Half of the instruments
+# are candidates of level 50, as in the reference universe of 02 §3.1 (20 of 40): two books
+# of level 5 for each of level 50 (review of E3c, E3c-02).
 UNIVERSE = (
     # market, symbol, tick, multiplier, level 50, starting mid, size decimals
     ("SPOT", "BTC", "0.1", "1", True, "73759.6", 8),
     ("SPOT", "ETH", "0.01", "1", True, "2875.43", 7),
-    ("SPOT", "SOL", "0.001", "1", False, "162.385", 4),
+    ("SPOT", "SOL", "0.001", "1", True, "162.385", 4),
     ("SPOT", "XRP", "0.00001", "1", False, "0.61234", 2),
     ("SPOT", "PEPE", "0.000000001", "1", False, "0.000023417", 0),
     ("SPOT", "USDC", "0.0001", "1", False, "1.0002", 4),
     ("FUTURES", "XBT", "0.1", "0.001", True, "73771.3", 0),
-    ("FUTURES", "ETH", "0.01", "0.01", False, "2876.12", 0),
+    ("FUTURES", "ETH", "0.01", "0.01", True, "2876.12", 0),
     ("FUTURES", "SOL", "0.001", "0.1", False, "162.401", 0),
     ("FUTURES", "DOGE", "0.00001", "100", False, "0.17345", 0),
 )
@@ -369,6 +371,20 @@ def test_bytes_per_row_in_postgresql(
         )
         assert total < 20_000, table
     lines.append(f"WAL: {wal} bytes for {all_rows} rows ({wal / all_rows:.0f} per row)")
+    # The mix of the reference universe, and what a book of each level takes in its row.
+    with connect("postgres") as admin:
+        by_depth = admin.execute(
+            sql.SQL(
+                "SELECT depth, count(*), avg(pg_column_size(s.*)) FROM {} s"
+                " GROUP BY depth ORDER BY depth"
+            ).format(sql.Identifier("market", f"depth_snapshots_p{day:%Y%m%d}"))
+        ).fetchall()
+    books = {int(depth): int(count) for depth, count, _ in by_depth}
+    assert books[5] == 2 * books[50]
+    lines.extend(
+        f"depth_snapshots of level {depth}: {count} rows, {size:.0f} bytes per row of data"
+        for depth, count, size in by_depth
+    )
     publish(capsys, "E3c bytes per row in PostgreSQL", lines)
     written = {table for table, rows, *_ in measured if rows}
     assert {

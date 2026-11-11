@@ -11,12 +11,14 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
 from psycopg.types.json import Jsonb
 
-from kbot.ingest.rows import RowSink, insert_row
+from kbot.ingest.rows import PRIMARY_KEYS, RowSink, insert_row
 from kbot.market import store
 from kbot.market.last_candles import FlowMinute
 from kbot.market.mark_candles import FlowState
+from tools.measure_archive import MIGRATION, table_specs
 
 T0 = datetime(2026, 11, 10, 12, 0, tzinfo=UTC)
 
@@ -62,3 +64,32 @@ def test_the_rows_sink_writes_what_the_store_writers_send(tmp_path: Path) -> Non
         "reconnections": 0,
     }
     assert sink.counts == {"data_quality_minute": 1}
+
+
+def test_the_primary_keys_are_those_of_the_migrations() -> None:
+    specs = table_specs(MIGRATION.read_text(encoding="utf-8"))
+    for name, spec in specs.items():
+        assert PRIMARY_KEYS[name] == spec.primary_key, name
+    gaps = (MIGRATION.parent / "0002_mercado.sql").read_text(encoding="utf-8")
+    table = gaps.split("CREATE TABLE market.data_gaps (", 1)[1].split(");", 1)[0]
+    assert "PRIMARY KEY (market, channel, symbol, start_at)" in table
+    assert PRIMARY_KEYS["data_gaps"] == ("market", "channel", "symbol", "start_at")
+    assert set(PRIMARY_KEYS) == set(specs) | {"data_gaps"}
+
+
+def test_a_row_with_the_key_of_another_is_left_out_as_postgresql_does(tmp_path: Path) -> None:
+    sink = RowSink(tmp_path)
+    query = (
+        "INSERT INTO market.ws_candles (market, symbol, open_time, open)"
+        " VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING"
+    )
+    sink._record(query, ("SPOT", "BTC-USDT", T0, Decimal(1)))
+    sink._record(query, ("SPOT", "BTC-USDT", T0, Decimal(2)))  # kept: the first
+    sink._record(query, ("SPOT", "ETH-USDT", T0, Decimal(3)))
+    plain = query.removesuffix(" ON CONFLICT DO NOTHING")
+    with pytest.raises(ValueError, match="key of another"):
+        sink._record(plain, ("SPOT", "ETH-USDT", T0, Decimal(4)))
+    sink.close()
+    lines = (tmp_path / "ws_candles.jsonl").read_text(encoding="utf-8").splitlines()
+    assert [json.loads(line)["open"] for line in lines] == ["1", "3"]
+    assert sink.counts == {"ws_candles": 2}

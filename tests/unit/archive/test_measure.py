@@ -6,6 +6,7 @@ import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -24,6 +25,7 @@ from tools.measure_archive import (
     read_rows,
     table_specs,
     typed_rows,
+    window,
 )
 
 T0 = datetime(2026, 11, 10, 23, 58, tzinfo=UTC)
@@ -128,7 +130,7 @@ def test_a_recording_is_measured_end_to_end(
         core.on_state(market, "connected", T0, "wss://...")
     recording = tmp_path / "recording"
     sink = RowSink(recording)
-    for n in range(4):  # across midnight: two UTC days
+    for n in range(5):  # across midnight: two UTC days
         minute = T0 + timedelta(minutes=n)
         feed_minute(core, minute, "BTC-USDT", "XBTUSDTM")
         pong(core, minute + timedelta(seconds=62))
@@ -137,25 +139,58 @@ def test_a_recording_is_measured_end_to_end(
     out = tmp_path / "parquet"
     assert main([str(recording), "--out", str(out)]) == 0
     summary = json.loads((out / "measure.json").read_text(encoding="utf-8"))
-    assert summary["minutes"] == 4
+    minutes = summary["minutes"]
+    assert 3 <= minutes <= 5
     metrics = summary["tables"]["depth_metrics"]
     assert set(metrics["days"]) == {"2026-11-10", "2026-11-11"}
     assert metrics["bytes"]["zstd3"] > 0
-    assert summary["tables"]["minute_status"]["rows"] == 8
+    assert summary["tables"]["minute_status"]["rows"] == 2 * minutes  # two trade flows
     snapshots = summary["tables"]["depth_snapshots"]["bytes"]
     assert {"none", "zstd3", "zstd9", "zstd3_typed", "zstd9_typed"} <= set(snapshots)
     written = pq.read_table(out / "zstd3" / "depth_metrics" / "2026-11-11.parquet")
     assert written.num_rows == metrics["days"]["2026-11-11"]
-    assert "series, 1 days (360 copies)" in summary["duckdb_ms"]
+    copies = -(-1440 // minutes)
+    assert f"series, 1 days as {copies} repetitions of the same files" in summary["duckdb_ms"]
+    with pytest.raises(SystemExit):
+        main([str(recording), "--out", str(out)])  # not empty: E3c-05
     printed = capsys.readouterr().out
     assert "Per year (365 days)" in printed
     assert "90 hot days" in printed
     database = summary["postgres_bytes"]
     assert database["day"] == database["heap"] + database["toast"] + database["index"]
-    assert database["year_2"] - database["year_1"] == pytest.approx(database["parquet_year"])
+    grown = database["data_gaps_year_2"] - database["data_gaps_year_1"]
+    assert database["year_2"] - database["year_1"] == pytest.approx(
+        database["parquet_year"] + grown
+    )
 
 
 def test_a_recording_stopped_abruptly_ends_at_its_zeros(tmp_path: Path) -> None:
     path = tmp_path / "ws_candles.jsonl"
     path.write_bytes(b'{"a": 1}\n{"a": 2}\n{"a"' + b"\x00" * 64)
     assert read_rows(path) == [{"a": 1}, {"a": 2}]
+
+
+def _clock(minutes: int, last_rows: int) -> dict[str, list[dict[str, Any]]]:
+    """Two channels per minute and two depth channels per slot; the last minute keeps only
+    ``last_rows`` rows of each, as a recording stopped inside it."""
+    quality, slots = [], []
+    for n in range(minutes):
+        minute = T0 + timedelta(minutes=n)
+        rows = last_rows if n == minutes - 1 else 2
+        quality += [{"minute_start": minute.isoformat(), "channel": str(c)} for c in range(rows)]
+        for i in range(6):
+            slot = (minute + timedelta(seconds=10 * i)).isoformat()
+            slots += [{"slot_start": slot, "depth": d} for d in range(rows)]
+    return {"data_quality_minute": quality, "depth_slot_status": slots}
+
+
+def test_the_window_leaves_out_a_minute_cut_short() -> None:
+    assert window(_clock(5, 2)) == (T0, T0 + timedelta(minutes=5))
+    assert window(_clock(5, 1)) == (T0, T0 + timedelta(minutes=4))
+
+
+def test_an_old_late_book_does_not_move_the_window() -> None:
+    loaded = _clock(5, 1)
+    old = (T0 - timedelta(hours=2)).isoformat()
+    loaded["depth_late_books"] = [{"first_slot_start": old}]
+    assert window(loaded) == (T0, T0 + timedelta(minutes=4))

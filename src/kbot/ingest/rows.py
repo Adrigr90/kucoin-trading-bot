@@ -5,7 +5,9 @@ writes only a summary. This sink runs the very writers of ``market.store`` that
 ``DatabaseSink`` runs, against a connection that executes nothing: it records each INSERT
 with its table, its columns and its values, and appends the row as a JSON line to
 ``<folder>/<table>.jsonl``. So the rows are those that would reach PostgreSQL, built by the
-same code; a test in the CI compares them with the rows PostgreSQL stores.
+same code; a test in the CI compares them with the rows PostgreSQL stores. A row with the key
+of an earlier one is left out, as PostgreSQL leaves it out (review of E3c, E3c-04): the sink
+keeps a 16-byte digest of every key it wrote, some 150 MB for a day of the reference universe.
 
 Decisions that need the database stay those of ``MemorySink``, and their rows are not
 written here: the late evidence of the minutes (a few rows of ``trading_seen_late``,
@@ -15,6 +17,7 @@ computed in SQL from what the database holds). They are few and small.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections import Counter
@@ -32,6 +35,25 @@ from kbot.ingest.sinks import MemorySink
 from kbot.market import store
 from kbot.market.last_candles import CandleDecision, KeptEvidence
 from kbot.market.mark_candles import IndexMinute, OwnCandle
+
+# The primary key of every table the writers insert into (migrations 0002 and 0003; a test
+# compares them). A row with the key of an earlier one is what PostgreSQL rejects: with
+# ON CONFLICT DO NOTHING it keeps the first, and without it the statement fails.
+PRIMARY_KEYS: dict[str, tuple[str, ...]] = {
+    "data_quality_minute": ("market", "symbol", "channel", "minute_start"),
+    "candles": ("series", "market", "symbol", "open_time"),
+    "ws_candles": ("market", "symbol", "open_time"),
+    "exhausted_index_rebuilds": ("market", "symbol", "minute_start"),
+    "minute_status": ("market", "symbol", "minute_start"),
+    "depth_slot_status": ("market", "symbol", "depth", "slot_start"),
+    "depth_metrics": ("market", "symbol", "depth", "slot_start"),
+    "depth_snapshots": ("market", "symbol", "depth", "minute_start"),
+    "depth_late_books": ("market", "symbol", "depth", "first_slot_start", "sequence"),
+    "trading_seen_late": ("market", "symbol", "minute_start"),
+    "late_ws_candles": ("market", "symbol", "open_time", "published_at", "latest"),
+    "late_ws_repeats": ("market", "symbol", "open_time", "published_at"),
+    "data_gaps": ("market", "channel", "symbol", "start_at"),
+}
 
 _INSERT = re.compile(
     r"^INSERT INTO market\.(\w+) \(([^)]*)\) VALUES \((.*?)\)(?: ON CONFLICT .*)?$", re.S
@@ -117,6 +139,7 @@ class RowSink(MemorySink):
         folder.mkdir(parents=True, exist_ok=True)
         self.counts: Counter[str] = Counter()
         self._files: dict[str, TextIO] = {}
+        self._keys: dict[str, set[bytes]] = {}  # digests of the keys written, per table
         self._conn = RecordingConnection(self._record)
 
     def _record(self, query: str, params: tuple[Any, ...]) -> None:
@@ -124,6 +147,19 @@ class RowSink(MemorySink):
         if found is None:
             return  # a read, answered with no rows: nothing is stored yet
         table, row = found
+        if table not in PRIMARY_KEYS:
+            raise ValueError(f"{table}: no primary key known to --sink rows")
+        key = hashlib.blake2b(
+            json.dumps([row[c] for c in PRIMARY_KEYS[table]]).encode(), digest_size=16
+        ).digest()
+        seen = self._keys.setdefault(table, set())
+        if key in seen:
+            # The other unique constraints of these tables contain their primary key, so the
+            # primary key alone decides what PostgreSQL rejects (review of E3c, E3c-04).
+            if "ON CONFLICT DO NOTHING" in " ".join(query.split()):
+                return
+            raise ValueError(f"{table}: a second row with the key of another")
+        seen.add(key)
         file = self._files.get(table)
         if file is None:
             file = (self.folder / f"{table}.jsonl").open("a", encoding="utf-8", newline="\n")

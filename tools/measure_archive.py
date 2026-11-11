@@ -90,7 +90,10 @@ LARGEST_ROW = max(POSTGRES_ROW_BYTES.values(), key=sum)
 WAL_BYTES_PER_ROW = 487  # written, same test
 EMPTY_PARTITION_BYTES = 24_621  # files of its indexes and TOAST, and catalog rows; same CI
 PARTITIONS = 12 * (HOT_DAYS + 1 + 14)  # the hot days, today and the 14 prepared ahead
-WAL_KEPT_BYTES = 1 << 30  # max_wal_size by default: the WAL PostgreSQL keeps on disk
+# The WAL on disk: max_wal_size by default, as an estimated reserve. It is a soft limit that
+# PostgreSQL may exceed (heavy writes, a failing archive or a lagging replica; the design has
+# neither), so it is no bound (review of E3c, E3c-06).
+WAL_RESERVE_BYTES = 1 << 30
 MARGIN = 1.2  # the margin of the estimate of 02 §3.1
 DATA_VOLUME_GB = 110  # 02 §10.3, option B
 
@@ -259,14 +262,6 @@ class Measure:
     bytes: Counter[str] = field(default_factory=Counter)  # per variant, every day
 
 
-def recorded_minutes(quality: Sequence[dict[str, Any]]) -> int:
-    minutes = {row["minute_start"] for row in quality}
-    if not minutes:
-        raise ValueError("the recording has no closed minute")
-    first, last = (datetime.fromisoformat(m) for m in (min(minutes), max(minutes)))
-    return (last - first) // timedelta(minutes=1) + 1
-
-
 def by_day(spec: TableSpec, rows: Sequence[tuple[Any, ...]]) -> Iterator[tuple[date, list[Any]]]:
     key = [c.name for c in spec.columns].index(spec.key)
     days: dict[date, list[Any]] = defaultdict(list)
@@ -275,17 +270,35 @@ def by_day(spec: TableSpec, rows: Sequence[tuple[Any, ...]]) -> Iterator[tuple[d
     yield from sorted(days.items())
 
 
-def _until(loaded: dict[str, list[dict[str, Any]]]) -> str:
-    """The end of the last minute every table reached: each file of a recording stopped
-    abruptly ends at its own point, so every table is cut there."""
-    ends = [max(row[TABLES[name]] for row in rows) for name, rows in loaded.items() if rows]
-    end = datetime.fromisoformat(min(ends, key=datetime.fromisoformat))
-    return (end.replace(second=0, microsecond=0) + timedelta(minutes=1)).isoformat()
+def window(loaded: dict[str, list[dict[str, Any]]]) -> tuple[datetime, datetime]:
+    """The minutes ``[first, end)`` whose writing the recording proves complete (review of
+    E3c, E3c-01). The clocks are the two tables written for every channel without fail:
+    a minute is complete when it has as many rows of ``data_quality_minute`` as the fullest
+    minute, and each of its six slots as many rows of ``depth_slot_status`` as the fullest
+    slot. The window runs from the first complete minute to the last one, so the edges a
+    start or an abrupt stop leave half written are out; a minute inside it that lacks rows
+    lacked them in the recording too. Tables of rare rows, such as late books, never set it."""
+    minutes = Counter(
+        datetime.fromisoformat(r["minute_start"]) for r in loaded["data_quality_minute"]
+    )
+    slots = Counter(datetime.fromisoformat(r["slot_start"]) for r in loaded["depth_slot_status"])
+    full_minute, full_slot = max(minutes.values()), max(slots.values())
+    complete = sorted(
+        minute
+        for minute, rows in minutes.items()
+        if rows == full_minute
+        and all(slots[minute + timedelta(seconds=10 * i)] == full_slot for i in range(6))
+    )
+    if not complete:
+        raise ValueError("the recording has no complete minute")
+    return complete[0], complete[-1] + timedelta(minutes=1)
 
 
-def _before(rows: list[dict[str, Any]], column: str, until: str) -> list[dict[str, Any]]:
-    limit = datetime.fromisoformat(until)
-    return [row for row in rows if datetime.fromisoformat(row[column]) < limit]
+def _within(
+    rows: list[dict[str, Any]], column: str, span: tuple[datetime, datetime]
+) -> list[dict[str, Any]]:
+    first, end = span
+    return [row for row in rows if first <= datetime.fromisoformat(row[column]) < end]
 
 
 def measure(recording: Path, out: Path) -> tuple[int, dict[str, Measure], int]:
@@ -296,10 +309,10 @@ def measure(recording: Path, out: Path) -> tuple[int, dict[str, Measure], int]:
         for name in TABLES
         if (recording / f"{name}.jsonl").exists()
     }
-    until = _until(loaded)
-    loaded = {name: _before(rows, TABLES[name], until) for name, rows in loaded.items()}
+    span = window(loaded)
+    loaded = {name: _within(rows, TABLES[name], span) for name, rows in loaded.items()}
     gaps_file = recording / "data_gaps.jsonl"
-    gaps = len(_before(read_rows(gaps_file), "start_at", until)) if gaps_file.exists() else 0
+    gaps = len(_within(read_rows(gaps_file), "start_at", span)) if gaps_file.exists() else 0
     quality = loaded.get("data_quality_minute", [])
     loaded["minute_status"] = minute_status_rows(quality)
     measures: dict[str, Measure] = {}
@@ -319,7 +332,7 @@ def measure(recording: Path, out: Path) -> tuple[int, dict[str, Measure], int]:
                 for variant in ("zstd3", "zstd9"):
                     path = out / f"{variant}_typed" / name / f"{day.isoformat()}.parquet"
                     result.bytes[f"{variant}_typed"] += write(typed, path, variant)
-    return recorded_minutes(quality), measures, gaps
+    return (span[1] - span[0]) // timedelta(minutes=1), measures, gaps
 
 
 SERIES = (
@@ -359,7 +372,9 @@ def queries(out: Path, symbol: str, minutes: int) -> dict[str, tuple[float, floa
 
     metrics = files("zstd3", "depth_metrics")
     copies = math.ceil(QUERY_DAYS * MINUTES_PER_DAY / minutes)
-    days = f"{QUERY_DAYS} days ({copies} copies)"
+    # A synthetic test: the same files read again and again. The rows are those of so many
+    # days, but not their files, their cache or their disk (review of E3c).
+    days = f"{QUERY_DAYS} days as {copies} repetitions of the same files"
     connection = duckdb.connect()
     return {
         "series, recorded": timed(connection, SERIES, metrics, symbol),
@@ -415,10 +430,15 @@ def postgres(
 ) -> tuple[list[str], dict[str, float]]:
     """The 90 hot days in PostgreSQL, with the bytes per row measured in the CI and the
     margins for the partitions, the WAL and the 20 % of 02 §3.1, and the data volume of
-    02 §10.3 after one and two years of Parquet (``parquet_per_day``, in bytes)."""
+    02 §10.3 after one and two years of Parquet (``parquet_per_day``, in bytes).
+
+    ``data_gaps`` is not partitioned and its retention is still to be defined (02 §3.9), so
+    it is not part of the 90 days: it grows with every day recorded, 365 days in the first
+    year and 730 in the second (review of E3c, E3c-03). Its bytes per row are the largest
+    measured, an upper bound. The WAL kept is an estimated reserve, not a bound:
+    ``max_wal_size`` is a soft limit that PostgreSQL may exceed (E3c-06)."""
     scale = MINUTES_PER_DAY / minutes
     per_day = {name: m.rows * scale for name, m in measures.items()}
-    per_day["data_gaps"] = gaps * scale
     heap, toast, index = (
         sum(
             rows * POSTGRES_ROW_BYTES.get(name, LARGEST_ROW)[part] for name, rows in per_day.items()
@@ -426,20 +446,25 @@ def postgres(
         for part in range(3)
     )
     day = heap + toast + index
-    hot = day * HOT_DAYS + PARTITIONS * EMPTY_PARTITION_BYTES + WAL_KEPT_BYTES
+    gaps_day = gaps * scale * sum(LARGEST_ROW)
+    hot = day * HOT_DAYS + PARTITIONS * EMPTY_PARTITION_BYTES + WAL_RESERVE_BYTES
     database = hot * MARGIN
     year = parquet_per_day * 365
+    gaps_1, gaps_2 = (gaps_day * days * MARGIN for days in (365, 730))
     values = {
         "day": day,
         "heap": heap,
         "toast": toast,
         "index": index,
-        "wal_per_day": sum(per_day.values()) * WAL_BYTES_PER_ROW,
+        "wal_per_day": (sum(per_day.values()) + gaps * scale) * WAL_BYTES_PER_ROW,
         "hot": hot,
         "database": database,
+        "data_gaps_per_day": gaps_day,
+        "data_gaps_year_1": gaps_1,
+        "data_gaps_year_2": gaps_2,
         "parquet_year": year,
-        "year_1": database + year,
-        "year_2": database + 2 * year,
+        "year_1": database + gaps_1 + year,
+        "year_2": database + gaps_2 + 2 * year,
     }
     gb = {name: value / 1e9 for name, value in values.items()}
     lines = [
@@ -447,12 +472,16 @@ def postgres(
         f"  per day {day / 1e6:.0f} MB: heap {heap / 1e6:.0f}, TOAST {toast / 1e6:.0f},"
         f" indexes {index / 1e6:.0f}; WAL written {values['wal_per_day'] / 1e6:.0f} MB per day",
         f"  {HOT_DAYS} hot days {day * HOT_DAYS / 1e9:.1f} GB + {PARTITIONS} partitions"
-        f" {PARTITIONS * EMPTY_PARTITION_BYTES / 1e9:.2f} + WAL kept"
-        f" {WAL_KEPT_BYTES / 1e9:.2f} = {gb['hot']:.1f} GB;"
+        f" {PARTITIONS * EMPTY_PARTITION_BYTES / 1e9:.2f} + WAL reserve (max_wal_size, a soft"
+        f" limit) {WAL_RESERVE_BYTES / 1e9:.2f} = {gb['hot']:.1f} GB;"
         f" with {MARGIN - 1:.0%} more, {gb['database']:.1f} GB",
+        f"  data_gaps without retention: {gaps * scale:.0f} rows per day,"
+        f" {gb['data_gaps_year_1']:.2f} GB after year 1 and {gb['data_gaps_year_2']:.2f} after"
+        f" year 2, with the margin",
         f"Data volume of {DATA_VOLUME_GB} GB (02 §10.3), with Parquet zstd 3:"
-        f" year 1 {gb['database']:.1f} + {gb['parquet_year']:.1f} = {gb['year_1']:.1f} GB;"
-        f" year 2 {gb['year_2']:.1f} GB",
+        f" year 1 {gb['database']:.1f} + {gb['data_gaps_year_1']:.1f} + {gb['parquet_year']:.1f}"
+        f" = {gb['year_1']:.1f} GB; year 2 {gb['database']:.1f} + {gb['data_gaps_year_2']:.1f}"
+        f" + {2 * gb['parquet_year']:.1f} = {gb['year_2']:.1f} GB",
     ]
     return lines, values
 
@@ -465,6 +494,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     arguments = parser.parse_args(argv)
     out = arguments.out or arguments.recording / "parquet"
+    if out.exists() and any(out.iterdir()):
+        # Files of an earlier run would mix with this one's (review of E3c, E3c-05).
+        parser.error(f"the output folder must be new or empty: {out}")
     minutes, measures, gaps = measure(arguments.recording, out)
     metrics = measures.get("depth_metrics")
     symbol = "BTC-USDT"

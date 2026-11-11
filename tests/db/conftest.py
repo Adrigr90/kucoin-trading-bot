@@ -9,15 +9,46 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable, Iterator
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import psycopg
 import pytest
+from psycopg import sql
 
 from kbot.db.roles import DATABASE, SOCKET_DIR
+from tools.grant_policy import PARTITIONED_TABLES
 
 # Below every date a fixed test writes (2026-11-07 and later), and below them goes on.
 FIRST_FREE_DAY = datetime(2026, 1, 1, tzinfo=UTC)
+
+# The twelve market tables partitioned by UTC day (02 §3.9). In production their
+# partitions come from market.prepare_partitions(), which only keeps [today - 30, today +
+# 14]; the tests write on days of their own, so they create those days' partitions as
+# kbot_owner, with the same names and bounds as the function.
+PARTITIONED = tuple(name.split(".", 1)[1] for name in PARTITIONED_TABLES)
+
+
+def create_partitions(admin: psycopg.Connection, first: date, last: date) -> None:
+    admin.execute("SET ROLE kbot_owner")
+    try:
+        day = first
+        while day <= last:
+            start = datetime(day.year, day.month, day.day, tzinfo=UTC)
+            for table in PARTITIONED:
+                admin.execute(
+                    sql.SQL(
+                        "CREATE TABLE IF NOT EXISTS market.{} PARTITION OF market.{}"
+                        " FOR VALUES FROM ({}) TO ({})"
+                    ).format(
+                        sql.Identifier(f"{table}_p{day:%Y%m%d}"),
+                        sql.Identifier(table),
+                        sql.Literal(start),
+                        sql.Literal(start + timedelta(days=1)),
+                    )
+                )
+            day += timedelta(days=1)
+    finally:
+        admin.execute("RESET ROLE")
 
 
 @pytest.fixture(scope="session")
@@ -43,8 +74,82 @@ def admin(connect: Callable[..., psycopg.Connection]) -> Iterator[psycopg.Connec
         yield conn
 
 
+Partitions = Callable[[date, date], None]
+
+
+# The order of market.retire_day: the partitions that reference before the referenced ones.
+RETIRE_ORDER = (
+    "minute_status",
+    "candles",
+    "ws_candles",
+    "exhausted_index_rebuilds",
+    "trading_seen_late",
+    "late_ws_candles",
+    "late_ws_repeats",
+    "depth_metrics",
+    "depth_snapshots",
+    "depth_late_books",
+    "data_quality_minute",
+    "depth_slot_status",
+)
+
+
+def drop_partitions(admin: psycopg.Connection, days: list[date]) -> None:
+    """Detaches and drops the partitions of these days that exist, as market.retire_day
+    does: a partition that a foreign key points at cannot be dropped while attached."""
+    for table in RETIRE_ORDER:
+        for day in days:
+            name = f"{table}_p{day:%Y%m%d}"
+            row = admin.execute("SELECT to_regclass(%s) IS NOT NULL", (f"market.{name}",))
+            found = row.fetchone()
+            if found is None or not found[0]:
+                continue
+            admin.execute(
+                sql.SQL("ALTER TABLE market.{} DETACH PARTITION market.{}").format(
+                    sql.Identifier(table), sql.Identifier(name)
+                )
+            )
+            admin.execute(sql.SQL("DROP TABLE market.{}").format(sql.Identifier(name)))
+
+
+@pytest.fixture
+def partitions(connect: Callable[..., psycopg.Connection]) -> Iterator[Partitions]:
+    """Creates the partitions of the days from ``first`` to ``last``, both included, and
+    drops them when the test ends: a query over a partitioned table locks every partition
+    it cannot prune, so tests never pile up thousands of them."""
+    created: list[date] = []
+
+    def create(first: date, last: date) -> None:
+        with connect("postgres") as conn:
+            create_partitions(conn, first, last)
+        created.extend(first + timedelta(days=n) for n in range((last - first).days + 1))
+
+    yield create
+    with connect("postgres") as conn:
+        drop_partitions(conn, sorted(set(created) - FIXED_DAYS))
+
+
+# The days of the tests with fixed dates: T0 (7 November 2026) and the days around it.
+FIXED_DAYS = {date(2026, 11, 6) + timedelta(days=n) for n in range(4)}
+
+
+@pytest.fixture(scope="session", autouse=True)
+def fixed_test_days(connect: Callable[..., psycopg.Connection]) -> None:
+    with connect("postgres") as conn:
+        create_partitions(conn, min(FIXED_DAYS), max(FIXED_DAYS))
+
+
 @pytest.fixture(scope="session")
-def free_day(connect: Callable[..., psycopg.Connection]) -> Callable[[], datetime]:
+def handed_out() -> list[datetime]:
+    return []
+
+
+@pytest.fixture
+def free_day(
+    connect: Callable[..., psycopg.Connection],
+    partitions: Partitions,
+    handed_out: list[datetime],
+) -> Callable[[], datetime]:
     """A UTC midnight of its own for each run of the recorder (review of E2, sixth round,
     R6-E2-04).
 
@@ -54,8 +159,7 @@ def free_day(connect: Callable[..., psycopg.Connection]) -> Callable[[], datetim
     Each day handed out lies ten days below every evaluation stored and every day handed
     out before, so no other universe is on it or before it, on a new database or on one
     used before; no randomness, so neither a coincidence nor the order of the tests
-    matters."""
-    handed_out: list[datetime] = []
+    matters. Its partitions exist during the test only."""
 
     def allocate() -> datetime:
         with connect("kbot_ingest") as conn:
@@ -64,6 +168,20 @@ def free_day(connect: Callable[..., psycopg.Connection]) -> Callable[[], datetim
         lowest = min([*stored, *handed_out, FIRST_FREE_DAY])
         day = datetime(lowest.year, lowest.month, lowest.day, tzinfo=UTC) - timedelta(days=10)
         handed_out.append(day)
+        # The recorder may also write the day before (its resume point) and a few after.
+        partitions(day.date() - timedelta(days=1), day.date() + timedelta(days=4))
         return day
 
     return allocate
+
+
+@pytest.fixture
+def recovery_range(connect: Callable[..., psycopg.Connection]) -> Iterator[None]:
+    """For a test that calls market.prepare_partitions(): when it ends, drops the
+    partitions of [today - 30, today + 14] except the fixed days."""
+    yield
+    with connect("postgres") as conn:
+        row = conn.execute("SELECT (now() AT TIME ZONE 'UTC')::date").fetchone()
+        assert row is not None
+        days = [row[0] + timedelta(days=n) for n in range(-30, 15)]
+        drop_partitions(conn, [day for day in days if day not in FIXED_DAYS])

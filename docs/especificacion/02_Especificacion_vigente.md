@@ -15,8 +15,8 @@ Este documento **sustituye, para leer y auditar**, al Informe V4 y a los anexos 
 | Fase 0 | **Cerrada** el 6 de noviembre de 2026 (D35). Fase 1 autorizada |
 | Especificado | Sí, con pendientes |
 | Verificado documentalmente | Parcial |
-| Validado mediante pruebas | **Fase 1** (6 de noviembre de 2026): H07, B18, B20, B25, B26, RC14, RC15 y la parte de PostgreSQL y roles de la sección 9. Informe en `docs/informes/Informe_Fase1.md` del repositorio |
-| Implementado | **Fase 1**: una primera versión integrada en `main` (pull request #1, 6 de noviembre de 2026); las correcciones de la auditoría del revisor, en la rama `fase-1`, **pendientes de integrar** (pull request #2) |
+| Validado mediante pruebas | **Fase 1** (6 de noviembre de 2026): H07, B18, B20, B25, B26, RC14, RC15 y la parte de PostgreSQL y roles de la sección 9. Informe en `docs/informes/Informe_Fase1.md` del repositorio. **Fase 2**, etapas E1 y E2 (7 y 9 de noviembre de 2026): criterios F2-A1 a F2-A8, salvo los bytes por día de F2-A8, que se miden en E5 (`docs/informes/Trazabilidad_aceptacion.md`) |
+| Implementado | **Fase 1** integrada en `main` (pull requests #1 y #2, 6 de noviembre de 2026). **Fase 2:** etapas E1 (pull request #3, 7 de noviembre de 2026) y E2 (pull request #4, 9 de noviembre de 2026) integradas en `main` |
 | Decisiones D01-D35 aprobadas | **10**: D17, D33 y D35, el 5 de noviembre de 2026; D18 y D03, el 6 de noviembre; D04, D01, D02, D11 y D25, el 7 de noviembre (ver `03_Decisiones.md`) |
 
 **Etiquetas:** [H] hecho oficial verificado (fuente en la sección 16) · [I] inferencia técnica · [R] recomendación · [P] pendiente · [Cxx] corrección de origen · [Dxx] decisión del propietario (pendiente salvo que se indique «aprobada») · [Hxx] hallazgo abierto.
@@ -279,11 +279,12 @@ Este documento **sustituye, para leer y auditar**, al Informe V4 y a los anexos 
 | Mensajes WebSocket pasados | **No** (no hay reenvío documentado) |
 | Velas de 1m de last | Sí, con los límites de 3.2 |
 | Velas de 1m de mark | **No:** la API UTA no da velas de mark [H, E1]. Se construyen con el canal `mark-price` (un valor por segundo); los minutos perdidos quedan como hueco y **nunca se inventan** [decisión del propietario, 7 nov 2026] |
-| Velas de 1m de index | **En parte:** se construyen con el mismo canal; los minutos perdidos se reconstruyen con el histórico del índice de Classic (`/api/v1/index/query`, un valor por segundo [H, E1]; profundidad del histórico sin medir [P: B3]) [decisión del propietario, 7 nov 2026] |
+| Velas de 1m de index | **En parte:** se construyen con el mismo canal; los minutos perdidos se reconstruyen con el histórico del índice de Classic (`/api/v1/index/query`, un valor por segundo [H, E1]) [decisión del propietario, 7 nov 2026]. **Solo durante unos 100 días:** el 9 de noviembre de 2026, el valor más antiguo de `.KXBTUSDT` y de `.KETHUSDT` era del 31 de julio de 2026 a las 16:00 UTC [H, E3: B3]. Probablemente KuCoin lo borra por meses enteros, en hora de Pekín [I] |
 | Operaciones recientes | Solo las 100 últimas |
 | Mark a resolución de segundos | **No** |
 | Funding histórico | Sí |
 | Libro de órdenes histórico | **No** [H] |
+| Velas de pares deslistados | **Solo durante unas semanas:** BLAST/USDT tenía todo su histórico 24 días después de su retirada; OXT/USDT, REN/USDT y HYVE/USDT, retirados hace entre 87 y 315 días, ya no existen en la API (código 138004) [H, E3: B13]. Detalle en `docs/kucoin/historico.md` del repositorio |
 
 ### 3.8 Esquema `market` de la Fase 2 (etapa E2) [revisado y confirmado; migración `0002`]
 
@@ -338,6 +339,279 @@ Este documento **sustituye, para leer y auditar**, al Informe V4 y a los anexos 
 - **La prueba de vida no demuestra que haya llegado todo** [cuarta revisión de E2]: KuCoin no documenta que envíe en orden de publicación ni que un pong salga después de todo lo publicado antes. La completitud por hora de publicación es, por tanto, provisional: lo que llega con su intervalo ya cerrado y contradice un resultado escrito se guarda como evidencia tardía y rebaja lo que ese resultado cuenta, sin cambiar sus filas (3.5). Nunca se descarta en silencio.
 - **Si KuCoin no da los listados al arrancar, el servicio falla** y systemd lo vuelve a arrancar más tarde (§0, regla 1). Un instrumento cuyos datos no cumplen su contrato no se graba y queda en el registro.
 - **En un PC sin PostgreSQL** (`--sink file`) el grabador escribe en archivos JSON lo que guardaría, para comprobarlo contra KuCoin real.
+
+### 3.9 Almacenamiento histórico (etapa E3) [diseño revisado el 9 nov 2026, con las decisiones del propietario; pendiente de implementar]
+
+**Qué pide la etapa** (`07` §2, E3):
+- 90 días calientes en PostgreSQL con particionado nativo [D17];
+- lo antiguo en Parquet (zstd) inmutable, con SHA-256 de cada archivo (§2 y §10.1);
+- tamaño y tiempo de consulta del Parquet medidos con datos reales (punto 66 de `04`).
+
+**Revisión y decisiones.** El 9 de noviembre de 2026 se hicieron dos revisiones del diseño: la primera, con el modelo anterior del revisor, y la segunda, con el auditor actual. Las dos dieron **APROBABLE CON CORRECCIONES DE DISEÑO**: los hallazgos E3-D01 a E3-D04 y cinco condiciones más, todo incorporado abajo. **Decisiones del propietario:**
+1. Las particiones las gestionan funciones `SECURITY DEFINER` acotadas, que usa un rol nuevo, `kbot_archive` (opción A).
+2. Las tablas se rehacen con una migración nueva, la `0003`, sin tocar la `0002` (opción B).
+
+**1. Particiones por día UTC**
+- **Doce tablas particionadas**, por rango de su columna de tiempo:
+  - por su minuto: `data_quality_minute`, `minute_status`, `candles`, `ws_candles`, `exhausted_index_rebuilds`, `trading_seen_late`, `late_ws_candles`, `late_ws_repeats` y `depth_snapshots`;
+  - por `slot_start`: `depth_slot_status`, `depth_metrics` y `depth_late_books`.
+
+  Sus claves primarias y únicas ya incluyen esa columna [H: PostgreSQL 18, §5.12.2.3].
+- **Cinco tablas sin particionar:** `instruments`, `risk_tiers`, `funding_rates`, `universe_snapshots` y `data_gaps`. Su política de retención se define aparte, y no en E3. `data_gaps`, por ejemplo, solo se podrá limpiar si el hueco está cerrado, nada lo referencia en los días calientes y su información está preservada.
+- **Por día y no por mes** [R]: así cada copia horaria lleva solo los días aún no excluidos (§10.1 y punto 4).
+- **Rango preparado:** la función de preparar mantiene las particiones de **[hoy − 30, hoy + 14]**, el horizonte de recuperación del grabador (I-E2-06). Se ejecuta antes de arrancar el grabador y una vez al día. Nunca vuelve a crear un día ya retirado. Si quedan menos de 7 días futuros, salta una alerta.
+- **Sin partición por defecto:** una fila sin partición falla y se ve.
+- **Siempre en UTC:** los límites se calculan como `(día::timestamp AT TIME ZONE 'UTC')`, y las funciones fijan `SET TimeZone = 'UTC'`. Así no dependen de la zona horaria de la sesión: el revisor comprobó que la conversión `date → timestamptz` da límites distintos en UTC, Madrid y Nueva York.
+- **Comprobación por catálogo:** cada partición se comprueba en el catálogo (padre, límites, propietario `kbot_owner` y ningún permiso para otro rol, `PUBLIC` incluido, ni en la tabla ni en sus columnas; desde la revisión de E3a, E3a-04).
+- **Bloqueos y escala:** crear una partición toma `ACCESS EXCLUSIVE` sobre la tabla padre [H], así que las funciones usan un `lock_timeout` corto y reintentan. Con unas 1.250 particiones activas se mide el tiempo de planificación, el de mantenimiento y el del DDL.
+
+**2. Migración `0003`** (decisión 2)
+- La `0002` no se toca. Desde ahora, la CI compara el SHA-256 de cada migración que ya está en `main` con una lista guardada, y falla si alguna cambia.
+- La `0003`, en una sola transacción:
+  1. `SET LOCAL lock_timeout`;
+  2. `LOCK` de las doce tablas en un orden fijo;
+  3. comprueba que todas están vacías: un `CHECK (false)` en cada una falla si tiene alguna fila;
+  4. las borra sin `CASCADE`, en el orden que exigen las claves foráneas;
+  5. las vuelve a crear particionadas, con las mismas columnas y restricciones.
+
+  Ante datos o contención, aborta sin cambiar nada.
+- Añade dos restricciones que la `0002` no tenía:
+  - las columnas de minuto, alineadas al minuto UTC (`date_trunc('minute', x AT TIME ZONE 'UTC') = x AT TIME ZONE 'UTC'`);
+  - en `depth_snapshots`, `slot_start - minute_start < '00:01:00'`.
+
+  Con las dos, un snapshot nunca cruza de día; el límite superior solo no bastaba (segunda revisión).
+- La CI aplica `0001 → 0002 → 0003` y comprueba que el esquema resultante es exactamente el aprobado.
+
+**3. Sellado y archivo de un día D** (E3-D01, E3-D02 y condiciones 1 y 3)
+- **Estados de solo inserción:** cada transición es una fila nueva en una tabla de estados del archivo, y el estado de un día es su última fila: `sellado` → `archivado_local` → `replicado_fuera` → `verificado_fuera` → `elegible_para_exclusion_backup` → `retirado`.
+- **Sellado** [R: con él se coordinan las escrituras con el corte (condición 1)]:
+  - Cuando han pasado al menos 72 h desde el final del día, la función de sellar añade a cada una de sus doce particiones `CHECK (false) NOT VALID`. Las filas existentes se quedan y no puede entrar ninguna nueva [H, CI].
+  - **Primero las barreras y después la comprobación** [revisión de E3a, E3a-03]. Cada `ALTER` espera a los escritores de su partición, y solo con las doce barreras puestas se comprueba que el día está cerrado, en `READ COMMITTED`, para ver toda escritura confirmada antes. Si no lo está, se deshace todo, barreras incluidas. Fuera de `READ COMMITTED` la función se niega a ejecutarse.
+  - **Día cerrado** [E3a-02]: cada instrumento del día tiene sus 1.440 estados terminales. Los instrumentos del día son los de `store.universe_members` (la evaluación en vigor al empezar el día y las hechas durante él) y cualquiera con algún minuto de trade grabado en él. Un día sin ninguno está vacío, y cerrado.
+  - Antes de sellar, la evidencia tardía sí podía llegar después de las 72 h (`core.py`, segunda revisión). Desde el sellado, la base lo impide.
+  - El grabador no escribe evidencia de un día sellado o retirado: la descarta y la cuenta como «evidencia de un día cerrado», sin fallar. Hoy se descarta en silencio, porque falta la fila de flujo.
+- **Generación** (condición 3). Después de sellar, en una instantánea coherente (`REPEATABLE READ`), se escribe una generación del día:
+  - **los doce archivos**, también los vacíos, en `market/<AAAA-MM-DD>/g<id>/<tabla>.parquet`;
+  - **su manifiesto**: versión del esquema y del formato, filas, huella y SHA-256 de cada archivo;
+  - **escritura segura:** cada archivo se escribe en un temporal, se sincroniza con el disco y se renombra;
+  - **verificación:** se relee y se comprueban sus filas y su huella;
+  - **publicación:** la generación solo se publica cuando sus doce archivos son durables y están verificados. Un intento que cae antes queda incompleto, con su identificador, y el siguiente lo descarta. Nada se sobrescribe, y una generación nueva lleva otro identificador.
+- **Huella canónica:**
+  - las filas, en el orden de su clave primaria;
+  - cada valor, en una forma única:
+    - `NULL`, con una marca propia;
+    - `numeric`, como texto decimal normalizado (sin exponente, sin ceros finales y con `-0` como `0`);
+    - las marcas de tiempo, en UTC ISO 8601 con microsegundos;
+    - `jsonb` y las listas, en JSON canónico (JCS, RFC 8785);
+  - cada fila, como un array JCS, y la huella, el SHA-256 de las huellas de las filas concatenadas;
+  - la misma serialización en PostgreSQL y en el Parquet releído, que no depende de cómo los represente PyArrow.
+- **Comprobación diaria:** las particiones selladas que siguen en la base conservan su sello, y su huella (no solo el recuento) coincide con la de su generación.
+
+**4. Copias** (E3-D01 y condición 1)
+- Una partición solo se excluye de la copia horaria si se cumplen tres condiciones:
+  - su sello existe, comprobado en el catálogo dentro de la instantánea de la propia copia (`pg_dump --snapshot`) [H: documentación de `pg_dump` 18];
+  - su generación está `verificado_fuera`;
+  - el manifiesto de la copia fija esa generación exacta.
+
+  Restaurar nunca busca «la última» generación.
+- Se excluye con `--exclude-table-data` por partición, y nunca con `--exclude-table-data-and-children` [H].
+- **En E3 no se excluye nada:** todas las copias llevan todas las particiones.
+
+**5. Retirada a los 90 días** (E3-D03 y condición 2)
+- **La evidencia no cruza de día** [R]. Un libro tardío cuyo rango cruza la medianoche se guarda en una fila por cada día al que afecta, y cada fila solo referencia intervalos de su día (cambia en la `0003`, en `write_late_books` y en `slot_states`). Así, retirar el día D nunca mejora los estados efectivos de D+1. El revisor lo reprodujo: con la evidencia de D presente, dos intervalos de D+1 contaban como `fuera_de_plazo`; sin ella, volvían a `valida`.
+- **Condiciones para retirar el día D:**
+  - tiene más de 90 días;
+  - su generación es `elegible_para_exclusion_backup`;
+  - desde E4, ha pasado una prueba integral de restauración.
+- **Cómo se retira:** primero las particiones que referencian y después las referenciadas, con `DETACH` y luego `DROP`, sin `CASCADE` y con `lock_timeout`. Si algo falla, se detiene sin borrar más, y lo ya retirado queda anotado para reintentar.
+- **En E3** la función de retirar existe y se prueba en la CI, pero **ningún rol de servicio puede ejecutarla**: ni `PUBLIC` ni los roles operativos, tampoco por herencia.
+- **Lectura histórica:** la lectura de días ya retirados aplica las reglas de calidad (`minute_statuses`, `slot_states`) sobre el Parquet, no los estados crudos.
+
+**6. Parquet** [R]
+- **Tipos:**
+  - `numeric` como `decimal128(38, 18)`. Si un valor no cabe sin perder dígitos, no se escribe y se avisa; nunca se redondea. Pruebas: negativos, ceros, más de 18 decimales y enteros por encima del máximo.
+  - Las marcas de tiempo, en UTC con microsegundos.
+  - Los niveles de los snapshots, como listas tipadas. La medición los compara con guardar el JSON tal cual.
+- **Compresión:** zstd, con el nivel que dé la medición.
+- **Bibliotecas:** `pyarrow` para escribir y verificar, y DuckDB para las consultas de la medición.
+
+**7. Funciones y roles** (decisión 1, con las condiciones de las dos revisiones)
+- **Tres funciones `SECURITY DEFINER` propiedad de `kbot_owner`:** `market.prepare_partitions()`, `market.seal_day(día)` y `market.retire_day(día)`.
+
+  La de sellar se añade a las dos de la propuesta, dentro de la opción A; el propietario la confirmó el 10 nov 2026. Las excepciones a §9 (propietario `kbot_owner` y SQL dinámico acotado) valen **solo para estas tres**.
+- **Cada función:**
+  - trabaja sobre una lista fija de las doce tablas, escrita dentro de la función;
+  - recibe un argumento `date` validado (sellar y retirar) o ninguno (preparar, que siempre trabaja sobre su rango), sin nombres que aporte quien llama;
+  - fija `SET search_path = market, pg_temp`, `SET TimeZone = 'UTC'` y `SET lock_timeout = '5s'`, y escribe todos los objetos con su esquema;
+  - solo ejecuta `format()` con `%I` y `%L` y una de las cinco plantillas aprobadas: crear una partición, sellarla, contar sus filas, separarla y borrarla. Nunca `CASCADE`;
+  - toma un bloqueo consultivo (`pg_advisory_xact_lock`) contra dos ejecuciones simultáneas y usa `lock_timeout`;
+  - se crea con su `REVOKE ALL ... FROM PUBLIC` en la misma transacción [H].
+- **`EXECUTE`:** `kbot_archive`, solo en preparar y sellar. Retirar no lo tiene nadie en E3.
+- **`kbot_archive`:** LOGIN, conexión `peer` desde su propio usuario del sistema y sin pertenecer a ningún rol. Tiene `SELECT` solo en las doce tablas particionadas y en las cinco del archivo, no en las cinco pequeñas. Tiene `INSERT` solo en las generaciones, sus archivos y sus estados.
+- **`sql_guard`** admite, en las migraciones:
+  - `PARTITION BY RANGE` de una columna `timestamptz` en esas doce tablas, y particiones con límites constantes;
+  - `CREATE FUNCTION` solo `SECURITY DEFINER` en PL/pgSQL, con esas tres opciones `SET`, su `REVOKE` obligatorio y `GRANT EXECUTE` solo según la matriz;
+  - dentro de esas funciones, `EXECUTE` solo con las cinco plantillas, y como sentencias fijas solo lecturas e inserciones en sus propias tablas (sellos y retiradas);
+  - `LOCK`, `SET LOCAL lock_timeout`, `CHECK (false)` y `DROP TABLE` sin `CASCADE`, solo en la `0003` y solo sobre las doce tablas;
+  - en un `CHECK`, solo `date_trunc` y `timezone` con argumentos constantes.
+
+  **Validación cerrada** [revisión de E3a, E3a-01]. Una función `SECURITY DEFINER` solo se admite si su cuerpo coincide byte a byte (SHA-256) con el aprobado en `sql/security_definer_catalog.json`, el mismo archivo que la CI compara con el catálogo real. Un cuerpo nuevo es un cambio revisado de ese archivo. Además, como defensa adicional, `sql_guard`:
+  - rechaza los `WITH` que modifican datos;
+  - solo admite `PERFORM` para el bloqueo consultivo;
+  - no cuenta como revocación un `REVOKE GRANT OPTION FOR`, que deja `EXECUTE`.
+
+  El revisor demostró que, sin esta validación, el análisis por clases aceptaba un `DELETE` dentro de un `WITH` y una plantilla aprobada aplicada a otra tabla.
+
+**8. Medición con datos reales** (punto 66)
+- **Grabación:** un `--sink rows` escribe por tabla las filas que irían a PostgreSQL, construidas con las mismas funciones que `store`. Antes de usar sus medidas, una prueba de la CI demuestra que, para la misma entrada sintética, produce exactamente las filas que guarda `DatabaseSink`.
+- **Conversión:** se graban unas horas en el PC con el universo completo, y una herramienta convierte las filas a Parquet con el formato de arriba.
+- **Qué se mide:**
+  - los bytes por tabla y día, sin comprimir y con zstd 3 y 9;
+  - su proyección a un año frente a §3.1 y §10.3, con margen para índices, WAL, particiones y catálogo;
+  - el tiempo de dos consultas tipo con DuckDB.
+- La medición definitiva, con la base real, es la de E5.
+
+**9. Pruebas de aceptación** (F2-A9 y la lista blanca, en la CI con PostgreSQL 18)
+- **Particiones:**
+  - existen por adelantado y cada fila va a la suya;
+  - tras más de 14 días parado, el arranque prepara el rango de recuperación sin recrear días retirados;
+  - llamar desde sesiones en UTC, Madrid y Nueva York crea las mismas particiones UTC.
+- **Migraciones:**
+  - la `0003` con un escritor concurrente, o con datos, aborta sin cambios;
+  - el esquema `0001 → 0002 → 0003` es exactamente el aprobado;
+  - los SHA-256 de las migraciones ya integradas no cambian.
+- **Sello:**
+  - una fila nueva en un día sellado la rechaza la base;
+  - el grabador la descarta y la cuenta.
+- **Archivo:**
+  - una generación tiene doce archivos de una sola instantánea, con su SHA-256, y al releerla coinciden las filas y la huella;
+  - una caída entre los archivos y la publicación se reintenta sin publicar antes de tiempo;
+  - con dos archivadores a la vez, ni se duplica ni se interfiere;
+  - archivar dos veces no sobrescribe nada, y cada copia restaura su propia generación.
+- **Copias y retirada:**
+  - con el archivo solo local, la partición ni se excluye ni se retira;
+  - con el mismo recuento y otro contenido, la retirada se deniega;
+  - una restauración que mezcla particiones incluidas y excluidas recupera todo desde PostgreSQL y el Parquet.
+- **Bordes de día:**
+  - con evidencia de D que afecta a D+1, D+1 conserva sus estados efectivos al retirar D, también tras restaurar;
+  - una caída durante la separación no pierde filas y se reintenta.
+- **Seguridad:**
+  - una fecha fuera de rango o un intento de inyección se rechazan;
+  - `kbot_ingest` no puede llamar a las funciones;
+  - `kbot_archive` no puede hacer DDL directo ni retirar;
+  - `sql_guard` rechaza cualquier otra plantilla;
+  - la matriz de roles sigue siendo exacta (F2-A7).
+- **Formato:** las pruebas de los decimales y la equivalencia de `--sink rows`.
+
+**Condición expresa:** ningún proceso borra particiones de producción hasta superar una prueba integral de restauración (E4).
+
+**Implementado en E3a** (10 nov 2026; **APROBADO** por el revisor el mismo día, tras tres revisiones: E3a-01 a E3a-04 cerrados):
+- **La migración `0003`**, las cinco tablas del archivo (sellos, generaciones, archivos, estados de la generación y retiradas), las tres funciones y el rol `kbot_archive`.
+- **La ampliación de `sql_guard`.** Analiza el cuerpo PL/pgSQL de las funciones con `pglast`.
+- **La huella de las funciones** en `sql/security_definer_catalog.json`.
+- **Las pruebas** de las migraciones congeladas, de la lista blanca y de la matriz, y en PostgreSQL 18: particiones, funciones, sello, retirada y la `0003` sobre una base nueva con datos y con contención.
+
+Lo aprendido al probarlo:
+- **PostgreSQL impide separar una partición a la que todavía apunta otra de otro día** [H, CI]: retirar el día D+1 antes que D falla sin cambiar nada, y en orden cronológico se retiran los dos.
+- **Una partición referenciada no se puede borrar sin separarla antes** (`DependentObjectsStillExist`) [H, CI]. Por eso retirar separa primero y borra después.
+- **Una consulta sobre una tabla particionada bloquea cada partición que no puede descartar**, con sus índices. Con unas 3.000 particiones de prueba, la CI agotó la tabla de bloqueos («out of shared memory») [H, CI]. Por eso:
+  - las pruebas crean y borran sus propias particiones;
+  - la CI usa `max_locks_per_transaction = 256` [R: el mismo valor en el servidor, E4; con unas 1.250 particiones activas se mide en E5].
+
+**Falta, para E3b y E3c:**
+- que la evidencia no cruce de día (`depth_late_books` por día);
+- que el grabador descarte la evidencia de un día sellado;
+- el archivador (generación, huella canónica, verificación y publicación);
+- `--sink rows` y su equivalencia con `DatabaseSink`;
+- la medición del Parquet.
+
+**Implementado en E3b** (10 nov 2026; **APROBADO** por el revisor el mismo día, tras tres revisiones: E3b-01 a E3b-03 cerrados):
+- **La evidencia no cruza de día** [H, CI]. `depth_late_books` tiene `first_slot_start`, que es su clave de partición:
+  - cada fila nombra intervalos de un solo día UTC, con claves foráneas a `first_slot_start` y `last_slot_start` y un `CHECK` del mismo día;
+  - `slot_start` guarda el intervalo de su `P`;
+  - `write_late_books` parte por días el libro que cruza la medianoche, y `slot_states` lee el rango de cada fila.
+
+  Retirar el día D ya no cambia lo que cuentan los intervalos de D+1.
+- **El grabador no escribe evidencia de un día sellado:** `write_late_minutes` y `write_late_books` la descartan con un aviso en el registro, sin fallar. Por eso `kbot_ingest` puede leer `archive_seals`. Además, cada inserción de evidencia tardía va en su propio *savepoint*. Si el día se sella entre la comprobación y la inserción, solo esa fila se deshace y se descarta, porque viola el `CHECK` `*_sellada`; el resto del tick se guarda, y cualquier otro error se propaga (revisión de E3b, E3b-01).
+- **El archivador** (`kbot.archive`, que se ejecuta como `kbot_archive`) tiene cuatro pasos:
+  - `prepare` llama a `market.prepare_partitions()`;
+  - `seal` sella cada día de [hoy − 30, hoy − 3] cerrado y no sellado;
+  - `archive` da a cada día sellado una generación:
+    - sus doce archivos salen de una sola instantánea `REPEATABLE READ`;
+    - se escriben en un directorio temporal, se sincronizan con el disco, se releen y se comparan con sus filas, por número y por huella;
+    - se sincroniza el directorio que los contiene; se renombra a su generación, y se sincronizan el día, `market` y la raíz. Cualquier error de E/S, también de un directorio, detiene la publicación (E3b-02). La única excepción es Windows, que no puede abrir un directorio para sincronizarlo y solo se usa en las pruebas;
+    - **la raíz del archivo debe existir de antemano.** La crea de forma durable la instalación del servidor (E4), nunca el archivador. Si no existe, se niega antes de escribir nada. Dentro de ella, `market` y el día se crean nivel a nivel, así que cada entrada nueva queda en un directorio que se sincroniza (segunda revisión de E3b);
+    - solo entonces se publica, en una transacción;
+    - lo que deja un intento que no llegó a publicarse se borra en la siguiente ejecución;
+    - un bloqueo consultivo de sesión impide que trabajen dos archivadores a la vez;
+  - `verify` es la comprobación diaria: cada día archivado que sigue en la base conserva el sello en sus doce particiones y la huella de su última generación.
+
+  La comprobación diaria detecta y avisa; no rehace generaciones por su cuenta, porque con el sello solo un administrador puede cambiar un día sellado [R].
+- **Formato en E3b:**
+  - `numeric` como `decimal128(38, 18)`, exacto o rechazado, nunca redondeado;
+  - marcas de tiempo UTC en microsegundos;
+  - `jsonb` como su texto JCS (la medición de E3c lo compara con las listas tipadas). Se lee como texto, así que el `null` de JSON se archiva como `null` y nunca como un valor que falta (E3b-03);
+  - zstd de nivel 3, provisional.
+
+  La huella canónica está en `kbot/archive/canonical.py`. Dependencia nueva: `pyarrow` 26.
+
+**Falta, para E3c:**
+- `--sink rows` y su equivalencia con `DatabaseSink`;
+- la grabación en el PC;
+- la medición: tamaño por tabla y día con zstd 3 y 9, consultas con DuckDB y tiempo de planificación con unas 1.250 particiones.
+
+**Implementado en E3c** (11 nov 2026; **APROBADO** por el revisor el mismo día, tras cuatro revisiones: E3c-01 a E3c-07 cerrados):
+- **`--sink rows`** (`kbot/ingest/rows.py`). Ejecuta los mismos escritores de `store` que `DatabaseSink` sobre una conexión que no ejecuta nada, y escribe cada INSERT como una línea JSON por tabla.
+  - Descarta una fila con la clave primaria de otra, como PostgreSQL: con `ON CONFLICT DO NOTHING` conserva la primera, y sin él falla (E3c-04). Para ello guarda un resumen de 16 bytes de cada clave, unos 150 MB por día.
+  - **Marcas de progreso** (E3c-01, segunda revisión). Cada archivo tiene su propio búfer, así que una grabación parada de golpe puede conservar más de un archivo que de otro. Tras cada escritura, `RowSink` vacía todos sus archivos y después añade a `_progress.jsonl` las filas que tenía cada uno. La medición solo usa las filas de la última marca que alcanzan todos los archivos. Las marcas cuentan desde el principio de los archivos de su ejecución, así que la carpeta de una grabación debe ser nueva o estar vacía. Si no lo está, `RowSink` y la orden `--sink rows` la rechazan antes de abrir nada (E3c-07).
+  - No produce lo que se decide en SQL al cerrar el día (`minute_status` y las filas S3 con que `fill_missing_flow` rellena los minutos sin flujo) ni la evidencia tardía de minutos. Son pocas filas, y una grabación sin cortes no tiene relleno.
+  - **Equivalencia** [H, CI] (`tests/db/test_rows_equivalence.py`). Con los ticks del núcleo, un libro tardío repetido y una ejecución completa del grabador con sus escritores REST, los archivos y PostgreSQL tienen las mismas filas, tabla a tabla. La comparación es en la forma canónica del archivo, sobre todas las columnas salvo `recorded_at`; las columnas que ningún INSERT nombra llevan su valor por defecto. Las únicas tablas que solo tiene PostgreSQL son las excluidas a propósito.
+- **Grabación** en el PC del propietario, del 10 nov 2026 a las 22:55 UTC al 11 nov a las 00:54 UTC, con el universo de referencia de §3.1 (20 + 20 pares, 10 + 10 candidatos de nivel 50). Debía durar 3 h, pero el proceso se paró al cerrarse la sesión que lo lanzó.
+  - **Ventana medida:** los **117 minutos completos**, de 22:56 a 00:53 UTC (E3c-01). Un minuto es completo si tiene tantas filas de calidad como el más lleno y sus seis intervalos tantos estados como el más lleno. Los dos bordes, a medio escribir, quedan fuera, y las tablas de filas escasas nunca fijan la ventana. Además, en cada minuto de la ventana debe haber tantas métricas como intervalos válidos, porque las métricas de un intervalo se escriben justo después de su estado. Si los últimos minutos no cuadran, quedan fuera; si falla uno intermedio, la grabación se rechaza.
+  - **La muestra es anterior a las marcas**, así que la herramienta solo la lee con `--unmarked`. Pasa la comprobación anterior: 41.190 intervalos válidos y 41.190 métricas, como confirmó el revisor.
+  - **La extrapolación a un día y a un año es condicional:** supone que el volumen por minuto de esas dos horas se mantiene.
+  - **Huecos:** 506 en la ventana (≈ 6.200 al día). Vienen de unos pocos episodios que afectan a todos los canales a la vez: conexiones sin pong en la red doméstica, una desconexión y la rotación del universo a medianoche. Cada episodio crea una fila por canal.
+- **Medición** (`tools/measure_archive.py`, reproducible byte a byte con la muestra). Convierte la grabación en los archivos del archivo: por tabla y día UTC, con los tipos y el orden de `0003` y grupos de 20.000 filas. `minute_status` se estima con una fila por minuto de `trade`, y `recorded_at` se aproxima. La carpeta de salida debe ser nueva o estar vacía (E3c-05). Resultados por día, escalados de 117 a 1.440 minutos [H, PC]:
+
+  | Tabla | Filas al día | Parquet sin comprimir | zstd 3 | zstd 9 | PostgreSQL (B/fila) |
+  |---|---|---|---|---|---|
+  | `depth_metrics` | 506.954 | 92,4 MB | 55,2 MB | 51,9 MB | 290 |
+  | `depth_snapshots` | 86.031 | 71,9 MB | 17,3 MB | 14,8 MB | 1.019 |
+  | `depth_slot_status` | 518.400 | 10,4 MB | 4,5 MB | 4,5 MB | 283 |
+  | `candles` | 114.572 | 10,7 MB | 5,8 MB | 5,4 MB | 425 |
+  | `ws_candles` | 57.182 | 6,5 MB | 3,5 MB | 3,2 MB | 246 |
+  | `data_quality_minute` | 144.000 | 1,8 MB | 0,7 MB | 0,7 MB | 307 |
+  | `minute_status` (estimada) | 57.600 | 0,7 MB | 0,3 MB | 0,3 MB | 218 |
+  | **Total** | 1.484.739 | **194 MB** | **87,3 MB** | **80,8 MB** | **501 MB al día** |
+
+  Parquet al año: 70,9 GB sin comprimir, **31,9 GB con zstd 3** y 29,5 GB con zstd 9.
+- **PostgreSQL 18 en la CI** (`tests/db/test_storage_scale.py`) [H, CI]:
+  - **Bytes por fila** (montón, TOAST e índices: la última columna de la tabla), con una hora de un universo sintético realista con la mezcla de referencia: dos libros de nivel 5 por cada uno de nivel 50, que la prueba exige (E3c-02). Un libro ocupa 430 B de datos en nivel 5 y 1.749 B en nivel 50.
+  - **Los índices son el 42 % del total**, porque `data_quality_minute` y `depth_slot_status` tienen dos índices únicos: la clave primaria y el único con el estado, destino de las claves foráneas.
+  - **WAL escrito:** entre 487 y 758 B por fila según la ejecución, porque depende de las imágenes de página completa tras cada punto de control. Son unos 0,7-1,1 GB al día.
+  - **Con 1.260 particiones** (90 días calientes, hoy y los 14 preparados):
+    - planificar las consultas de reanudación del grabador, que recorren las 105 particiones de su tabla, tarda 5-8 ms, o 21-31 ms en una conexión nueva;
+    - una consulta de un día, podada a una partición, tarda menos de 1 ms;
+    - una inserción, 0,01 ms.
+  - **`prepare_partitions()`** crea 492 particiones en 1,8-2,8 s (4-6 ms cada una). Su ejecución diaria, sin nada que crear, tarda 0,03-0,04 s.
+  - **Cada partición vacía** ocupa unos 25 KB: los archivos de sus índices y de su TOAST, y sus filas del catálogo. Las 1.260 suman 32 MB.
+- **DuckDB** (2.0, dependencia de desarrollo; mediana de 5) [H, PC]:
+  - la serie de un instrumento tarda 7,9 ms sobre lo grabado;
+  - el agregado de todo el universo tarda 12 ms;
+  - los «90 días» son un **ensayo sintético**: 1.108 lecturas repetidas de los mismos archivos. Procesan las filas de 90 días, pero no sus archivos ni su caché, y dan ≈ 1,0 s y ≈ 2,4 s.
+- **Formato de los libros:** se mantiene el **texto JCS**. Las listas tipadas `decimal128` ocupan un 53 % más con zstd 3 (26,5 frente a 17,3 MB al día), y leer el primer nivel de todos los libros solo ahorra unos 7 ms.
+- **Proyección** (§3.1 y §10.3), con la extrapolación condicional de arriba. El montón medido, 284 MB al día, coincide con la estimación de §3.1 (259 MB), pero **la estimación no contaba los índices**, que añaden 211 MB:
+  - **base de datos con 90 días calientes:** 45,1 GB, más las particiones (0,03 GB) y una **reserva estimada** de WAL de 1,07 GB, son 46,2 GB. **Con el 20 % de margen de §3.1, 55,5 GB**; la estimación era de ≈ 28 GB. La reserva de WAL es `max_wal_size`, un límite blando que PostgreSQL puede superar, así que no es una cota (E3c-06);
+  - **`data_gaps`:** sin particionar y sin retención decidida, así que crece cada día y no entra en los 90 días (E3c-03). Con ≈ 6.200 filas al día y la mayor medida por fila (1.019 B, una cota superior), son 2,8 GB tras el año 1 y 5,6 GB tras el año 2, con el margen;
+  - **Parquet:** 31,9 GB al año con zstd 3, en el extremo alto del rango estimado (12-32 GB);
+  - **volumen de datos de 110 GB (§10.3):** **el año 1 cabe (90,1 GB)**; **el año 2 no cabe (124,8 GB)**.
+- **Decisión pendiente del propietario**, antes del segundo año y tras la medición definitiva de E5 (§3.1: «se reducen las frecuencias o el universo, con decisión del propietario»). Opciones, ninguna decidida:
+  - **reducir los índices** (técnica): por ejemplo, que el índice único con estado sustituya a la clave primaria en las dos tablas citadas. Requiere otra migración y su revisión;
+  - **zstd 9:** ahorra un 7 % del Parquet (2,4 GB al año). Se archiva una vez al día, así que el coste de CPU no importa. **Propuesta [R]: zstd 9**, pendiente de la revisión de E3c; de momento sigue el 3;
+  - **una retención para `data_gaps`**, ya prevista como asunto aparte;
+  - **menos días calientes** ([D17]);
+  - **una retención del Parquet;**
+  - **reducir el universo o las frecuencias.**
 
 ## 4. Eventos y recuperación
 
@@ -1460,4 +1734,21 @@ $$\Delta Cap=\underbrace{8}_{\text{distancia mark-stop de lo cerrado}}+\underbra
 | 9 nov 2026 | **Sexta revisión de E2 (commit `970dec0`), del mismo revisor, con PostgreSQL 18: APROBABLE CON CORRECCIONES.** R5-E2-01 y R5-E2-02 resueltos en sus casos; juzgar la evidencia tardía desde la base, correcto. Tres hallazgos MEDIOS y uno BAJO, corregidos en la misma rama: **R6-E2-01** una vela que llegaba mientras se esperaba la respuesta REST se usaba para decidir antes de guardarse; ahora la evidencia tardía solo se usa cuando la base la tiene; **R6-E2-02** descartar una vela reenviada igual perdía su `P`; ahora su hora se guarda en la nueva `late_ws_repeats` y una vela anterior a ella nunca pasa por la última; **R6-E2-03** una vela posterior de volumen 0 hacía olvidar que se habían visto operaciones; ahora no se olvida (3.5 y 3.8); **R6-E2-04** (BAJO) las pruebas del grabador con PostgreSQL compartían días al azar y podían verse entre sí; ahora cada ejecución tiene un día propio | Revisor; correcciones de Claude **revisadas el 9 nov 2026 (fila siguiente)** |
 | 9 nov 2026 | **Séptima revisión de E2 (commit `c71f498`), del mismo revisor: APROBABLE CON CORRECCIONES.** R6-E2-01, R6-E2-02 y R6-E2-04 resueltos, sin otras reaperturas ni defectos nuevos. **R6-E2-03** parcial (MEDIO): haber visto operaciones solo se conservaba si sobrevivía la vela que lo mostraba; se perdía si una vela posterior de volumen 0 la sustituía antes del cierre, o si llegaba siendo más antigua que la última, antes o después del cierre. Corregido en la misma rama: ese hecho va aparte de cuál es la última vela. A tiempo, la columna nueva `traded` de `ws_candles`; tarde, una vela anterior con el primer volumen del minuto se guarda en `late_ws_candles` sin pasar nunca por la última (3.5 y 3.8) | Revisor; corrección de Claude **revisada el 9 nov 2026 (fila siguiente)** |
 | 9 nov 2026 | **Octava revisión de E2 (commit `3e82f11`), con un revisor que no pudo ejecutar las pruebas (Python 3.13 y sin las dependencias): R6-E2-03 RESUELTO**, en las tres secuencias. No encuentra reaperturas. Un caso límite nuevo, **N-E2-01** (MEDIO, sujeto a que KuCoin pueda producirlo): una vela tardía distinta, con volumen y con la misma `P` que la última, se guardaba y la elección de la última vela por `P` quedaba sin determinar. Corregido en la misma rama: una vela con la misma `P` que la máxima vista no es más reciente; si solo muestra operaciones, se guarda con `latest = false` y la última vela se elige solo entre las guardadas como última, cuya `P` crece siempre. `latest` forma parte de la clave de `late_ws_candles`, porque esa vela puede tener la misma `P` que una vela tardía guardada como última (3.5 y 3.8) | Revisor; corrección de Claude **revisada el 9 nov 2026 (fila siguiente)** |
-| 9 nov 2026 | **Novena revisión de E2 (commit `5d4e792`), del mismo revisor, que tampoco pudo ejecutar la batería completa: N-E2-01 RESUELTO**, también en el tercer empate que Claude encontró al preparar la entrega: con una vela tardía guardada como última, resuelto con `latest` en la clave de `late_ws_candles`. R6-E2-03 sigue resuelto. Ninguna reapertura ni defecto nuevo demostrado, y no hace falta otra restricción de unicidad. El revisor aprueba técnicamente la corrección y no pide otra ronda. Su única reserva para integrar la rama en `main` es confirmar la CI completa de ese commit, que no pudo consultar: ejecución 42592485155, en verde con 884 pruebas y gitleaks sin hallazgos | Revisor; **pendiente de la aprobación del propietario y de la integración en `main`** |
+| 9 nov 2026 | **Novena revisión de E2 (commit `5d4e792`), del mismo revisor, que tampoco pudo ejecutar la batería completa: N-E2-01 RESUELTO**, también en el tercer empate que Claude encontró al preparar la entrega: con una vela tardía guardada como última, resuelto con `latest` en la clave de `late_ws_candles`. R6-E2-03 sigue resuelto. Ninguna reapertura ni defecto nuevo demostrado, y no hace falta otra restricción de unicidad. El revisor aprueba técnicamente la corrección y no pide otra ronda. Su única reserva para integrar la rama en `main` es confirmar la CI completa de ese commit, que no pudo consultar: ejecución 42592485155, en verde con 884 pruebas y gitleaks sin hallazgos | Revisor; **aprobada por el propietario e integrada en `main` el 9 nov 2026** (pull request #4, `3e4142b`) |
+| 9 nov 2026 | **Cabecera al día:** estado de implementación y de validación de la Fase 1 y de las etapas E1 y E2 de la Fase 2 | Claude |
+| 9 nov 2026 | **E3: histórico público de KuCoin medido** (3.7). El índice de Classic solo cubre unos 100 días (B3). Las velas de un par deslistado solo se conservan unas semanas tras su retirada (B13). Detalle y herramienta en `docs/kucoin/historico.md` y `tools/kucoin_history.py` | Claude (alcance aprobado de la F2); **pendiente de revisión** |
+| 9 nov 2026 | **Propuesta de E3, almacenamiento histórico** (3.9): particiones por día UTC en doce tablas de `market`, archivo en Parquet con SHA-256 y manifiesto, borrado a los 90 días, formato Parquet exacto, ampliación de la lista blanca y medición con datos reales. **Dos decisiones del propietario:** quién crea y borra las particiones (recomendación: dos funciones acotadas y un rol `kbot_archive`, con dos excepciones de §9) y cómo se cambia el esquema (recomendación: corregir la `0002`, que ninguna base ha aplicado) | Claude (alcance aprobado de la F2); **revisada el 9 nov 2026 (fila siguiente)** |
+| 9 nov 2026 | **Revisión del diseño de E3, en dos rondas** (la primera, con el modelo anterior del revisor; la segunda, con el auditor actual): **APROBABLE CON CORRECCIONES DE DISEÑO**. Hallazgos:<br>· **E3-D01 (ALTO):** archivar no es tener una copia recuperable, así que no se excluye ni se retira nada sin un Parquet verificado fuera del servidor.<br>· **E3-D02:** estados persistentes, una instantánea coherente, recuperación idempotente y una huella canónica.<br>· **E3-D03:** pruebas reales de las claves foráneas entre días, y nunca `CASCADE`.<br>· **E3-D04:** no modificar la `0002`.<br>Condiciones de la segunda ronda:<br>· la evidencia tardía puede cambiar un día archivado, y por eso se sella el día;<br>· retirar el día D mejoraba los estados de D+1, y por eso la evidencia ya no cruza de día;<br>· generaciones completas con referencias fijas;<br>· bloquear las doce tablas antes de comprobar que están vacías, y alinear los minutos a UTC;<br>· preparar el rango de recuperación y fijar UTC.<br>**Decisiones del propietario:** funciones `SECURITY DEFINER` acotadas con el rol `kbot_archive` (opción A) y una migración nueva, la `0003` (opción B). §3.9 reescrito con todo ello. Se añade una tercera función, la de sellar, dentro de la opción A | Revisor y propietario; **función de sellar confirmada por el propietario el 10 nov 2026; implementación en la fila siguiente** |
+| 10 nov 2026 | **E3a implementada** (3.9):<br>· la migración `0003`, que rehace las doce tablas particionadas por día UTC si están vacías;<br>· las tablas del archivo;<br>· `prepare_partitions()`, `seal_day(date)` y `retire_day(date)`, esta última sin `EXECUTE` para nadie;<br>· el rol `kbot_archive`;<br>· `sql_guard`, que analiza el cuerpo PL/pgSQL de las funciones con cinco plantillas;<br>· las migraciones de `main` congeladas por SHA-256.<br>Comprobado en la CI: PostgreSQL impide separar una partición referenciada desde otro día, y hacen falta más bloqueos por transacción (`max_locks_per_transaction = 256`) | Claude; **revisada el 10 nov 2026 (fila siguiente)** |
+| 10 nov 2026 | **Revisión de E3a (commit `bc9af63`), del auditor actual: APROBABLE CON CORRECCIONES.** Confirma las 960 pruebas y, en su entorno con PostgreSQL 18, 958 correctas (las dos restantes necesitan `sudo`).<br>· **E3a-01 (ALTO):** `sql_guard` aceptaba, dentro de una función, un `DELETE` en un `WITH`, una plantilla aprobada aplicada a otra tabla, un `PERFORM` con efectos y un `REVOKE GRANT OPTION FOR`. Corregido con la validación cerrada de los cuerpos aprobados.<br>· **E3a-02:** `seal_day` sellaba días incompletos. Ahora exige 1.440 estados por instrumento del día.<br>· **E3a-03:** una escritura podía colarse entre la comprobación y las barreras. Ahora las barreras van primero y se exige READ COMMITTED.<br>· **E3a-04 (BAJO):** el catálogo no miraba propietario ni permisos. Ahora sí.<br>Además, se precisan los `SELECT` de `kbot_archive` (3.9) | Revisor; correcciones de Claude **revisadas el 10 nov 2026 (fila siguiente)** |
+| 10 nov 2026 | **Segunda revisión de E3a (commit `7654ec1`): APROBABLE CON CORRECCIONES MENORES.** E3a-01, E3a-02 y E3a-03 RESUELTOS; la ampliación de la lista blanca queda conforme para los tres cuerpos aprobados. El revisor repitió la batería sobre una base limpia: 971 correctas (las dos restantes necesitan `sudo`). **E3a-04, parcial (BAJO):** faltaban los permisos de columna (`pg_attribute.attacl`). Corregido: el catálogo los comprueba también, para cualquier otro rol y para `PUBLIC` (3.9) | Revisor; corrección de Claude **confirmada el 10 nov 2026 (fila siguiente)** |
+| 10 nov 2026 | **Tercera revisión de E3a (commit `47630aa`): E3a-04 RESUELTO. Dictamen final: APROBADO.** Los cuatro hallazgos E3a-01 a E3a-04 cerrados, sin reaperturas ni defectos nuevos; la ampliación de la lista blanca, conforme para los tres cuerpos aprobados. El revisor ejecutó 184 pruebas y contrastó la CI (973 pruebas, gitleaks sin hallazgos). La aprobación cubre E3a; E3b y E3c se revisan aparte | Revisor |
+| 10 nov 2026 | **E3b implementada** (3.9):<br>· `depth_late_books` parte por días la evidencia (`first_slot_start`), y retirar un día ya no cambia el siguiente;<br>· el grabador no escribe evidencia de días sellados;<br>· el archivador `kbot.archive` (`prepare`, `seal`, `archive` y `verify`) escribe generaciones de doce archivos Parquet desde una sola instantánea, verificadas por filas y huella canónica, publicadas en una transacción, con limpieza de lo no publicado y un solo archivador a la vez;<br>· dependencia `pyarrow` 26 | Claude; **revisada el 10 nov 2026 (fila siguiente)** |
+| 10 nov 2026 | **Revisión de E3b (commit `33dfcb2`): APROBABLE CON CORRECCIONES**, con tres hallazgos MEDIOS. El reparto de la evidencia por días resuelve el caso de D a D+1, sin reaperturas de E3a. El revisor confirma 999 pruebas; en su entorno, 997 correctas (las otras dos necesitan `sudo`).<br>· **E3b-01:** si el día se sellaba entre la comprobación y la inserción, el tick entero se deshacía. Ahora cada inserción va en su *savepoint* y solo se descarta la fila que viola el sello.<br>· **E3b-02:** el directorio de la generación y sus padres no se sincronizaban, y un error de E/S de un directorio se silenciaba. Ahora la secuencia está completa, los errores se propagan y nada se publica si algo falla.<br>· **E3b-03:** el `null` de JSON se archivaba como un valor que falta, sin que la huella lo notara. Ahora el `jsonb` se lee como texto | Revisor; correcciones de Claude **revisadas el 10 nov 2026 (fila siguiente)** |
+| 10 nov 2026 | **Segunda revisión de E3b (commit `56da65f`): APROBABLE CON CORRECCIONES.** E3b-01 y E3b-03 RESUELTOS: el revisor reprodujo el sellado concurrente con dos conexiones y comprobó el `null` de JSON. Ejecutó 1.001 pruebas con PostgreSQL 18.6 (las otras dos necesitan `sudo`). **E3b-02, parcial (BAJO):** si la raíz del archivo no existía, se creaba con sus ancestros sin sincronizar los directorios que los contienen. Corregido: la raíz debe existir de antemano, el archivador se niega sin ella antes de escribir nada, y dentro de ella crea los directorios nivel a nivel | Revisor; corrección de Claude **confirmada el 10 nov 2026 (fila siguiente)** |
+| 10 nov 2026 | **Tercera revisión de E3b (commit `4fe6d06`): E3b-02 RESUELTO. Dictamen final: APROBADO.** Los tres hallazgos E3b-01 a E3b-03 cerrados, sin reaperturas de E3a ni defectos nuevos. El revisor ejecutó 1.006 pruebas con PostgreSQL 18.6 (las otras dos necesitan `sudo`) y contrastó la CI (1.008 pruebas, gitleaks sin hallazgos). La aprobación cubre E3b; E3c se revisa aparte | Revisor |
+| 11 nov 2026 | **E3c implementada** (commits `7daff5f` a `54f5b76`, y el de la documentación): `--sink rows` con su prueba de equivalencia en la CI; grabación de 119 minutos en el PC con el universo de referencia; medición del Parquet y de DuckDB (`tools/measure_archive.py`); y medición en PostgreSQL 18 de bytes por fila, WAL, catálogo y planificación con 1.260 particiones. Resultado (§3.9, «Implementado en E3c»): con margen, la base de datos con 90 días calientes ocupa ≈ 54,8 GB, frente a ≈ 28 GB estimados, porque la estimación no contaba los índices. El año 1 cabe en los 110 GB y el año 2 no. Decisión pendiente del propietario; **pendiente de revisión** | Claude |
+| 11 nov 2026 | **Revisión de E3c (commit `41963f3`): APROBABLE CON CORRECCIONES**, con tres hallazgos MEDIOS y tres BAJOS. El revisor comprobó los SHA-256 de la muestra y reprodujo exactamente los tamaños de `measure.json` y la proyección, y también los 487 B de WAL por fila. Hallazgos: **E3c-01** (MEDIO), el recorte incluía un minuto incompleto y una tabla de filas escasas podía fijarlo; **E3c-02** (MEDIO), la prueba de la CI usaba un 23 % de libros de nivel 50 en lugar del 33 % de referencia (1.019 frente a 872 B por libro); **E3c-03** (MEDIO), `data_gaps` se proyectaba con 90 días, aunque no tiene retención; **E3c-04** (BAJO), `RowSink` escribía dos veces una fila que PostgreSQL descarta; **E3c-05** (BAJO), reutilizar `--out` mezclaba mediciones; **E3c-06** (BAJO), `max_wal_size` se presentaba como cota. Corregidos en `dafe12c`, `420a532`, `72c5a55` y `d16d527` (§3.9, «Implementado en E3c»). Con 117 minutos completos, la proyección queda en 90,1 GB el año 1 y 124,8 GB el año 2 | Revisor; corrección de Claude **revisada en la fila siguiente** |
+| 11 nov 2026 | **Segunda revisión de E3c (commit `18fd14b`): APROBABLE CON CORRECCIONES.** E3c-02 a E3c-06 RESUELTOS. **E3c-01 PARCIAL (MEDIO):** los dos archivos de control no acreditan que los demás estén completos. Cada archivo tiene su búfer, y el revisor demostró que, con los de control íntegros y las métricas del último minuto truncadas, se aceptaba ese minuto (73 métricas, 3 × 24 + 1). En la muestra entregada no hay pérdida: confirmó los 117 minutos, los 506 huecos, que los 41.190 intervalos válidos tienen sus 41.190 métricas, y los 90,1076 y 124,7648 GB. Corregido: marcas de progreso en `RowSink`, uso de la última marca que alcanzan todos los archivos, comprobación de métricas frente a intervalos válidos, y rechazo de una grabación sin marcas salvo con `--unmarked` (§3.9). El revisor ejecutó 1.023 pruebas con PostgreSQL 18.6 y contrastó la CI (1.025 pruebas, gitleaks sin hallazgos en 83 commits) | Revisor; corrección de Claude **confirmada en la fila siguiente** |
+| 11 nov 2026 | **Tercera revisión de E3c (commit `820c361`): E3c-01 RESUELTO; E3c-01 a E3c-06 cerrados. Dictamen: APROBABLE CON CORRECCIONES**, por un hallazgo nuevo. **E3c-07 (BAJO):** reutilizar la carpeta de una grabación invalidaba las marcas, porque los contadores vuelven a cero en cada ejecución mientras los archivos se abren para añadir. El revisor lo demostró con dos ejecuciones de dos minutos: la medición tomaba solo la primera. Corregido: la carpeta debe ser nueva o estar vacía, y se comprueba antes de abrir nada (§3.9). La muestra antigua reproduce los 117 minutos y los 90,1 y 124,8 GB. El revisor ejecutó 1.027 pruebas con PostgreSQL 18.6 y contrastó la CI (1.029 pruebas, gitleaks sin hallazgos en 84 commits) | Revisor; corrección de Claude **confirmada en la fila siguiente** |
+| 11 nov 2026 | **Cuarta revisión de E3c (commit `fc68cca`): E3c-07 RESUELTO. Dictamen final: APROBADO.** Los siete hallazgos E3c-01 a E3c-07 cerrados, sin reaperturas ni defectos nuevos. El revisor ejecutó 110 pruebas, incluidas las de equivalencia con PostgreSQL 18.6, y contrastó la CI (1.030 pruebas, gitleaks sin hallazgos en 85 commits). La aprobación técnica cubre E3c; **la decisión de capacidad del año 2 sigue pendiente del propietario** | Revisor |

@@ -21,6 +21,10 @@ CREATE ROLE kbot_telegram LOGIN PASSWORD NULL CONNECTION LIMIT 5;
 CREATE ROLE kbot_backup LOGIN PASSWORD NULL CONNECTION LIMIT 2;
 GRANT pg_read_all_data TO kbot_backup;
 
+-- Historical archive (phase 2, stage E3, 02 §3.9): reads market, writes the archive
+-- tables and calls only the partition functions it is granted. It owns nothing.
+CREATE ROLE kbot_archive LOGIN PASSWORD NULL CONNECTION LIMIT 2;
+
 -- Provisional values, to be adjusted with the consumption measured in phase 2.
 ALTER ROLE kbot_ingest SET statement_timeout = '30s';
 ALTER ROLE kbot_news SET statement_timeout = '30s';
@@ -31,6 +35,7 @@ ALTER ROLE kbot_watchdog SET statement_timeout = '30s';
 ALTER ROLE kbot_web SET statement_timeout = '30s';
 ALTER ROLE kbot_telegram SET statement_timeout = '30s';
 ALTER ROLE kbot_backup SET statement_timeout = 0;
+ALTER ROLE kbot_archive SET statement_timeout = '1h';
 
 -- The project database. PUBLIC loses its default CONNECT and TEMPORARY rights, so no
 -- service can create objects even in a temporary schema.
@@ -38,4 +43,4 @@ CREATE DATABASE kbot OWNER kbot_owner;
 REVOKE ALL ON DATABASE kbot FROM PUBLIC;
 GRANT CONNECT ON DATABASE kbot TO
     kbot_ingest, kbot_news, kbot_strategy, kbot_risk, kbot_broker,
-    kbot_watchdog, kbot_web, kbot_telegram, kbot_backup;
+    kbot_watchdog, kbot_web, kbot_telegram, kbot_backup, kbot_archive;

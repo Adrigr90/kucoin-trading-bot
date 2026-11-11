@@ -5,6 +5,9 @@ authentication (``--sink db``, the default). On a PC without PostgreSQL, ``--sin
 writes JSON lines to a folder for a short live check, for example::
 
     uv run python -m kbot.ingest --sink file --out C:/temp/grabacion --minutes 15
+
+``--sink rows`` writes instead the rows PostgreSQL would receive, one JSON line per row in
+``<out>/<table>.jsonl``, to measure the archive with real data (02 §3.9, stage E3c).
 """
 
 from __future__ import annotations
@@ -21,6 +24,7 @@ import psycopg
 import structlog
 
 from kbot.db.roles import DATABASE, SOCKET_DIR
+from kbot.ingest.rows import RowSink
 from kbot.ingest.service import Recorder
 from kbot.ingest.sinks import DatabaseSink, FileSink, Sink
 
@@ -46,6 +50,16 @@ async def _main(arguments: argparse.Namespace) -> int:
         loop.call_later(arguments.minutes * 60, stop.set)
 
     sink: Sink
+    if arguments.sink == "rows":
+        row_sink = RowSink(arguments.out)
+        try:
+            await Recorder(row_sink).run(stop)
+        finally:
+            row_sink.close()
+        summary = "\n".join(f"{key}: {value}" for key, value in sorted(row_sink.counts.items()))
+        print(summary)
+        (arguments.out / "summary.txt").write_text(summary + "\n", encoding="utf-8")
+        return 0
     if arguments.sink == "file":
         file_sink = FileSink(arguments.out)
         await Recorder(file_sink).run(stop)
@@ -62,12 +76,15 @@ async def _main(arguments: argparse.Namespace) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="KuCoin public market data recorder")
-    parser.add_argument("--sink", choices=("db", "file"), default="db")
+    parser.add_argument("--sink", choices=("db", "file", "rows"), default="db")
     parser.add_argument("--out", type=Path, default=Path("grabacion"))
     parser.add_argument("--minutes", type=float, default=0, help="stop after this many minutes")
+    arguments = parser.parse_args()
+    if arguments.sink == "rows" and arguments.out.exists() and any(arguments.out.iterdir()):
+        parser.error(f"--sink rows needs a new or empty --out folder: {arguments.out}")
     _configure_logging()
     try:
-        return asyncio.run(_main(parser.parse_args()))
+        return asyncio.run(_main(arguments))
     except KeyboardInterrupt:
         return 0
 

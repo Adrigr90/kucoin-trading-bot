@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import secrets
 from collections.abc import Callable, Iterator
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -59,6 +59,21 @@ def book(sequence: int, published: datetime) -> dict[str, Any]:
 def ingest(connect: Connect) -> Iterator[psycopg.Connection]:
     with connect("kbot_ingest") as conn:
         yield conn
+
+
+RandomDay = Callable[[], datetime]
+
+
+@pytest.fixture
+def random_day(partitions: Callable[[date, date], None]) -> RandomDay:
+    """A day of its own at random, from 7 November 2026 on, with its partitions (02 §3.9)."""
+
+    def pick() -> datetime:
+        day = datetime(2026, 11, 7, tzinfo=UTC) + timedelta(days=secrets.randbelow(3000))
+        partitions(day.date(), day.date() + timedelta(days=1))
+        return day
+
+    return pick
 
 
 def test_f2_a5_a_stop_and_a_restart(ingest: psycopg.Connection) -> None:
@@ -154,7 +169,9 @@ def test_a_late_book_is_kept_and_its_slots_count_as_late(ingest: psycopg.Connect
     assert late == [(at(10), at(20), 2, at(19.5), at(33))]
 
 
-def test_late_evidence_is_judged_from_the_database_alone(ingest: psycopg.Connection) -> None:
+def test_late_evidence_is_judged_from_the_database_alone(
+    ingest: psycopg.Connection, random_day: RandomDay
+) -> None:
     """Reviews of E2, fourth to sixth rounds, from the database: seven minutes closed as S1
     with no trade in time. Late trades and candles are handed to the database, which keeps
     what changes each minute:
@@ -196,7 +213,7 @@ def test_late_evidence_is_judged_from_the_database_alone(ingest: psycopg.Connect
     )
 
     symbol = "Q" + secrets.token_hex(5).upper() + "-USDT"
-    day = datetime(2026, 11, 7, tzinfo=UTC) + timedelta(days=secrets.randbelow(3000))
+    day = random_day()
     m = [day + timedelta(minutes=i) for i in range(7)]
     tick = Decimal("0.1")
     ingest.execute(  # the tick size in force, which deciding a minute again needs
@@ -313,7 +330,9 @@ def test_late_evidence_is_judged_from_the_database_alone(ingest: psycopg.Connect
     assert effective[nobody] == ("sin_explicar", "ausencia_no_verificable")
 
 
-def test_f2_a6_closing_a_day_from_the_database(ingest: psycopg.Connection) -> None:
+def test_f2_a6_closing_a_day_from_the_database(
+    ingest: psycopg.Connection, random_day: RandomDay
+) -> None:
     """F2-A6: every minute of the day gets exactly one terminal status, from the database alone;
     closing again (as after a restart) changes nothing."""
     from kbot.market.gaps import DataGap
@@ -322,7 +341,7 @@ def test_f2_a6_closing_a_day_from_the_database(ingest: psycopg.Connection) -> No
     from kbot.market.store import close_day, write_flow, write_gap, write_last_candles
 
     symbol = "D" + secrets.token_hex(5).upper() + "-USDT"
-    day = datetime(2026, 11, 7, tzinfo=UTC) + timedelta(days=secrets.randbelow(3000))
+    day = random_day()
     m = [day + timedelta(minutes=i) for i in range(5)]
 
     def flow(minute: datetime, channel: str, state: FlowState, messages: int) -> FlowMinute:
@@ -369,7 +388,7 @@ def test_f2_a6_closing_a_day_from_the_database(ingest: psycopg.Connection) -> No
 
 
 def test_a_trade_without_a_websocket_candle_rules_out_an_absence(
-    ingest: psycopg.Connection,
+    ingest: psycopg.Connection, random_day: RandomDay
 ) -> None:
     """Review of E2, third round (I-E2-02), from the database: in minute 0 the trade channel
     received a trade, the kline channel nothing, and KuCoin gave no candle: pending, never a
@@ -380,7 +399,7 @@ def test_a_trade_without_a_websocket_candle_rules_out_an_absence(
     from kbot.market.store import close_day, write_flow, write_last_candles
 
     symbol = "T" + secrets.token_hex(5).upper() + "-USDT"
-    day = datetime(2026, 11, 7, tzinfo=UTC) + timedelta(days=secrets.randbelow(3000))
+    day = random_day()
     m = [day, day + timedelta(minutes=1)]
 
     def flow(minute: datetime, channel: str, messages: int) -> FlowMinute:

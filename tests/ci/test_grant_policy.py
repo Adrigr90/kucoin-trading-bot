@@ -6,6 +6,7 @@ import pytest
 
 from tools.grant_policy import (
     ALLOWED_GRANTS,
+    FUNCTION,
     SCHEMA,
     TABLE,
     Grant,
@@ -36,6 +37,11 @@ def test_the_exact_matrix_respects_section_9() -> None:
         Grant("kbot_telegram", "insert", TABLE, "trading.signals"),
         Grant("kbot_backup", "select", TABLE, "market.candles"),
         Grant("kbot_owner", "usage", SCHEMA, "config"),
+        Grant("kbot_archive", "insert", TABLE, "market.candles"),
+        Grant("kbot_archive", "insert", TABLE, "market.archive_seals"),
+        Grant("kbot_archive", "select", TABLE, "trading.signals"),
+        Grant("kbot_archive", "execute", FUNCTION, "market.retire_day(date)"),
+        Grant("kbot_ingest", "execute", FUNCTION, "market.seal_day(date)"),
     ],
 )
 def test_section_9_forbids(grant: Grant) -> None:
@@ -51,6 +57,8 @@ def test_section_9_forbids(grant: Grant) -> None:
         Grant("kbot_risk", "insert", TABLE, "trading.approved_orders"),
         Grant("kbot_watchdog", "insert", TABLE, "ops.halt_flags"),
         Grant("kbot_telegram", "insert", TABLE, "ops.admin_requests"),
+        Grant("kbot_archive", "insert", TABLE, "market.archive_files"),
+        Grant("kbot_archive", "execute", FUNCTION, "market.seal_day(date)"),
     ],
 )
 def test_section_9_allows_what_the_table_grants(grant: Grant) -> None:

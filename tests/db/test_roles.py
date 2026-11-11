@@ -30,7 +30,10 @@ EXPECTED_ATTRIBUTES = {
     "kbot_fn_owner": (False, -1, []),
     **{role: (True, 5, ["statement_timeout=30s"]) for role in SERVICE_ROLES},
     "kbot_backup": (True, 2, ["statement_timeout=0"]),
+    "kbot_archive": (True, 2, ["statement_timeout=1h"]),
 }
+# What each login role outside the eight services sees in its own session.
+OTHER_TIMEOUTS = {"kbot_backup": "0", "kbot_archive": "1h"}
 
 
 def test_f1_a6a_role_attributes(admin: psycopg.Connection) -> None:
@@ -53,9 +56,9 @@ def test_f1_a6a_role_attributes(admin: psycopg.Connection) -> None:
         assert not powerful, f"{name} has a superuser-like attribute"
 
 
-@pytest.mark.parametrize("role", [*SERVICE_ROLES, "kbot_backup"])
+@pytest.mark.parametrize("role", [*SERVICE_ROLES, *OTHER_TIMEOUTS])
 def test_f1_a6a_each_session_sees_its_statement_timeout(connect: Connect, role: str) -> None:
-    expected = "0" if role == "kbot_backup" else "30s"
+    expected = OTHER_TIMEOUTS.get(role, "30s")
     with connect(role) as conn:
         assert conn.execute("SHOW statement_timeout").fetchone() == (expected,)
 
@@ -128,7 +131,7 @@ def test_f1_a6d_owners_cannot_log_in(connect: Connect, role: str) -> None:
 
 
 def test_f1_a6e_no_create_privilege_anywhere(admin: psycopg.Connection) -> None:
-    roles = [*SERVICE_ROLES, "kbot_backup", "kbot_fn_owner"]
+    roles = [*SERVICE_ROLES, "kbot_backup", "kbot_archive", "kbot_fn_owner"]
     schema_create = admin.execute(
         """
         SELECT r.rolname, n.nspname

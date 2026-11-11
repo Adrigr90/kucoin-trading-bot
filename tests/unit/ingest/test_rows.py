@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 from psycopg.types.json import Jsonb
 
-from kbot.ingest.rows import PRIMARY_KEYS, RowSink, insert_row
+from kbot.ingest.rows import PRIMARY_KEYS, FolderInUse, RowSink, insert_row
 from kbot.market import store
 from kbot.market.last_candles import FlowMinute
 from kbot.market.mark_candles import FlowState
@@ -93,3 +93,16 @@ def test_a_row_with_the_key_of_another_is_left_out_as_postgresql_does(tmp_path: 
     lines = (tmp_path / "ws_candles.jsonl").read_text(encoding="utf-8").splitlines()
     assert [json.loads(line)["open"] for line in lines] == ["1", "3"]
     assert sink.counts == {"ws_candles": 2}
+
+
+def test_a_folder_used_before_is_refused_untouched(tmp_path: Path) -> None:
+    """Review of E3c, E3c-07: the marks of a second run would count from the start of the
+    files of the first one."""
+    sink = RowSink(tmp_path)
+    flow = FlowMinute("SPOT", "BTC-USDT", "trade", T0, FlowState.S1, 12, 0, 0)
+    store.write_flow(sink._conn, [flow])  # type: ignore[arg-type]
+    sink.close()
+    before = {p.name: p.read_bytes() for p in tmp_path.iterdir()}
+    with pytest.raises(FolderInUse):
+        RowSink(tmp_path)
+    assert {p.name: p.read_bytes() for p in tmp_path.iterdir()} == before

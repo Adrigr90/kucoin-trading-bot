@@ -77,6 +77,10 @@ class _NoRows:
         return []
 
 
+class FolderInUse(ValueError):
+    """The folder of a recording already holds files."""
+
+
 class RecordingConnection:
     """Stands for a psycopg connection: records every statement it is given and answers
     every query with no rows. Transactions and cursors are only names here."""
@@ -145,6 +149,11 @@ class RowSink(MemorySink):
     def __init__(self, folder: Path) -> None:
         super().__init__()
         self.folder = folder
+        if folder.exists() and any(folder.iterdir()):
+            # Its marks count from the start of its own files: in a folder used before they
+            # would name rows of another run (review of E3c, E3c-07). Checked before
+            # anything is opened, so the folder stays as it was.
+            raise FolderInUse(f"the folder of a recording must be new or empty: {folder}")
         folder.mkdir(parents=True, exist_ok=True)
         self.counts: Counter[str] = Counter()
         self._files: dict[str, TextIO] = {}

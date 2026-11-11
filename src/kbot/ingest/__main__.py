@@ -79,9 +79,12 @@ def main() -> int:
     parser.add_argument("--sink", choices=("db", "file", "rows"), default="db")
     parser.add_argument("--out", type=Path, default=Path("grabacion"))
     parser.add_argument("--minutes", type=float, default=0, help="stop after this many minutes")
+    arguments = parser.parse_args()
+    if arguments.sink == "rows" and arguments.out.exists() and any(arguments.out.iterdir()):
+        parser.error(f"--sink rows needs a new or empty --out folder: {arguments.out}")
     _configure_logging()
     try:
-        return asyncio.run(_main(parser.parse_args()))
+        return asyncio.run(_main(arguments))
     except KeyboardInterrupt:
         return 0
 

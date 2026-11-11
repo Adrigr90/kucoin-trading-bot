@@ -126,6 +126,8 @@ def compare(
         path = rows.folder / f"{table}.jsonl"
         written = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
         assert len(written) == count
+        key = TABLES.get(table, "start_at")
+        written = [r for r in written if first <= datetime.fromisoformat(r[key]) < end]
         types = column_types(conn, table)
         columns = [name for name in types if name != "recorded_at"]
         assert {name for row in written for name in row} <= set(columns), table

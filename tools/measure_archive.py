@@ -76,7 +76,8 @@ BOOK_LEVEL = pa.struct([("price", pa.decimal128(38, 18)), ("size", pa.decimal128
 
 # Bytes per row in PostgreSQL 18 (heap, TOAST, indexes), measured in the CI by
 # tests/db/test_storage_scale.py on 11 Nov 2026 (commit dafe12c), with an hour of a realistic
-# universe with the mix of 02 §3.1: two books of level 5 for each of level 50 (E3c-02). A table it does not fill (rare rows, and data_gaps) takes the largest total.
+# universe with the mix of 02 §3.1: two books of level 5 for each of level 50 (E3c-02).
+# A table it does not fill (rare rows, and data_gaps) takes the largest total.
 POSTGRES_ROW_BYTES: dict[str, tuple[int, int, int]] = {
     "data_quality_minute": (102, 6, 199),
     "candles": (190, 8, 228),

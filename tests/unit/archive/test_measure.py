@@ -14,13 +14,15 @@ import pytest
 
 from kbot.archive.archiver import TABLES
 from kbot.ingest.core import InstrumentSpec, RecorderCore
-from kbot.ingest.rows import RowSink
+from kbot.ingest.rows import PROGRESS, RowSink
 from tests.unit.ingest.messages import feed_minute, pong
 from tools import measure_archive
 from tools.measure_archive import (
     MIGRATION,
+    Unproven,
     arrow_table,
     main,
+    measure,
     minute_status_rows,
     read_rows,
     table_specs,
@@ -194,3 +196,86 @@ def test_an_old_late_book_does_not_move_the_window() -> None:
     old = (T0 - timedelta(hours=2)).isoformat()
     loaded["depth_late_books"] = [{"first_slot_start": old}]
     assert window(loaded) == (T0, T0 + timedelta(minutes=4))
+
+
+def _record(folder: Path, minutes: int) -> None:
+    spot = InstrumentSpec("SPOT", "BTC-USDT", Decimal("0.1"), Decimal(1), l50=True)
+    futures = InstrumentSpec(
+        "FUTURES", "XBTUSDTM", Decimal("0.1"), Decimal("0.001"), l50=True, index_symbol=".KXBT"
+    )
+    start = datetime(2026, 11, 10, 12, 0, tzinfo=UTC)
+    core = RecorderCore((spot, futures), started_at=start)
+    for market in ("SPOT", "FUTURES"):
+        core.on_state(market, "connected", start, "wss://...")
+    sink = RowSink(folder)
+    for n in range(minutes):
+        minute = start + timedelta(minutes=n)
+        feed_minute(core, minute, "BTC-USDT", "XBTUSDTM")
+        pong(core, minute + timedelta(seconds=62))
+        sink.write_tick(core.tick(minute + timedelta(seconds=62)))
+    sink.close()
+
+
+def _cut_last_minute_of_metrics(folder: Path) -> int:
+    """The metrics file loses the rows of its last minute but one, as a buffer that never
+    reached the disk; the two clock files stay whole. Returns the rows kept."""
+    path = folder / "depth_metrics.jsonl"
+    rows = path.read_text(encoding="utf-8").splitlines()
+    last = max(json.loads(r)["slot_start"][:16] for r in rows)
+    kept = [r for r in rows if json.loads(r)["slot_start"][:16] < last]
+    kept.append(next(r for r in rows if json.loads(r)["slot_start"][:16] == last))
+    path.write_text("\n".join(kept) + "\n", encoding="utf-8")
+    return len(kept)
+
+
+def _metrics_match_valid_slots(out: Path) -> None:
+    metrics = sum(pq.read_table(p).num_rows for p in (out / "none" / "depth_metrics").iterdir())
+    slots = [pq.read_table(p) for p in (out / "none" / "depth_slot_status").iterdir()]
+    valid = sum(t.column("state").to_pylist().count("valida") for t in slots)
+    assert metrics == valid
+
+
+def test_the_rows_sink_marks_its_progress_after_flushing(tmp_path: Path) -> None:
+    _record(tmp_path, 3)
+    marks = read_rows(tmp_path / PROGRESS)
+    assert len(marks) == 3
+    for name, count in marks[-1].items():
+        assert len(read_rows(tmp_path / f"{name}.jsonl")) == count
+
+
+def test_a_metrics_file_cut_short_is_not_measured_past_its_mark(tmp_path: Path) -> None:
+    """Review of E3c, E3c-01: the clock files whole and the metrics of the last minute cut
+    short. The latest mark the metrics reach is an earlier tick, so that minute is out."""
+    recording = tmp_path / "recording"
+    _record(recording, 5)
+    full, _, _ = measure(recording, tmp_path / "whole")
+    _cut_last_minute_of_metrics(recording)
+    minutes, _, _ = measure(recording, tmp_path / "cut")
+    assert minutes < full
+    _metrics_match_valid_slots(tmp_path / "cut")
+
+
+def test_a_recording_without_marks_is_refused_or_checked(tmp_path: Path) -> None:
+    recording = tmp_path / "recording"
+    _record(recording, 5)
+    full, _, _ = measure(recording, tmp_path / "whole")
+    (recording / PROGRESS).unlink()
+    _cut_last_minute_of_metrics(recording)
+    with pytest.raises(Unproven, match="no progress marks"):
+        measure(recording, tmp_path / "refused")
+    minutes, _, _ = measure(recording, tmp_path / "checked", unmarked=True)
+    assert minutes == full - 1  # the minute that lacks metrics is left out
+    _metrics_match_valid_slots(tmp_path / "checked")
+
+
+def test_metrics_missing_inside_the_recording_make_it_unproven(tmp_path: Path) -> None:
+    recording = tmp_path / "recording"
+    _record(recording, 5)
+    (recording / PROGRESS).unlink()
+    path = recording / "depth_metrics.jsonl"
+    rows = path.read_text(encoding="utf-8").splitlines()
+    middle = sorted({json.loads(r)["slot_start"][:16] for r in rows})[2]
+    gone = next(i for i, r in enumerate(rows) if json.loads(r)["slot_start"][:16] == middle)
+    path.write_text("\n".join(rows[:gone] + rows[gone + 1 :]) + "\n", encoding="utf-8")
+    with pytest.raises(Unproven, match="differ inside"):
+        measure(recording, tmp_path / "out", unmarked=True)

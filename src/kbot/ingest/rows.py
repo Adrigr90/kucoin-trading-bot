@@ -9,6 +9,11 @@ same code; a test in the CI compares them with the rows PostgreSQL stores. A row
 of an earlier one is left out, as PostgreSQL leaves it out (review of E3c, E3c-04): the sink
 keeps a 16-byte digest of every key it wrote, some 150 MB for a day of the reference universe.
 
+After each write it flushes every file and then appends a progress mark to ``PROGRESS``:
+the rows each file held at that moment. Each file has its own buffer, so a recording that
+stops abruptly may keep more of one file than of another; the measurement only uses the
+rows of the latest mark that every file reaches (review of E3c, E3c-01).
+
 Decisions that need the database stay those of ``MemorySink``, and their rows are not
 written here: the late evidence of the minutes (a few rows of ``trading_seen_late``,
 ``late_ws_candles`` and ``late_ws_repeats``) and the close of a day, computed in SQL from what
@@ -56,6 +61,8 @@ PRIMARY_KEYS: dict[str, tuple[str, ...]] = {
     "late_ws_repeats": ("market", "symbol", "open_time", "published_at"),
     "data_gaps": ("market", "channel", "symbol", "start_at"),
 }
+
+PROGRESS = "_progress.jsonl"
 
 _INSERT = re.compile(
     r"^INSERT INTO market\.(\w+) \(([^)]*)\) VALUES \((.*?)\)(?: ON CONFLICT .*)?$", re.S
@@ -143,6 +150,7 @@ class RowSink(MemorySink):
         self._files: dict[str, TextIO] = {}
         self._keys: dict[str, set[bytes]] = {}  # digests of the keys written, per table
         self._conn = RecordingConnection(self._record)
+        self._progress = (folder / PROGRESS).open("a", encoding="utf-8", newline="\n")
 
     def _record(self, query: str, params: tuple[Any, ...]) -> None:
         found = insert_row(query, params)
@@ -169,6 +177,13 @@ class RowSink(MemorySink):
         file.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
         self.counts[table] += 1
 
+    def _mark(self) -> None:
+        """Every row written so far is in the files: flushed first, then the mark."""
+        for file in self._files.values():
+            file.flush()
+        self._progress.write(json.dumps(dict(sorted(self.counts.items()))) + "\n")
+        self._progress.flush()
+
     def write_tick(self, output: TickOutput) -> list[KeptEvidence]:
         conn: Any = self._conn
         store.write_flow(conn, output.flows)
@@ -176,21 +191,26 @@ class RowSink(MemorySink):
         store.write_own_candles(conn, "FUTURES", output.own_candles)
         store.write_depth(conn, output.slots, output.minute_snapshots, output.gaps)
         store.write_late_books(conn, output.late_books)
+        self._mark()
         return super().write_tick(output)
 
     def write_last_candles(self, decisions: list[CandleDecision]) -> None:
         store.write_last_candles(self._conn, decisions)  # type: ignore[arg-type]
+        self._mark()
         super().write_last_candles(decisions)
 
     def write_index_candles(self, candles: list[OwnCandle]) -> None:
         store.write_own_candles(self._conn, "FUTURES", candles)  # type: ignore[arg-type]
+        self._mark()
         super().write_index_candles(candles)
 
     def write_exhausted_index(self, minutes: list[tuple[IndexMinute, int]]) -> None:
         store.write_exhausted_index(self._conn, minutes)  # type: ignore[arg-type]
+        self._mark()
         super().write_exhausted_index(minutes)
 
     def close(self) -> None:
         for file in self._files.values():
             file.close()
         self._files.clear()
+        self._progress.close()

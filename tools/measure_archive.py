@@ -49,6 +49,7 @@ from pglast.enums import ConstrType
 from kbot.archive.archiver import BATCH, TABLES
 from kbot.archive.canonical import json_text
 from kbot.archive.parquet import ARROW_TYPES
+from kbot.ingest.rows import PROGRESS
 
 MIGRATION = Path(__file__).resolve().parents[1] / "migrations" / "versions" / "0003_particiones.sql"
 VARIANTS: dict[str, tuple[str, int | None]] = {
@@ -302,18 +303,66 @@ def _within(
     return [row for row in rows if first <= datetime.fromisoformat(row[column]) < end]
 
 
-def measure(recording: Path, out: Path) -> tuple[int, dict[str, Measure], int]:
+class Unproven(ValueError):
+    """The recording cannot prove that its files are complete."""
+
+
+def load(recording: Path, *, unmarked: bool = False) -> dict[str, list[dict[str, Any]]]:
+    """The rows of every table and of data_gaps, as of the latest progress mark that every
+    file reaches (review of E3c, E3c-01). A recording without marks, made before them, is
+    only read when ``unmarked`` says so; ``consistent`` then checks it."""
+    names = [*TABLES, "data_gaps"]
+    files = {name: recording / f"{name}.jsonl" for name in names}
+    rows = {name: read_rows(path) for name, path in files.items() if path.exists()}
+    progress = recording / PROGRESS
+    if not progress.exists():
+        if not unmarked:
+            raise Unproven(f"no progress marks ({PROGRESS}): its completeness cannot be proved")
+        return rows
+    for mark in reversed(read_rows(progress)):
+        if all(len(rows.get(name, [])) >= count for name, count in mark.items()):
+            return {name: rows.get(name, [])[: mark.get(name, 0)] for name in names}
+    raise Unproven("no progress mark is reached by every file")
+
+
+def consistent(
+    loaded: dict[str, list[dict[str, Any]]], span: tuple[datetime, datetime]
+) -> tuple[datetime, datetime]:
+    """The window, without the last minutes whose metrics are fewer than their valid slots:
+    the writers put a slot's metrics right after its state, so a minute that lacks them is
+    a file cut short. A minute inside the window that lacks them makes the recording
+    unproven (review of E3c, E3c-01)."""
+    first, end = span
+
+    def per_minute(rows: list[dict[str, Any]]) -> Counter[datetime]:
+        return Counter(
+            datetime.fromisoformat(r["slot_start"]).replace(second=0)
+            for r in rows
+            if first <= datetime.fromisoformat(r["slot_start"]) < end
+        )
+
+    valid = per_minute([r for r in loaded["depth_slot_status"] if r["state"] == "valida"])
+    metrics = per_minute(loaded.get("depth_metrics", []))
+    minutes = [first + timedelta(minutes=n) for n in range((end - first) // timedelta(minutes=1))]
+    wrong = [m for m in minutes if metrics[m] != valid[m]]
+    while wrong and wrong[-1] == end - timedelta(minutes=1):
+        end = wrong.pop()
+    if wrong:
+        raise Unproven(f"metrics and valid slots differ inside the recording: {wrong[0]}")
+    if end <= first:
+        raise Unproven("no complete minute left")
+    return first, end
+
+
+def measure(
+    recording: Path, out: Path, *, unmarked: bool = False
+) -> tuple[int, dict[str, Measure], int]:
     """Minutes recorded, the measures per table, and the rows of data_gaps."""
     specs = table_specs(MIGRATION.read_text(encoding="utf-8"))
-    loaded = {
-        name: read_rows(recording / f"{name}.jsonl")
-        for name in TABLES
-        if (recording / f"{name}.jsonl").exists()
-    }
-    span = window(loaded)
-    loaded = {name: _within(rows, TABLES[name], span) for name, rows in loaded.items()}
-    gaps_file = recording / "data_gaps.jsonl"
-    gaps = len(_within(read_rows(gaps_file), "start_at", span)) if gaps_file.exists() else 0
+    loaded = load(recording, unmarked=unmarked)
+    span = consistent(loaded, window(loaded))
+    gaps = len(_within(loaded.pop("data_gaps", []), "start_at", span))
+    loaded = {name: _within(rows, TABLES[name], span) for name, rows in loaded.items() if rows}
     quality = loaded.get("data_quality_minute", [])
     loaded["minute_status"] = minute_status_rows(quality)
     measures: dict[str, Measure] = {}
@@ -493,12 +542,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--out", type=Path, help="folder of the Parquet files (default: <recording>/parquet)"
     )
+    parser.add_argument(
+        "--unmarked",
+        action="store_true",
+        help="read a recording without progress marks (made before them), checked only by"
+        " its metrics against its valid slots",
+    )
     arguments = parser.parse_args(argv)
     out = arguments.out or arguments.recording / "parquet"
     if out.exists() and any(out.iterdir()):
         # Files of an earlier run would mix with this one's (review of E3c, E3c-05).
         parser.error(f"the output folder must be new or empty: {out}")
-    minutes, measures, gaps = measure(arguments.recording, out)
+    try:
+        minutes, measures, gaps = measure(arguments.recording, out, unmarked=arguments.unmarked)
+    except Unproven as error:
+        parser.error(f"the recording is not proven complete: {error}")
     metrics = measures.get("depth_metrics")
     symbol = "BTC-USDT"
     times = queries(out, symbol, minutes) if metrics is not None else {}

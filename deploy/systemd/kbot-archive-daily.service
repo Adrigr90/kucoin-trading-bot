@@ -1,0 +1,40 @@
+# kbot: the daily work of the archive, in order (02 §3.9; stage E4a): prepare the
+# partitions, seal the closed days, archive each sealed day to Parquet and verify what is
+# archived. Runs as kbot_archive; the archive root /srv/kbot/archive exists beforehand
+# (E3b-02) and is the only path it writes.
+[Unit]
+Description=kbot: prepare, seal, archive and verify (daily)
+After=postgresql.service
+Requires=postgresql.service
+
+[Service]
+Type=oneshot
+User=kbot_archive
+Group=kbot_archive
+WorkingDirectory=/opt/kbot
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/kbot/.venv/bin/python -m kbot.archive prepare --root /srv/kbot/archive
+ExecStart=/opt/kbot/.venv/bin/python -m kbot.archive seal --root /srv/kbot/archive
+ExecStart=/opt/kbot/.venv/bin/python -m kbot.archive archive --root /srv/kbot/archive
+ExecStart=/opt/kbot/.venv/bin/python -m kbot.archive verify --root /srv/kbot/archive
+TimeoutStartSec=4h
+MemoryMax=2G
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+UMask=0077
+ReadWritePaths=/srv/kbot/archive
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any

@@ -49,6 +49,9 @@ jobs:
       - name: Limites de la migracion frente al DM
         run: bash ci/step.sh "check_limits" uv run python -m tools.check_limits
 
+      - name: Herramientas de las pruebas de despliegue (E4a)
+        run: bash ci/step.sh "deploy tools" sudo apt-get install -y -qq nftables shellcheck openssh-server
+
       - name: Instalar PostgreSQL 18 en el runner (no en contenedor)
         run: bash ci/step.sh "postgresql" bash ci/install_postgres.sh
 

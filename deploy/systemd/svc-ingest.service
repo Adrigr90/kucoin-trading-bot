@@ -1,0 +1,61 @@
+# kbot: the recorder of the public market data of KuCoin (02 §1.1, §9 and §13.1; stage E4a).
+# It runs as the system user of its SQL role and reaches PostgreSQL only through the Unix
+# socket with peer authentication. Its only network is KuCoin, which the whitelist of the
+# client enforces (E1); the kernel rule of /etc/kbot/metadata-guard.nft and the deny list
+# below keep it away from the instance metadata, private networks and the link-local range.
+[Unit]
+Description=kbot recorder of KuCoin market data
+Documentation=file:///opt/kbot/docs/especificacion/02_Especificacion_vigente.md
+Wants=network-online.target
+After=network-online.target postgresql.service kbot-archive-prepare.service
+Requires=kbot-archive-prepare.service
+
+[Service]
+Type=exec
+User=kbot_ingest
+Group=kbot_ingest
+SupplementaryGroups=kbot
+WorkingDirectory=/opt/kbot
+Environment=KBOT_REST_LOCK=/run/kbot/kucoin-rest.lock
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/kbot/.venv/bin/python -m kbot.ingest --sink db
+Restart=on-failure
+RestartSec=10s
+RestartSteps=6
+RestartMaxDelaySec=10min
+TimeoutStopSec=90s
+MemoryMax=1G
+TasksMax=256
+
+# Isolation (02 §2: ProtectSystem=strict, MemoryMax=).
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
+# The single REST budget of the machine (E1; E4-D06): the lock file, and nothing else.
+ReadWritePaths=/run/kbot/kucoin-rest.lock
+# The socket of PostgreSQL and the network: Unix sockets and IPv4/IPv6 only.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# Never the instance metadata, private networks or the link-local range (E4-D04).
+IPAddressDeny=169.254.0.0/16 fe80::/10 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 fc00::/7 multicast
+IPAddressAllow=localhost
+
+[Install]
+WantedBy=multi-user.target

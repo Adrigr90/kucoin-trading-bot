@@ -1,0 +1,6 @@
+// kbot (02 §13.1, stage E4a): security updates every day, never an automatic reboot:
+// the owner decides when the server restarts. The origins stay those of Ubuntu's
+// 50unattended-upgrades, which only allow the security pocket.
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+Unattended-Upgrade::Automatic-Reboot "false";

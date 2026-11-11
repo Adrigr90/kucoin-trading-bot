@@ -1,0 +1,18 @@
+#!/usr/sbin/nft -f
+# kbot (02 §13.1, E4-D04): only root reaches the HTTP service of the instance metadata,
+# which hands out the instance principal tokens. Oracle grants their privileges to the
+# whole instance, so the server itself keeps every other user away from it. This is a
+# kernel rule by user, independent of cgroups and eBPF, and it covers SFTP sessions and
+# processes outside systemd. Stage E4c adds kbot_backup to the allowed users.
+#
+# Only the HTTP ports: the same address serves DNS (port 53, used by systemd-resolved)
+# and NTP (port 123, used by chrony) on Oracle Cloud, and those must keep working.
+table inet kbot_guard
+delete table inet kbot_guard
+table inet kbot_guard {
+	chain output {
+		type filter hook output priority filter - 10; policy accept;
+		ip daddr 169.254.169.254 tcp dport { 80, 443 } meta skuid != { root } counter reject
+		ip6 daddr fd00:c1::a9fe:a9fe tcp dport { 80, 443 } meta skuid != { root } counter reject
+	}
+}

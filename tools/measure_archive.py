@@ -158,8 +158,9 @@ def table_specs(text: str) -> dict[str, TableSpec]:
 
 def read_rows(path: Path) -> list[dict[str, Any]]:
     """The rows of one file. A last line without its newline is a row still being written
-    by a recording that goes on, and is left out."""
-    text = path.read_text(encoding="utf-8")
+    by a recording that goes on, and is left out. A recording stopped abruptly may leave
+    zeros where its last buffered rows never reached the disk: the file ends there."""
+    text = path.read_text(encoding="utf-8").split("\x00", 1)[0]
     lines = text.split("\n")
     return [json.loads(line) for line in lines[:-1] if line]
 
@@ -274,13 +275,31 @@ def by_day(spec: TableSpec, rows: Sequence[tuple[Any, ...]]) -> Iterator[tuple[d
     yield from sorted(days.items())
 
 
-def measure(recording: Path, out: Path) -> tuple[int, dict[str, Measure]]:
+def _until(loaded: dict[str, list[dict[str, Any]]]) -> str:
+    """The end of the last minute every table reached: each file of a recording stopped
+    abruptly ends at its own point, so every table is cut there."""
+    ends = [max(row[TABLES[name]] for row in rows) for name, rows in loaded.items() if rows]
+    end = datetime.fromisoformat(min(ends, key=datetime.fromisoformat))
+    return (end.replace(second=0, microsecond=0) + timedelta(minutes=1)).isoformat()
+
+
+def _before(rows: list[dict[str, Any]], column: str, until: str) -> list[dict[str, Any]]:
+    limit = datetime.fromisoformat(until)
+    return [row for row in rows if datetime.fromisoformat(row[column]) < limit]
+
+
+def measure(recording: Path, out: Path) -> tuple[int, dict[str, Measure], int]:
+    """Minutes recorded, the measures per table, and the rows of data_gaps."""
     specs = table_specs(MIGRATION.read_text(encoding="utf-8"))
     loaded = {
         name: read_rows(recording / f"{name}.jsonl")
         for name in TABLES
         if (recording / f"{name}.jsonl").exists()
     }
+    until = _until(loaded)
+    loaded = {name: _before(rows, TABLES[name], until) for name, rows in loaded.items()}
+    gaps_file = recording / "data_gaps.jsonl"
+    gaps = len(_before(read_rows(gaps_file), "start_at", until)) if gaps_file.exists() else 0
     quality = loaded.get("data_quality_minute", [])
     loaded["minute_status"] = minute_status_rows(quality)
     measures: dict[str, Measure] = {}
@@ -300,7 +319,7 @@ def measure(recording: Path, out: Path) -> tuple[int, dict[str, Measure]]:
                 for variant in ("zstd3", "zstd9"):
                     path = out / f"{variant}_typed" / name / f"{day.isoformat()}.parquet"
                     result.bytes[f"{variant}_typed"] += write(typed, path, variant)
-    return recorded_minutes(quality), measures
+    return recorded_minutes(quality), measures, gaps
 
 
 SERIES = (
@@ -446,9 +465,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     arguments = parser.parse_args(argv)
     out = arguments.out or arguments.recording / "parquet"
-    minutes, measures = measure(arguments.recording, out)
-    gaps_file = arguments.recording / "data_gaps.jsonl"
-    gaps = len(read_rows(gaps_file)) if gaps_file.exists() else 0
+    minutes, measures, gaps = measure(arguments.recording, out)
     metrics = measures.get("depth_metrics")
     symbol = "BTC-USDT"
     times = queries(out, symbol, minutes) if metrics is not None else {}

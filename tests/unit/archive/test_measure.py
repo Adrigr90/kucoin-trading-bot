@@ -153,3 +153,9 @@ def test_a_recording_is_measured_end_to_end(
     database = summary["postgres_bytes"]
     assert database["day"] == database["heap"] + database["toast"] + database["index"]
     assert database["year_2"] - database["year_1"] == pytest.approx(database["parquet_year"])
+
+
+def test_a_recording_stopped_abruptly_ends_at_its_zeros(tmp_path: Path) -> None:
+    path = tmp_path / "ws_candles.jsonl"
+    path.write_bytes(b'{"a": 1}\n{"a": 2}\n{"a"' + b"\x00" * 64)
+    assert read_rows(path) == [{"a": 1}, {"a": 2}]

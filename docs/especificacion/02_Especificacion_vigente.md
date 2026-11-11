@@ -560,6 +560,46 @@ Lo aprendido al probarlo:
 - la grabación en el PC;
 - la medición: tamaño por tabla y día con zstd 3 y 9, consultas con DuckDB y tiempo de planificación con unas 1.250 particiones.
 
+**Implementado en E3c** (11 nov 2026, pendiente de revisión):
+- **`--sink rows`** (`kbot/ingest/rows.py`). Ejecuta los mismos escritores de `store` que `DatabaseSink` sobre una conexión que no ejecuta nada, y escribe cada INSERT como una línea JSON por tabla. No produce `minute_status` (se calcula en SQL al cerrar el día) ni la evidencia tardía de minutos, que son pocas filas. **Equivalencia** [H, CI]: para dos minutos de mensajes sintéticos, las filas de los archivos y las que guarda PostgreSQL coinciden tabla a tabla en la forma canónica del archivo (`tests/db/test_rows_equivalence.py`).
+- **Grabación** en el PC del propietario, del 10 nov 2026 a las 22:55 UTC al 11 nov a las 00:54 UTC: **119 minutos** con el universo de referencia de §3.1 (20 + 20 pares, 10 + 10 candidatos de nivel 50). Debía durar 3 h, pero el proceso se paró al cerrarse la sesión que lo lanzó; cada tabla se corta en el último minuto que todas alcanzaron. Para proyectar al día basta, porque el volumen es casi constante por minuto.
+- **Medición** (`tools/measure_archive.py`, reproducible). Convierte la grabación en los archivos del archivo (por tabla y día UTC, tipos y orden de `0003`, grupos de 20.000 filas). `minute_status` se estima con una fila por minuto de `trade` y `recorded_at` se aproxima. Resultados por día (escalados de 119 a 1.440 minutos) [H, PC]:
+
+  | Tabla | Filas al día | Parquet sin comprimir | zstd 3 | zstd 9 | PostgreSQL (B/fila) |
+  |---|---|---|---|---|---|
+  | `depth_metrics` | 503.516 | 91,7 MB | 54,6 MB | 51,4 MB | 292 |
+  | `depth_snapshots` | 85.662 | 71,7 MB | 17,2 MB | 14,7 MB | 872 |
+  | `depth_slot_status` | 516.948 | 10,4 MB | 4,4 MB | 4,4 MB | 284 |
+  | `candles` | 114.171 | 10,6 MB | 5,8 MB | 5,3 MB | 425 |
+  | `ws_candles` | 57.104 | 6,4 MB | 3,5 MB | 3,2 MB | 246 |
+  | `data_quality_minute` | 143.637 | 1,8 MB | 0,7 MB | 0,7 MB | 307 |
+  | `minute_status` (estimada) | 57.418 | 0,7 MB | 0,3 MB | 0,3 MB | 218 |
+  | **Total** | 1.478.456 | **193 MB** | **86,5 MB** | **80,1 MB** | **495 MB al día** |
+
+  Parquet al año: 70,6 GB sin comprimir, **31,6 GB con zstd 3** y 29,2 GB con zstd 9.
+- **PostgreSQL 18 en la CI** (`tests/db/test_storage_scale.py`) [H, CI]:
+  - **bytes por fila** con una hora de un universo realista: montón, TOAST e índices (última columna de la tabla). Los índices son el 43 % del total, porque `data_quality_minute` y `depth_slot_status` tienen dos índices únicos (la clave primaria y la única con el estado, que es el destino de las claves foráneas). WAL escrito: 487 B por fila, unos 724 MB al día;
+  - **con 1.260 particiones** (90 días calientes, hoy y los 14 preparados):
+    - planificar las consultas de reanudación del grabador, que recorren las 105 particiones de su tabla, tarda 5-8 ms (23-31 ms en una conexión nueva);
+    - una consulta de un día, podada a una partición, menos de 1 ms;
+    - una inserción, 0,01 ms;
+  - **`prepare_partitions()`** crea 492 particiones en unos 2 s (4 ms cada una), y su ejecución diaria, sin nada que crear, tarda 0,03-0,04 s;
+  - **cada partición vacía** ocupa 24.621 B (los archivos de sus índices y de su TOAST, y sus filas del catálogo): 31 MB las 1.260.
+- **DuckDB** (2.0, dependencia de desarrollo; mediana de 5) [H, PC]:
+  - la serie de un instrumento tarda 6,5 ms sobre lo grabado y ≈ 1 s sobre 90 días;
+  - el agregado de todo el universo, 12 ms y ≈ 2,3 s.
+- **Formato de los libros:** se mantiene el **texto JCS**. Las listas tipadas `decimal128` ocupan un 53 % más con zstd 3 (26,2 frente a 17,2 MB al día) y solo ahorran unos 4 ms al leer el primer nivel de todos los libros.
+- **Proyección** (§3.1 y §10.3). El montón medido, 278 MB al día, coincide con la estimación de §3.1 (259 MB), pero **la estimación no contaba los índices**, que añaden 211 MB:
+  - **base de datos con 90 días calientes:** 44,6 GB, más las particiones (0,03 GB) y el WAL conservado (`max_wal_size`, 1,07 GB), son 45,7 GB. **Con el 20 % de margen de §3.1, 54,8 GB**; la estimación era de ≈ 28 GB;
+  - **Parquet:** 31,6 GB al año con zstd 3, en el extremo alto del rango estimado (12-32 GB);
+  - **volumen de datos de 110 GB (§10.3):** **el año 1 cabe (86,4 GB)**. **El año 2 no cabe con el margen (118,0 GB)**; sin él queda muy justo (108,9 GB).
+- **Decisión pendiente del propietario**, antes del segundo año y tras la medición definitiva de E5 (§3.1: «se reducen las frecuencias o el universo, con decisión del propietario»). Opciones, ninguna decidida:
+  - **reducir los índices** (técnica): por ejemplo, que el índice único con estado sustituya a la clave primaria en las dos tablas citadas. Requiere otra migración y su revisión;
+  - **zstd 9:** ahorra un 7 % del Parquet (2,3 GB al año). Se archiva una vez al día, así que el coste de CPU no importa. **Propuesta [R]: zstd 9**, pendiente de la revisión de E3c; de momento sigue el 3;
+  - **menos días calientes** ([D17]);
+  - **una retención del Parquet;**
+  - **reducir el universo o las frecuencias.**
+
 ## 4. Eventos y recuperación
 
 ### 4.1 Eventos (C01)
@@ -1694,3 +1734,4 @@ $$\Delta Cap=\underbrace{8}_{\text{distancia mark-stop de lo cerrado}}+\underbra
 | 10 nov 2026 | **Revisión de E3b (commit `33dfcb2`): APROBABLE CON CORRECCIONES**, con tres hallazgos MEDIOS. El reparto de la evidencia por días resuelve el caso de D a D+1, sin reaperturas de E3a. El revisor confirma 999 pruebas; en su entorno, 997 correctas (las otras dos necesitan `sudo`).<br>· **E3b-01:** si el día se sellaba entre la comprobación y la inserción, el tick entero se deshacía. Ahora cada inserción va en su *savepoint* y solo se descarta la fila que viola el sello.<br>· **E3b-02:** el directorio de la generación y sus padres no se sincronizaban, y un error de E/S de un directorio se silenciaba. Ahora la secuencia está completa, los errores se propagan y nada se publica si algo falla.<br>· **E3b-03:** el `null` de JSON se archivaba como un valor que falta, sin que la huella lo notara. Ahora el `jsonb` se lee como texto | Revisor; correcciones de Claude **revisadas el 10 nov 2026 (fila siguiente)** |
 | 10 nov 2026 | **Segunda revisión de E3b (commit `56da65f`): APROBABLE CON CORRECCIONES.** E3b-01 y E3b-03 RESUELTOS: el revisor reprodujo el sellado concurrente con dos conexiones y comprobó el `null` de JSON. Ejecutó 1.001 pruebas con PostgreSQL 18.6 (las otras dos necesitan `sudo`). **E3b-02, parcial (BAJO):** si la raíz del archivo no existía, se creaba con sus ancestros sin sincronizar los directorios que los contienen. Corregido: la raíz debe existir de antemano, el archivador se niega sin ella antes de escribir nada, y dentro de ella crea los directorios nivel a nivel | Revisor; corrección de Claude **confirmada el 10 nov 2026 (fila siguiente)** |
 | 10 nov 2026 | **Tercera revisión de E3b (commit `4fe6d06`): E3b-02 RESUELTO. Dictamen final: APROBADO.** Los tres hallazgos E3b-01 a E3b-03 cerrados, sin reaperturas de E3a ni defectos nuevos. El revisor ejecutó 1.006 pruebas con PostgreSQL 18.6 (las otras dos necesitan `sudo`) y contrastó la CI (1.008 pruebas, gitleaks sin hallazgos). La aprobación cubre E3b; E3c se revisa aparte | Revisor |
+| 11 nov 2026 | **E3c implementada** (commits `7daff5f` a `54f5b76`, y el de la documentación): `--sink rows` con su prueba de equivalencia en la CI; grabación de 119 minutos en el PC con el universo de referencia; medición del Parquet y de DuckDB (`tools/measure_archive.py`); y medición en PostgreSQL 18 de bytes por fila, WAL, catálogo y planificación con 1.260 particiones. Resultado (§3.9, «Implementado en E3c»): con margen, la base de datos con 90 días calientes ocupa ≈ 54,8 GB, frente a ≈ 28 GB estimados, porque la estimación no contaba los índices. El año 1 cabe en los 110 GB y el año 2 no. Decisión pendiente del propietario; **pendiente de revisión** | Claude |

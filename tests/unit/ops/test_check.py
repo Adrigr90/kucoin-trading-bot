@@ -91,7 +91,10 @@ def test_service_users_exist_without_a_shell() -> None:
 
 
 def test_metadata_guard_loaded() -> None:
-    nft = "table inet kbot_guard {\n chain output {\n ip daddr 169.254.169.254 tcp dport { 80, 443 } meta skuid != { 0 } counter reject\n }\n}\n"
+    nft = (
+        "table inet kbot_guard {\n chain output {\n ip daddr 169.254.169.254"
+        " tcp dport { 80, 443 } meta skuid != { 0 } counter reject\n }\n}\n"
+    )
     assert check.metadata_guard(nft).ok
     assert not check.metadata_guard("").ok
 

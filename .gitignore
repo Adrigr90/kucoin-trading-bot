@@ -22,3 +22,6 @@ secrets/
 # OS files
 .DS_Store
 Thumbs.db
+
+# Files for the reviewer of the current round (copies of ..\PARA_ENVIAR); never committed
+revision_actual/

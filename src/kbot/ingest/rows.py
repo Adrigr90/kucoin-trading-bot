@@ -11,8 +11,10 @@ keeps a 16-byte digest of every key it wrote, some 150 MB for a day of the refer
 
 Decisions that need the database stay those of ``MemorySink``, and their rows are not
 written here: the late evidence of the minutes (a few rows of ``trading_seen_late``,
-``late_ws_candles`` and ``late_ws_repeats``) and the close of a day (``minute_status``,
-computed in SQL from what the database holds). They are few and small.
+``late_ws_candles`` and ``late_ws_repeats``) and the close of a day, computed in SQL from what
+the database holds: ``minute_status``, and the S3 rows of ``data_quality_minute`` that
+``store.fill_missing_flow`` adds for the minutes of the day without any. They are few and
+small, and a recording without interruptions has none of the latter.
 """
 
 from __future__ import annotations

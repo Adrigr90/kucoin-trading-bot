@@ -75,20 +75,20 @@ SQL_TYPES = {
 BOOK_LEVEL = pa.struct([("price", pa.decimal128(38, 18)), ("size", pa.decimal128(38, 18))])
 
 # Bytes per row in PostgreSQL 18 (heap, TOAST, indexes), measured in the CI by
-# tests/db/test_storage_scale.py on 11 Nov 2026 (commit 2d071b6), with an hour of a realistic
-# universe. A table it does not fill (rare rows, and data_gaps) takes the largest total.
+# tests/db/test_storage_scale.py on 11 Nov 2026 (commit dafe12c), with an hour of a realistic
+# universe with the mix of 02 §3.1: two books of level 5 for each of level 50 (E3c-02). A table it does not fill (rare rows, and data_gaps) takes the largest total.
 POSTGRES_ROW_BYTES: dict[str, tuple[int, int, int]] = {
     "data_quality_minute": (102, 6, 199),
     "candles": (190, 8, 228),
     "ws_candles": (137, 14, 96),
     "minute_status": (123, 14, 82),
-    "depth_slot_status": (96, 2, 186),
-    "depth_metrics": (207, 2, 84),
-    "depth_snapshots": (777, 11, 84),
+    "depth_slot_status": (97, 2, 184),
+    "depth_metrics": (206, 2, 82),
+    "depth_snapshots": (910, 9, 100),
 }
 LARGEST_ROW = max(POSTGRES_ROW_BYTES.values(), key=sum)
-WAL_BYTES_PER_ROW = 487  # written, same test
-EMPTY_PARTITION_BYTES = 24_621  # files of its indexes and TOAST, and catalog rows; same CI
+WAL_BYTES_PER_ROW = 495  # written, same test
+EMPTY_PARTITION_BYTES = 25_486  # files of its indexes and TOAST, and catalog rows; same CI
 PARTITIONS = 12 * (HOT_DAYS + 1 + 14)  # the hot days, today and the 14 prepared ahead
 # The WAL on disk: max_wal_size by default, as an estimated reserve. It is a soft limit that
 # PostgreSQL may exceed (heavy writes, a failing archive or a lagging replica; the design has

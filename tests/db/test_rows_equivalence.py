@@ -232,7 +232,7 @@ def test_a_whole_run_with_the_rest_writers_writes_the_same_rows(
     connect: Connect, test_client: Factory, free_day: FreeDay, tmp_path: Path
 ) -> None:
     """The scenario of tests/db/test_ingest.py: candles of the last series decided with
-    REST, and a midnight (review of E3c, E3c-04)."""
+    REST, and a midnight with the close of the day before (review of E3c, E3c-04)."""
     day = free_day()
     midnight = day + timedelta(days=1)
     start = midnight - timedelta(minutes=2, seconds=30)
@@ -266,7 +266,10 @@ def test_a_whole_run_with_the_rest_writers_writes_the_same_rows(
             for line in (tmp_path / f"{table}.jsonl").read_text(encoding="utf-8").splitlines()
         }
         assert {spot, futures} <= written
-        compare(conn, rows, sorted(written), day - timedelta(days=1), day + timedelta(days=4))
+        # From the first minute recorded: closing the day before fills in SQL the minutes
+        # without flow (store.fill_missing_flow), which only PostgreSQL holds.
+        first = midnight - timedelta(minutes=2)
+        compare(conn, rows, sorted(written), first, day + timedelta(days=4))
         last = conn.execute(
             "SELECT count(*) FROM market.candles WHERE series = 'last' AND symbol = ANY(%s)",
             ([spot, futures],),

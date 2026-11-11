@@ -1,9 +1,11 @@
 """The automatic check of the hardened server (02 §9 and §13.1; acceptance F2-A10).
 
 Each check reads the state of the server through a command or a file and gives a verdict.
-``python -m kbot.ops.check`` runs them all on the server, prints the report and exits
-with 1 if any fails. The checks are pure functions of what the commands print, so the
-unit tests feed them recorded outputs; the real commands run only on the server.
+``python -m kbot.ops`` runs them all on the server, prints the report and exits with 1
+if any fails. The checks are pure functions of what the commands print, so the unit
+tests feed them recorded outputs; the real commands run only on the server. A command
+that fails, or an output the parser does not understand, is a failed check, never a
+passed one (review of E4a, E4a-06).
 """
 
 from __future__ import annotations
@@ -13,14 +15,34 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-Runner = Callable[[list[str]], str]  # a command and its standard output
-Reader = Callable[[str], str]  # a path and its text
+
+@dataclass(frozen=True)
+class Command:
+    """What a command printed, and whether it succeeded."""
+
+    stdout: str
+    returncode: int
+    stderr: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.returncode == 0
+
+
+Runner = Callable[[list[str]], Command]
+Reader = Callable[[str], str]  # a path and its text; raises OSError when it cannot
+
+
+class CommandFailed(Exception):
+    pass
+
 
 SERVICE_USERS = ("kbot_ingest", "kbot_archive", "kbot_backup", "kbot_restore", "kbot_sync")
 # Only SSH listens on the network (02 §9). PostgreSQL has listen_addresses = '' and
 # systemd-resolved listens on 127.0.0.53, which is the loopback and not the network.
 LISTENING_ALLOWED = {("0.0.0.0", "22"), ("[::]", "22"), ("*", "22")}  # noqa: S104
 LOOPBACK = ("127.", "[::1]")
+GUARD_SERVICE = "kbot-metadata-guard"
 
 
 @dataclass(frozen=True)
@@ -34,12 +56,15 @@ class Verdict:
 
 
 def listening_ports(ss_output: str) -> Verdict:
-    """``ss -Hltn``: every TCP listener must be SSH, or on the loopback."""
+    """``ss -Hltn``: every TCP listener must be SSH, or on the loopback. A line that is not
+    a listener row is a malformed output and fails the check."""
     unexpected = []
     for line in ss_output.splitlines():
         fields = line.split()
-        if len(fields) < 4:
+        if not fields:
             continue
+        if len(fields) < 5 or fields[0] != "LISTEN":
+            return Verdict("listening ports", False, f"unexpected output: {line.strip()!r}")
         local = fields[3]
         address, _, port = local.rpartition(":")
         if (address, port) in LISTENING_ALLOWED or address.startswith(LOOPBACK):
@@ -71,18 +96,45 @@ def sshd_settings(sshd_T_output: str) -> Verdict:
     return Verdict("sshd", True, "keys only, no root, no forwarding")
 
 
+# A rule row of `ufw status verbose`: "<to>  <action> <direction>  <from>  [# comment]",
+# where <to> and <from> may carry "(v6)" and an interface ("22/tcp on eth0").
+_UFW_RULE = re.compile(
+    r"^(?P<to>\S.*?)\s{2,}(?P<action>ALLOW|DENY|REJECT|LIMIT)\s+(?P<direction>IN|OUT|FWD)"
+    r"\s{2,}(?P<from>\S.*?)(?:\s+#.*)?$"
+)
+
+
 def ufw_status(ufw_output: str) -> Verdict:
-    """``ufw status verbose``: active, deny incoming, and only port 22 allowed in."""
+    """``ufw status verbose``: active, deny incoming, and only SSH allowed in, only from
+    the owner's address, in IPv4 and IPv6 alike (review of E4a, E4a-05). Every row after
+    the header must parse; an unknown row fails the check."""
     if not re.search(r"^Status: active", ufw_output, re.MULTILINE):
         return Verdict("ufw", False, "not active")
     if not re.search(r"^Default: deny \(incoming\)", ufw_output, re.MULTILINE):
         return Verdict("ufw", False, "incoming is not denied by default")
-    allowed = re.findall(r"^(\S+)\s+ALLOW IN\s+(\S+)", ufw_output, re.MULTILINE)
-    ports = {port.split("/")[0] for port, _ in allowed}
-    if ports - {"22"}:
-        return Verdict("ufw", False, f"ports allowed in: {sorted(ports)}")
-    if any(source in ("Anywhere", "Anywhere (v6)") for _, source in allowed):
-        return Verdict("ufw", False, "SSH allowed from anywhere, not only from the owner")
+    lines = ufw_output.splitlines()
+    try:
+        start = next(i for i, line in enumerate(lines) if line.startswith("--")) + 1
+    except StopIteration:
+        return Verdict("ufw", False, "no rules table in the output")
+    problems = []
+    for line in lines[start:]:
+        if not line.strip():
+            continue
+        match = _UFW_RULE.match(line.rstrip())
+        if match is None:
+            return Verdict("ufw", False, f"rule not understood: {line.strip()!r}")
+        if match["direction"] != "IN" or match["action"] not in ("ALLOW", "LIMIT"):
+            continue
+        to = match["to"].replace("(v6)", "").strip()
+        source = match["from"].replace("(v6)", "").strip()
+        port = to.split("/")[0].split(" ")[0]
+        if port != "22":
+            problems.append(f"port {to} allowed in from {source}")
+        elif source.startswith("Anywhere"):
+            problems.append("SSH allowed from anywhere, not only from the owner")
+    if problems:
+        return Verdict("ufw", False, "; ".join(sorted(set(problems))))
     return Verdict("ufw", True, "active, deny incoming, SSH only from the owner's address")
 
 
@@ -134,31 +186,87 @@ def service_users(passwd: str) -> Verdict:
     return Verdict("service users", True, "all present, none with a shell")
 
 
-def metadata_guard(nft_output: str) -> Verdict:
-    """``nft list table inet kbot_guard``: the kernel rule of E4-D04 is loaded."""
-    if "169.254.169.254" in nft_output and "reject" in nft_output and "skuid" in nft_output:
-        return Verdict("metadata guard", True, "nftables rule loaded")
-    return Verdict("metadata guard", False, "table inet kbot_guard not loaded as expected")
+# The guard as the kernel lists it: an output hook and a rule that rejects the metadata
+# address on the HTTP ports for every user id but the allowed ones (E4a-04).
+_GUARD_HOOK = re.compile(r"type filter hook output priority")
+_GUARD_RULE = re.compile(
+    r"ip daddr 169\.254\.169\.254 tcp dport \{ 80, 443 \} meta skuid != \{ (?P<users>[^}]*)\}"
+    r".*\breject\b"
+)
+
+
+def metadata_guard(nft_output: str, allowed_users: frozenset[str] = frozenset({"root"})) -> Verdict:
+    """``nft list table inet kbot_guard``: the structure of E4-D04, not just its words."""
+    if "table inet kbot_guard" not in nft_output:
+        return Verdict("metadata guard", False, "table inet kbot_guard not loaded")
+    if not _GUARD_HOOK.search(nft_output):
+        return Verdict("metadata guard", False, "no output hook in the table")
+    rule = _GUARD_RULE.search(nft_output)
+    if rule is None:
+        return Verdict("metadata guard", False, "no reject rule for 169.254.169.254:80,443 by user")
+    users = {u.strip().strip('"') for u in rule["users"].split(",") if u.strip()}
+    # nft prints user ids as names when it knows them, or as numbers; root is 0.
+    users = {"root" if u == "0" else u for u in users}
+    if users != allowed_users:
+        return Verdict("metadata guard", False, f"users exempted: {sorted(users)}")
+    return Verdict("metadata guard", True, f"output hook, reject by user, exempt {sorted(users)}")
 
 
 def run_all(
     run: Runner, read: Reader, pg_conf_dir: str = "/etc/postgresql/18/main"
 ) -> list[Verdict]:
-    """Every check, with the real commands of the server."""
+    """Every check, with the real commands of the server. A command that fails or a file
+    that cannot be read fails its check with the error as the detail."""
+
+    def output(command: list[str]) -> str:
+        result = run(command)
+        if not result.ok:
+            raise CommandFailed(
+                f"{' '.join(command)}: exit {result.returncode}: {result.stderr.strip()}"
+            )
+        return result.stdout
+
+    def checked(name: str, check: Callable[[], Verdict]) -> Verdict:
+        try:
+            return check()
+        except (CommandFailed, OSError) as error:
+            return Verdict(name, False, str(error))
+
     verdicts = [
-        listening_ports(run(["ss", "-Hltn"])),
-        sshd_settings(run(["sshd", "-T"])),
-        ufw_status(run(["ufw", "status", "verbose"])),
-        service_active("fail2ban", run(["systemctl", "is-active", "fail2ban"])),
-        service_active("nftables", run(["systemctl", "is-active", "nftables"])),
-        metadata_guard(run(["nft", "list", "table", "inet", "kbot_guard"])),
-        unattended_upgrades(read("/etc/apt/apt.conf.d/52kbot-unattended")),
-        service_users(read("/etc/passwd")),
+        checked("listening ports", lambda: listening_ports(output(["ss", "-Hltn"]))),
+        checked("sshd", lambda: sshd_settings(output(["sshd", "-T"]))),
+        checked("ufw", lambda: ufw_status(output(["ufw", "status", "verbose"]))),
+        checked(
+            "fail2ban",
+            lambda: service_active("fail2ban", output(["systemctl", "is-active", "fail2ban"])),
+        ),
+        checked(
+            GUARD_SERVICE,
+            lambda: service_active(
+                GUARD_SERVICE, output(["systemctl", "is-active", GUARD_SERVICE])
+            ),
+        ),
+        checked(
+            "metadata guard",
+            lambda: metadata_guard(output(["nft", "list", "table", "inet", "kbot_guard"])),
+        ),
+        checked(
+            "unattended-upgrades",
+            lambda: unattended_upgrades(read("/etc/apt/apt.conf.d/52kbot-unattended")),
+        ),
+        checked("service users", lambda: service_users(read("/etc/passwd"))),
     ]
-    hba = Path(pg_conf_dir) / "pg_hba.conf"
+    hba = str(Path(pg_conf_dir) / "pg_hba.conf")
     if Path(pg_conf_dir).exists():
-        value = run(["sudo", "-u", "postgres", "psql", "-XAtc", "SHOW listen_addresses"])
-        verdicts.append(postgres_no_tcp(value, read(str(hba))))
+        verdicts.append(
+            checked(
+                "postgresql",
+                lambda: postgres_no_tcp(
+                    output(["sudo", "-u", "postgres", "psql", "-XAtc", "SHOW listen_addresses"]),
+                    read(hba),
+                ),
+            )
+        )
     else:
         verdicts.append(Verdict("postgresql", False, "not installed yet (stage E4b)"))
     return verdicts
@@ -168,8 +276,6 @@ def report(verdicts: list[Verdict], when: str) -> str:
     lines = [f"# Comprobación del servidor (F2-A10), {when}", ""]
     lines += [f"- {v.line()}" for v in verdicts]
     failed = sum(not v.ok for v in verdicts)
-    lines += [
-        "",
-        "Resultado: " + ("todo en verde" if not failed else f"{failed} comprobaciones fallan"),
-    ]
+    result = "todo en verde" if not failed else f"{failed} comprobaciones fallan"
+    lines += ["", "Resultado: " + result]
     return "\n".join(lines) + "\n"

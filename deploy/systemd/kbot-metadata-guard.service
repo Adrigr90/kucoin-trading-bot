@@ -1,0 +1,21 @@
+# kbot: the metadata guard (02 §13.1, E4-D04; review of E4a, E4a-01). It loads only the
+# table inet kbot_guard, after ufw, and never touches /etc/nftables.conf: Ubuntu's default
+# file there starts with `flush ruleset`, which would also wipe the tables of ufw.
+# The table is replaced atomically (declare, delete, declare again inside the file).
+[Unit]
+Description=kbot: only root may reach the instance metadata (nftables)
+Documentation=file:///opt/kbot/docs/especificacion/02_Especificacion_vigente.md
+After=ufw.service network-pre.target
+Wants=network-pre.target
+DefaultDependencies=no
+Before=network.target svc-ingest.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/kbot/metadata-guard.nft
+ExecReload=/usr/sbin/nft -f /etc/kbot/metadata-guard.nft
+ExecStop=/usr/sbin/nft delete table inet kbot_guard
+
+[Install]
+WantedBy=multi-user.target

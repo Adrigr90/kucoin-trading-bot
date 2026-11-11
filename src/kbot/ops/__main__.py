@@ -9,21 +9,23 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from kbot.ops import check
+from kbot.ops.check import Command
 
 
-def _run(command: list[str]) -> str:
+def _run(command: list[str]) -> Command:
+    """The command's output and exit code, kept apart: a failure never looks like an
+    output (review of E4a, E4a-06)."""
     try:
         done = subprocess.run(command, capture_output=True, text=True, timeout=60, check=False)  # noqa: S603
-    except (OSError, subprocess.TimeoutExpired) as error:
-        return f"error: {error}"
-    return done.stdout if done.returncode == 0 else f"error ({done.returncode}): {done.stderr}"
+    except OSError as error:
+        return Command("", 127, str(error))
+    except subprocess.TimeoutExpired:
+        return Command("", 124, "timeout")
+    return Command(done.stdout, done.returncode, done.stderr)
 
 
 def _read(path: str) -> str:
-    try:
-        return Path(path).read_text(encoding="utf-8")
-    except OSError as error:
-        return f"error: {error}"
+    return Path(path).read_text(encoding="utf-8")
 
 
 def main(argv: list[str] | None = None) -> int:

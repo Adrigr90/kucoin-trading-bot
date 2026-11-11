@@ -1,14 +1,15 @@
-# kbot: the checks of the network isolation, run on the server by `kbot.ops.check`
-# (02 §13.1, points 2 and 8; B19, point 35; E4-D04). An instance of this template runs
-# `python -m kbot.ops.netcheck <case>` as the user given in the instance name, with the
-# same isolation as the service of that user, so that what is checked is the real
-# context: the Unix socket of PostgreSQL must work, KuCoin must be unreachable with
-# IPAddressDeny=any, and the instance metadata must be rejected for every user but root
-# and, from E4c, kbot_backup.
+# kbot: B19 (point 35), checked on the server by `kbot.ops.netcheck b19` from inside the
+# isolation of a service: with IPAddressDeny=any the Unix socket of PostgreSQL must still
+# work for a user with a role, and KuCoin must be unreachable. An instance runs as the
+# user given in its name:
 #
-#   systemctl start kbot-netcheck@kbot_ingest   # exit 0 when every case holds
+#   systemctl start kbot-netcheck@kbot_ingest   # exit 0 when the case holds
+#
+# This unit blocks every address itself, so it says nothing about the metadata guard of
+# E4-D04; that one is kbot-guardcheck@.service, which blocks nothing (review of E4a,
+# E4a-04).
 [Unit]
-Description=kbot: network isolation check as %i
+Description=kbot: B19 check (IPAddressDeny=any) as %i
 
 [Service]
 Type=oneshot
@@ -16,7 +17,7 @@ User=%i
 Group=%i
 WorkingDirectory=/opt/kbot
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/opt/kbot/.venv/bin/python -m kbot.ops.netcheck
+ExecStart=/opt/kbot/.venv/bin/python -m kbot.ops.netcheck b19
 TimeoutStartSec=2min
 
 NoNewPrivileges=yes

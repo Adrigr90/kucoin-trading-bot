@@ -201,9 +201,17 @@ def _match(expr: dict[str, Any], left: dict[str, Any], op: str = "==") -> dict[s
     return right if isinstance(right, dict) else {"value": right}
 
 
+class _NotUnderstood(Exception):
+    """An element of an nft set that this parser does not interpret (a range, a prefix,
+    a concatenation...). It must never be dropped: it could widen the exemption (review
+    of E4a, third round)."""
+
+
 def _set_values(right: dict[str, Any]) -> set[Any]:
     values = right["set"] if "set" in right else [right.get("value")]
-    return {v for v in values if not isinstance(v, dict)}
+    if any(not isinstance(v, int | str) or isinstance(v, bool) for v in values):
+        raise _NotUnderstood(f"set element not understood: {values!r}")
+    return set(values)
 
 
 def _guard_rule_users(rule: dict[str, Any]) -> set[str] | None:
@@ -262,7 +270,10 @@ def metadata_guard(nft_json: str, allowed_users: frozenset[str] = frozenset({"ro
         rule = o.get("rule")
         if rule is None or rule.get("chain") not in hooked or rule["chain"] in blocked:
             continue
-        users = _guard_rule_users(rule)
+        try:
+            users = _guard_rule_users(rule)
+        except _NotUnderstood as error:
+            return Verdict("metadata guard", False, str(error))
         if users is not None:
             if users != allowed_users:
                 return Verdict("metadata guard", False, f"users exempted: {sorted(users)}")

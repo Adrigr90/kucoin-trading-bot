@@ -189,6 +189,12 @@ def test_metadata_guard_is_checked_structurally() -> None:
     assert "reachable" in check.metadata_guard(nft_json(accept_first=True)).detail
     extra = check.metadata_guard(nft_json(users=["root", "kbot_ingest"]))
     assert not extra.ok and "kbot_ingest" in extra.detail
+    # Third round: an element the parser does not interpret (a range of user ids) must
+    # fail the check, never be dropped to leave only root.
+    ranged = check.metadata_guard(nft_json(users=[0, {"range": [100, 65535]}]))
+    assert not ranged.ok and "not understood" in ranged.detail
+    prefix = check.metadata_guard(nft_json(users=[{"prefix": {"addr": "0", "len": 8}}]))
+    assert not prefix.ok
     e4c = nft_json(users=["root", "kbot_backup"])
     assert not check.metadata_guard(e4c).ok
     assert check.metadata_guard(e4c, frozenset({"root", "kbot_backup"})).ok

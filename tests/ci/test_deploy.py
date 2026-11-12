@@ -156,3 +156,24 @@ def test_tmpfiles_creates_the_shared_lock_owned_by_root() -> None:
     text = (DEPLOY / "etc" / "tmpfiles.d" / "kbot.conf").read_text(encoding="utf-8")
     assert "d /run/kbot 0750 root kbot" in text
     assert "f /run/kbot/kucoin-rest.lock 0660 root kbot" in text
+
+
+def test_postgresql_production_files_match_02() -> None:
+    """Stage E4b: no TCP, peer only without a map, the lock table of 02 §3.9."""
+    hba = (DEPLOY / "etc" / "postgresql" / "pg_hba.conf").read_text(encoding="utf-8")
+    rules = [line.split() for line in hba.splitlines() if line.strip() and not line.startswith("#")]
+    assert rules == [["local", "all", "all", "peer"]]
+    conf = (DEPLOY / "etc" / "postgresql" / "kbot.conf").read_text(encoding="utf-8")
+    settings = dict(
+        line.split("=", 1)
+        for line in conf.splitlines()
+        if line.strip() and not line.startswith("#")
+    )
+    settings = {k.strip(): v.strip() for k, v in settings.items()}
+    assert settings["listen_addresses"] == "''"
+    assert settings["max_locks_per_transaction"] == "256"
+    assert settings["timezone"] == "'UTC'" and settings["log_timezone"] == "'UTC'"
+    assert settings["log_statement"] == "'ddl'"
+    script = (DEPLOY / "install" / "02_postgresql.sh").read_text(encoding="utf-8")
+    assert "kbot.ops.pgcheck" in script and "f1a6_servidor.sh" in script
+    assert "SET ROLE" not in script  # the migrations do it themselves (migrations/env.py)

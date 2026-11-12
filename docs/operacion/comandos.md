@@ -30,6 +30,16 @@ Cada comando que Claude ejecuta en el servidor por SSH (respuesta P-E4-1) aparec
 | `sudo systemctl stop svc-ingest` | Para el grabador |
 | `sudo reboot` | Reinicia el servidor. Solo lo decide el propietario (las actualizaciones nunca reinician solas) |
 
+## E4b. PostgreSQL de producción
+
+| Comando (en el servidor) | Qué hace |
+|---|---|
+| `sudo bash /opt/kbot/deploy/install/02_postgresql.sh` | Instala PostgreSQL 18 (PGDG, arm64), crea el clúster `18/main` con los datos en `/srv/kbot/postgresql`, aplica la configuración de producción (sin TCP, solo `peer`, sin mapa, `max_locks_per_transaction = 256`), los roles de `sql/roles.sql` (una sola vez), las migraciones `0001 → 0003` como `kbot_owner`, y ejecuta las dos comprobaciones de abajo. Se puede repetir |
+| `sudo -u postgres /opt/kbot/.venv/bin/python -m kbot.ops.pgcheck --catalog /opt/kbot/sql/security_definer_catalog.json` | Compara el clúster con 02 §9: huella de las funciones `SECURITY DEFINER`, atributos de los roles (sin contraseña, límites, `statement_timeout`), `pg_hba` solo `local peer` sin mapa, `listen_addresses` vacío, bloqueos y migración aplicada |
+| `sudo bash /opt/kbot/deploy/install/f1a6_servidor.sh` | F1-A6 con los usuarios reales (punto 31): cada usuario de servicio conecta solo con su rol, los usuarios sin rol son rechazados, los propietarios no pueden entrar y nadie puede crear nada en ningún esquema |
+| `sudo -u postgres psql -d kbot -c '\dt market.*'` | Mira las tablas del esquema de mercado |
+| `sudo pg_lsclusters` | Estado del clúster |
+
 ## Lo que nunca se ejecuta
 
 - Nada que cree claves de API de Oracle, de KuCoin o de otro servicio.

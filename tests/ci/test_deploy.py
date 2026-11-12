@@ -63,6 +63,10 @@ def test_the_system_script_never_verifies_units_before_their_interpreter_exists(
     # E4a-01: the guard never goes through /etc/nftables.conf (Ubuntu's flushes everything).
     assert "/etc/nftables.conf" not in system
     assert "kbot-metadata-guard" in system
+    # E4a-01, residual: the generic nftables.service is retired before ufw is enabled,
+    # because stopping it flushes the whole ruleset.
+    assert system.index("systemctl disable --now nftables") < system.index("ufw --force enable")
+    assert "nft list ruleset | grep -q 'ufw'" in system
     # E4a-03: no data volume means no installation, unless a test instance says so.
     assert "KBOT_ALLOW_BOOT_VOLUME" in system
     assert "findmnt -no LABEL" in system

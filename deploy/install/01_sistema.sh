@@ -81,6 +81,12 @@ install -o root -g root -m 0644 "$repo/deploy/etc/ssh/sshd_config.d/10-kbot.conf
 sshd -t
 systemctl reload ssh
 
+step "retire the generic nftables.service before touching ufw (E4a-01)"
+# Stopping it runs its ExecStop, `nft flush ruleset`, which would also wipe the rules of
+# ufw if they were already loaded; so it goes first, and its failure is not fatal.
+systemctl disable --now nftables >/dev/null 2>&1 || true
+systemctl mask nftables >/dev/null 2>&1 || true
+
 step "ufw: deny everything incoming except SSH from the owner's address"
 ufw --force reset >/dev/null
 ufw default deny incoming
@@ -95,14 +101,15 @@ step "metadata guard (E4-D04): only root may reach the instance metadata"
 install -d -o root -g root -m 0755 /etc/kbot
 install -o root -g root -m 0644 "$repo/deploy/etc/kbot/metadata-guard.nft" /etc/kbot/metadata-guard.nft
 nft -c -f /etc/kbot/metadata-guard.nft
-systemctl disable --now nftables >/dev/null 2>&1 || true
 install -o root -g root -m 0644 "$repo/deploy/systemd/kbot-metadata-guard.service" \
   /etc/systemd/system/kbot-metadata-guard.service
 systemctl daemon-reload
 systemctl enable --now kbot-metadata-guard >/dev/null
 systemctl reload kbot-metadata-guard
 nft list table inet kbot_guard >/dev/null
+# The effective rules after the guard: ufw active and its chains still in the kernel.
 ufw status | grep -q '^Status: active'
+nft list ruleset | grep -q 'ufw' || { echo 'the rules of ufw are gone' >&2; exit 1; }
 
 step "fail2ban on sshd"
 install -o root -g root -m 0644 "$repo/deploy/etc/fail2ban/jail.d/kbot.conf" /etc/fail2ban/jail.d/kbot.conf

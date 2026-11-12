@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from kbot.ops import check, netcheck
@@ -43,13 +45,64 @@ PASSWD = "\n".join(
         ),
     ]
 )
-NFT_OK = """table inet kbot_guard {
-	chain output {
-		type filter hook output priority filter - 10; policy accept;
-		ip daddr 169.254.169.254 tcp dport { 80, 443 } meta skuid != { root } counter reject
-	}
-}
-"""
+
+
+def nft_json(
+    rule_chain: str = "output",
+    users: list[object] | None = None,
+    hooked: bool = True,
+    accept_first: bool = False,
+) -> str:
+    """What ``nft -j list table inet kbot_guard`` prints for the guard, with variations."""
+    users = ["root"] if users is None else users
+    chain = {"family": "inet", "table": "kbot_guard", "name": "output", "handle": 1}
+    if hooked:
+        chain |= {"type": "filter", "hook": "output", "prio": -10, "policy": "accept"}
+    guard_rule = {
+        "family": "inet",
+        "table": "kbot_guard",
+        "chain": rule_chain,
+        "handle": 3,
+        "expr": [
+            {
+                "match": {
+                    "op": "==",
+                    "left": {"payload": {"protocol": "ip", "field": "daddr"}},
+                    "right": "169.254.169.254",
+                }
+            },
+            {
+                "match": {
+                    "op": "==",
+                    "left": {"payload": {"protocol": "tcp", "field": "dport"}},
+                    "right": {"set": [80, 443]},
+                }
+            },
+            {"match": {"op": "!=", "left": {"meta": {"key": "skuid"}}, "right": {"set": users}}},
+            {"counter": {"packets": 0, "bytes": 0}},
+            {"reject": None},
+        ],
+    }
+    accept_rule = {
+        "family": "inet",
+        "table": "kbot_guard",
+        "chain": "output",
+        "handle": 2,
+        "expr": [{"counter": {"packets": 0, "bytes": 0}}, {"accept": None}],
+    }
+    objects: list[dict[str, object]] = [
+        {"metainfo": {"version": "1.0.9", "release_name": "x", "json_schema_version": 1}},
+        {"table": {"family": "inet", "name": "kbot_guard", "handle": 7}},
+        {"chain": chain},
+        {"chain": {"family": "inet", "table": "kbot_guard", "name": "unused", "handle": 9}},
+    ]
+    if accept_first:
+        objects.append({"rule": accept_rule})
+    objects.append({"rule": guard_rule})
+    return json.dumps({"nftables": objects})
+
+
+NFT_OK = nft_json()
 
 
 def test_only_ssh_may_listen_on_the_network() -> None:
@@ -123,17 +176,20 @@ def test_service_users_exist_without_a_shell() -> None:
 
 
 def test_metadata_guard_is_checked_structurally() -> None:
-    """Review of E4a, E4a-04: the words alone passed; the hook and the users must match."""
+    """Review of E4a, E4a-04: the rule must sit in the chain hooked on output, be reachable
+    and exempt exactly the allowed users; the kernel's JSON is what is parsed."""
     assert check.metadata_guard(NFT_OK).ok
-    assert check.metadata_guard(NFT_OK.replace("{ root }", "{ 0 }")).ok
+    assert check.metadata_guard(nft_json(users=[0])).ok  # root as a number
     assert not check.metadata_guard("").ok
-    no_hook = NFT_OK.replace("type filter hook output priority filter - 10; policy accept;", "")
-    assert "hook" in check.metadata_guard(no_hook).detail
-    words_only = "table inet kbot_guard 169.254.169.254 skuid reject"
-    assert not check.metadata_guard(words_only).ok
-    extra_user = NFT_OK.replace("{ root }", "{ root, kbot_ingest }")
-    assert "kbot_ingest" in check.metadata_guard(extra_user).detail
-    e4c = NFT_OK.replace("{ root }", "{ root, kbot_backup }")
+    assert not check.metadata_guard("table inet kbot_guard 169.254.169.254 skuid reject").ok
+    assert "hooked" in check.metadata_guard(nft_json(hooked=False)).detail
+    # The reviewer's example: the rule in a chain nothing calls filters nothing.
+    assert "reachable" in check.metadata_guard(nft_json(rule_chain="unused")).detail
+    # A rule behind an unconditional accept is never reached either.
+    assert "reachable" in check.metadata_guard(nft_json(accept_first=True)).detail
+    extra = check.metadata_guard(nft_json(users=["root", "kbot_ingest"]))
+    assert not extra.ok and "kbot_ingest" in extra.detail
+    e4c = nft_json(users=["root", "kbot_backup"])
     assert not check.metadata_guard(e4c).ok
     assert check.metadata_guard(e4c, frozenset({"root", "kbot_backup"})).ok
 
@@ -166,6 +222,7 @@ def test_run_all_uses_the_commands_and_files_of_the_server() -> None:
     assert all(v.ok for v in verdicts[:-1])
     assert ["ss", "-Hltn"] in commands
     assert ["systemctl", "is-active", "kbot-metadata-guard"] in commands
+    assert ["nft", "-j", "list", "table", "inet", "kbot_guard"] in commands
     text = check.report(verdicts, "2026-11-11 12:00 UTC")
     assert "1 comprobaciones fallan" in text
     assert check.report([Verdict("x", True, "y")], "now").endswith("todo en verde\n")
@@ -194,7 +251,8 @@ def test_a_failed_command_or_unreadable_file_fails_its_check() -> None:
         ("b19", "kbot_ingest", {"postgresql socket accepts", "kucoin unreachable"}),
         ("b19", "kbot_sync", {"postgresql socket refuses", "kucoin unreachable"}),
         ("guard", "kbot_ingest", {"metadata rejected"}),
-        ("guard", "kbot_backup", {"metadata reachable"}),
+        ("guard", "kbot_backup", {"metadata rejected"}),  # exempted only from E4c
+        ("guard", "root", {"metadata reachable"}),
     ],
 )
 def test_netcheck_expectations_depend_on_the_case_and_the_user(
@@ -206,5 +264,5 @@ def test_netcheck_expectations_depend_on_the_case_and_the_user(
     monkeypatch.setattr(netcheck, "postgres_socket_accepts", lambda u: u in ("kbot_ingest",))
     results = netcheck.expectations(case, user)
     assert set(results) == names
-    expected_ok = {"guard": user != "kbot_backup", "b19": True}[case]
+    expected_ok = {"guard": user != "root", "b19": True}[case]  # can_connect is False
     assert all(results.values()) is expected_ok

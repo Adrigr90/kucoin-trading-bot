@@ -8,7 +8,8 @@ E4a-04: each case runs where nothing else could produce its result):
   unreachable (B19, point 35);
 - ``guard`` inside ``kbot-guardcheck@<user>``, which sets no address filter at all: the
   instance metadata is rejected by the kernel rule of ``/etc/kbot/metadata-guard.nft``
-  for every user but root and, from E4c, ``kbot_backup``, for which it is reachable.
+  for every user but the exempted ones (root now; ``kbot_backup`` from E4c), for which
+  it is reachable.
 
 A user without a SQL role (``kbot_restore``, ``kbot_sync``) must be refused by peer.
 Exit 0 when every expectation of the case holds, 1 otherwise, one line per expectation.
@@ -25,7 +26,9 @@ from kbot.db.roles import DATABASE, LOGIN_ROLES, SOCKET_DIR
 
 METADATA = ("169.254.169.254", 80)
 KUCOIN = ("api.kucoin.com", 443)
-METADATA_ALLOWED = frozenset({"root", "kbot_backup"})
+# Who may reach the metadata now: root (the agent of Oracle). Stage E4c adds kbot_backup,
+# in the guard, here and in kbot.ops.check at the same time (review of E4a, E4a-04).
+METADATA_ALLOWED = frozenset({"root"})
 
 
 def can_connect(host: str, port: int, timeout: float = 5.0) -> bool:

@@ -10,10 +10,12 @@ passed one (review of E4a, E4a-06).
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -186,30 +188,92 @@ def service_users(passwd: str) -> Verdict:
     return Verdict("service users", True, "all present, none with a shell")
 
 
-# The guard as the kernel lists it: an output hook and a rule that rejects the metadata
-# address on the HTTP ports for every user id but the allowed ones (E4a-04).
-_GUARD_HOOK = re.compile(r"type filter hook output priority")
-_GUARD_RULE = re.compile(
-    r"ip daddr 169\.254\.169\.254 tcp dport \{ 80, 443 \} meta skuid != \{ (?P<users>[^}]*)\}"
-    r".*\breject\b"
-)
+GUARD_ADDRESS = "169.254.169.254"
+GUARD_PORTS = {80, 443}
 
 
-def metadata_guard(nft_output: str, allowed_users: frozenset[str] = frozenset({"root"})) -> Verdict:
-    """``nft list table inet kbot_guard``: the structure of E4-D04, not just its words."""
-    if "table inet kbot_guard" not in nft_output:
+def _match(expr: dict[str, Any], left: dict[str, Any], op: str = "==") -> dict[str, Any] | None:
+    """The right side of a `match` expression whose left side is `left`, or None."""
+    match = expr.get("match")
+    if match is None or match.get("left") != left or match.get("op") != op:
+        return None
+    right = match.get("right")
+    return right if isinstance(right, dict) else {"value": right}
+
+
+def _set_values(right: dict[str, Any]) -> set[Any]:
+    values = right["set"] if "set" in right else [right.get("value")]
+    return {v for v in values if not isinstance(v, dict)}
+
+
+def _guard_rule_users(rule: dict[str, Any]) -> set[str] | None:
+    """The users exempted by a rule that rejects the metadata address on the HTTP ports
+    for every other user id, or None if the rule is not that rule."""
+    exprs = rule.get("expr", [])
+    daddr = any(
+        _match(e, {"payload": {"protocol": "ip", "field": "daddr"}}) == {"value": GUARD_ADDRESS}
+        for e in exprs
+    )
+    ports = any(
+        (right := _match(e, {"payload": {"protocol": "tcp", "field": "dport"}})) is not None
+        and _set_values(right) == GUARD_PORTS
+        for e in exprs
+    )
+    users = next(
+        (
+            _set_values(right)
+            for e in exprs
+            if (right := _match(e, {"meta": {"key": "skuid"}}, "!=")) is not None
+        ),
+        None,
+    )
+    rejects = any("reject" in e for e in exprs)
+    if not (daddr and ports and users is not None and rejects):
+        return None
+    return {"root" if u in (0, "0") else str(u) for u in users}
+
+
+def _unconditional_accept(rule: dict[str, Any]) -> bool:
+    exprs = [e for e in rule.get("expr", []) if "counter" not in e]
+    return bool(exprs) and all("accept" in e for e in exprs)
+
+
+def metadata_guard(nft_json: str, allowed_users: frozenset[str] = frozenset({"root"})) -> Verdict:
+    """``nft -j list table inet kbot_guard``: the rule of E4-D04 must sit in a chain hooked
+    on output, before any unconditional accept, and exempt exactly the allowed users
+    (review of E4a, E4a-04: a rule in a chain nothing calls filters nothing)."""
+    try:
+        objects = json.loads(nft_json).get("nftables", [])
+    except (json.JSONDecodeError, AttributeError):
+        return Verdict("metadata guard", False, "nft did not return JSON")
+    if not any(o.get("table", {}).get("name") == "kbot_guard" for o in objects):
         return Verdict("metadata guard", False, "table inet kbot_guard not loaded")
-    if not _GUARD_HOOK.search(nft_output):
-        return Verdict("metadata guard", False, "no output hook in the table")
-    rule = _GUARD_RULE.search(nft_output)
-    if rule is None:
-        return Verdict("metadata guard", False, "no reject rule for 169.254.169.254:80,443 by user")
-    users = {u.strip().strip('"') for u in rule["users"].split(",") if u.strip()}
-    # nft prints user ids as names when it knows them, or as numbers; root is 0.
-    users = {"root" if u == "0" else u for u in users}
-    if users != allowed_users:
-        return Verdict("metadata guard", False, f"users exempted: {sorted(users)}")
-    return Verdict("metadata guard", True, f"output hook, reject by user, exempt {sorted(users)}")
+    hooked = {
+        o["chain"]["name"]
+        for o in objects
+        if "chain" in o
+        and o["chain"].get("hook") == "output"
+        and o["chain"].get("type") == "filter"
+    }
+    if not hooked:
+        return Verdict("metadata guard", False, "no chain hooked on output in the table")
+    blocked: set[str] = set()
+    for o in objects:
+        rule = o.get("rule")
+        if rule is None or rule.get("chain") not in hooked or rule["chain"] in blocked:
+            continue
+        users = _guard_rule_users(rule)
+        if users is not None:
+            if users != allowed_users:
+                return Verdict("metadata guard", False, f"users exempted: {sorted(users)}")
+            return Verdict(
+                "metadata guard", True, f"output hook, reject by user, exempt {sorted(users)}"
+            )
+        if _unconditional_accept(rule):
+            blocked.add(rule["chain"])  # what follows in this chain is never reached
+    return Verdict(
+        "metadata guard", False, "no reachable reject rule for 169.254.169.254:80,443 by user"
+    )
 
 
 def run_all(
@@ -248,7 +312,7 @@ def run_all(
         ),
         checked(
             "metadata guard",
-            lambda: metadata_guard(output(["nft", "list", "table", "inet", "kbot_guard"])),
+            lambda: metadata_guard(output(["nft", "-j", "list", "table", "inet", "kbot_guard"])),
         ),
         checked(
             "unattended-upgrades",

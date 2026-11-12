@@ -1,9 +1,9 @@
 # kbot: the metadata guard of E4-D04, checked from the real context of a user, with no
 # IPAddressDeny at all so that only the kernel rule by user can reject the connection
 # (review of E4a, E4a-04). `kbot.ops.netcheck guard` expects the instance metadata to be
-# rejected for every user but root and kbot_backup, and accepted for those two. The rule
-# matches the user id, so running as kbot_sync here is the same context as its SFTP
-# session, which cannot run programs.
+# rejected for every user but the exempted ones (root now; kbot_backup from E4c), and
+# accepted for those. The rule matches the user id, so running as kbot_sync here is the
+# same context as its SFTP session, which cannot run programs.
 #
 #   systemctl start kbot-guardcheck@kbot_ingest
 #   systemctl start kbot-guardcheck@kbot_sync

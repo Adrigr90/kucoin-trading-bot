@@ -5,7 +5,8 @@
 #   sudo bash /opt/kbot/deploy/install/01_sistema.sh <owner IPv4>/32 [data volume device]
 #
 # It is idempotent: running it again only reapplies the same state. It never touches
-# PostgreSQL (02_postgresql.sh, stage E4b) nor the code (03_codigo.sh). Every step is
+# the code (02_codigo.sh) nor PostgreSQL (03_postgresql.sh, stage E4b); 04_verificar.sh
+# checks the whole at the end. Every step is
 # listed in docs/operacion/comandos.md.
 #
 # The data volume of D11 (110 GB) must be attached: without it the script stops before
@@ -121,7 +122,7 @@ install -o root -g root -m 0644 "$repo/deploy/etc/apt/apt.conf.d/52kbot-unattend
   /etc/apt/apt.conf.d/52kbot-unattended
 systemctl enable --now unattended-upgrades >/dev/null
 
-step "shared REST lock (E4-D06) and the systemd units (verified in 03_codigo.sh)"
+step "shared REST lock (E4-D06) and the systemd units (verified in 04_verificar.sh)"
 install -o root -g root -m 0644 "$repo/deploy/etc/tmpfiles.d/kbot.conf" /etc/tmpfiles.d/kbot.conf
 systemd-tmpfiles --create /etc/tmpfiles.d/kbot.conf
 for unit in "$repo"/deploy/systemd/*; do
@@ -129,4 +130,4 @@ for unit in "$repo"/deploy/systemd/*; do
 done
 systemctl daemon-reload
 
-step "done: nothing is enabled yet; 02_postgresql.sh and 03_codigo.sh come next"
+step "done: nothing is enabled yet; 02_codigo.sh, 03_postgresql.sh and 04_verificar.sh come next"

@@ -6,12 +6,12 @@
 # the PC against the tarball and the .sha256 that the release publishes; E4a-07).
 # Run as root:
 #
-#   sudo bash /opt/kbot/deploy/install/03_codigo.sh <tag>
+#   sudo bash /opt/kbot/deploy/install/02_codigo.sh <tag>
 #
 # The first time, clone the repository by hand (docs/operacion/comandos.md) and run this
-# script from the clone; later runs update the clone to the new tag. At the end it
-# verifies the systemd units, which 01_sistema.sh installed, now that their interpreter
-# exists (E4a-02).
+# script from the clone; later runs update the clone to the new tag. The systemd units
+# are verified by 04_verificar.sh, once their interpreter (here) and PostgreSQL
+# (03_postgresql.sh) both exist (E4a-02 and E4b-02).
 set -euo pipefail
 
 if [[ $EUID -ne 0 ]]; then
@@ -51,13 +51,5 @@ chmod -R o-w "$repo/.venv"
 
 step "the services can read the code and the environment"
 sudo -u kbot_ingest "$repo/.venv/bin/python" -c "import kbot.ingest, kbot.archive, kbot.ops; print('ok')"
-
-step "the systemd units, verified with their interpreter in place"
-systemctl daemon-reload
-units=()
-for unit in "$repo"/deploy/systemd/*; do
-  units+=("/etc/systemd/system/$(basename "$unit")")
-done
-systemd-analyze verify --man=no --generators=no "${units[@]}"
 
 step "done: $(git -C "$repo" describe --tags)"

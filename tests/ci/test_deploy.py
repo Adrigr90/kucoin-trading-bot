@@ -54,12 +54,19 @@ def test_install_scripts_pass_shellcheck(script: Path) -> None:
     assert done.returncode == 0, done.stdout
 
 
-def test_the_system_script_never_verifies_units_before_their_interpreter_exists() -> None:
-    """Review of E4a, E4a-02: 01 installs the units, 03 verifies them with the venv."""
+def test_the_units_are_verified_only_when_everything_they_need_exists() -> None:
+    """Reviews of E4a (E4a-02) and E4b (E4b-02): 01 installs the units, 02 the code, 03
+    PostgreSQL, and only 04 verifies them, when the interpreter and postgresql.service are
+    both in place."""
+    scripts = sorted(p.name for p in (DEPLOY / "install").glob("0*.sh"))
+    assert scripts == ["01_sistema.sh", "02_codigo.sh", "03_postgresql.sh", "04_verificar.sh"]
     system = (DEPLOY / "install" / "01_sistema.sh").read_text(encoding="utf-8")
-    code = (DEPLOY / "install" / "03_codigo.sh").read_text(encoding="utf-8")
-    assert "systemd-analyze verify" not in system
-    assert "systemd-analyze verify" in code
+    verify = (DEPLOY / "install" / "04_verificar.sh").read_text(encoding="utf-8")
+    for name in scripts[:3]:
+        text = (DEPLOY / "install" / name).read_text(encoding="utf-8")
+        assert "systemd-analyze verify" not in text, name
+    assert "systemd-analyze verify" in verify
+    assert "kbot.ops.pgcheck" in verify and "f1a6_servidor.sh" in verify and "-m kbot.ops" in verify
     # E4a-01: the guard never goes through /etc/nftables.conf (Ubuntu's flushes everything).
     assert "/etc/nftables.conf" not in system
     assert "kbot-metadata-guard" in system
@@ -148,7 +155,7 @@ def test_uv_checksum_is_pinned_for_the_server() -> None:
     digest, _, name = text.split()[0], None, text.split()[-1]
     assert len(digest) == 64 and int(digest, 16)
     assert name == "uv-aarch64-unknown-linux-gnu.tar.gz"
-    code = (DEPLOY / "install" / "03_codigo.sh").read_text(encoding="utf-8")
+    code = (DEPLOY / "install" / "02_codigo.sh").read_text(encoding="utf-8")
     assert "uv.sha256" in code and "KBOT_UV_SHA256" not in code
 
 
@@ -174,6 +181,18 @@ def test_postgresql_production_files_match_02() -> None:
     assert settings["max_locks_per_transaction"] == "256"
     assert settings["timezone"] == "'UTC'" and settings["log_timezone"] == "'UTC'"
     assert settings["log_statement"] == "'ddl'"
-    script = (DEPLOY / "install" / "02_postgresql.sh").read_text(encoding="utf-8")
-    assert "kbot.ops.pgcheck" in script and "f1a6_servidor.sh" in script
+    script = (DEPLOY / "install" / "03_postgresql.sh").read_text(encoding="utf-8")
+    assert "kbot.ops.bootstrap" in script  # E4b-03: resumable, never `psql -f roles.sql`
+    assert 'roles.sql"' in script and "psql_admin -f" not in script
     assert "SET ROLE" not in script  # the migrations do it themselves (migrations/env.py)
+
+
+def test_f1a6_counts_a_refusal_only_by_its_sqlstate() -> None:
+    """Review of E4b, E4b-01: psql -c exits 1 on an SQL error, so exit codes cannot tell a
+    permission refusal from any other error; the script reads the SQLSTATE."""
+    text = (DEPLOY / "install" / "f1a6_servidor.sh").read_text(encoding="utf-8")
+    assert "VERBOSITY=sqlstate" in text
+    assert text.count('"SQLSTATE=42501"') >= 3
+    assert '" 3 "' not in text and 'expect "$user cannot create in $schema" 3' not in text
+    assert "ROLLBACK" in text  # nothing created by the test stays
+    assert "SHOW statement_timeout" in text  # E4b-05: the timeout a real session gets

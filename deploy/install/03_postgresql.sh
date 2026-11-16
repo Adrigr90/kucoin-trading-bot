@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # kbot, stage E4b (02 §9 and §13.1, point 3): PostgreSQL 18 of production. Run as root,
-# after 01_sistema.sh and 03_codigo.sh (the migrations need the environment of the code):
+# after 01_sistema.sh and 02_codigo.sh (the migrations need the environment of the code):
 #
-#   sudo bash /opt/kbot/deploy/install/02_postgresql.sh
+#   sudo bash /opt/kbot/deploy/install/03_postgresql.sh
 #
 # Installs PostgreSQL 18 from PGDG (arm64), creates the cluster 18/main with its data on
 # the data volume, applies the production configuration (no TCP, peer only), the roles of
-# sql/roles.sql, the migrations 0001 → 0003 as kbot_owner, and checks the result with
-# `kbot.ops.pgcheck`. Idempotent: an existing cluster, role or migration is kept.
+# sql/roles.sql and the migrations 0001 → 0003 as kbot_owner. It can be repeated after an
+# interruption at any point: roles and database are applied statement by statement, each
+# skipped only if its own object exists (E4b-03), and the result is checked afterwards by
+# 04_verificar.sh.
 set -euo pipefail
 
 if [[ $EUID -ne 0 ]]; then
@@ -28,7 +30,7 @@ if ! mountpoint -q "$data"; then
   exit 1
 fi
 if [[ ! -x "$repo/.venv/bin/alembic" ]]; then
-  echo "$repo/.venv is missing: run 03_codigo.sh first" >&2
+  echo "$repo/.venv is missing: run 02_codigo.sh first" >&2
   exit 1
 fi
 
@@ -65,12 +67,8 @@ psql_admin() { sudo -u postgres psql -X -v ON_ERROR_STOP=1 -h /var/run/postgresq
 psql_admin -Atc "SELECT version()"
 [[ "$(psql_admin -Atc "SHOW listen_addresses")" == "" ]]
 
-step "roles and database of sql/roles.sql (once)"
-if [[ "$(psql_admin -Atc "SELECT count(*) FROM pg_roles WHERE rolname = 'kbot_owner'")" == "0" ]]; then
-  psql_admin -f "$repo/sql/roles.sql"
-else
-  echo "roles already present; sql/roles.sql not reapplied"
-fi
+step "roles and database of sql/roles.sql (resumable, nothing is ever dropped)"
+sudo -u postgres "$repo/.venv/bin/python" -m kbot.ops.bootstrap "$repo/sql/roles.sql"
 
 step "migrations as kbot_owner (Alembic)"
 sudo -u postgres env KBOT_DB_ADMIN_URL="postgresql+psycopg://postgres@/kbot?host=/var/run/postgresql" \
@@ -78,10 +76,4 @@ sudo -u postgres env KBOT_DB_ADMIN_URL="postgresql+psycopg://postgres@/kbot?host
 sudo -u postgres env KBOT_DB_ADMIN_URL="postgresql+psycopg://postgres@/kbot?host=/var/run/postgresql" \
   "$repo/.venv/bin/alembic" -c "$repo/alembic.ini" current
 
-step "checks of 02 §9 on the live cluster (kbot.ops.pgcheck, as postgres)"
-sudo -u postgres "$repo/.venv/bin/python" -m kbot.ops.pgcheck --catalog "$repo/sql/security_definer_catalog.json"
-
-step "F1-A6 with the real system users (point 31)"
-bash "$repo/deploy/install/f1a6_servidor.sh"
-
-step "done: PostgreSQL is ready; the owner decides when to enable svc-ingest and the archive timer"
+step "done: run 04_verificar.sh next; the owner decides when to enable svc-ingest and the archive timer"

@@ -3,7 +3,9 @@
 Run as the administrator (``postgres``) over the Unix socket. It compares the cluster
 with what the repository fixes: the SECURITY DEFINER catalog of
 ``sql/security_definer_catalog.json``, the role attributes of 02 §9, ``pg_hba.conf`` with
-only ``local ... peer`` rules, no TCP listener, and the migration head. The same
+only ``local ... peer`` rules, no TCP listener, the migration head of the code, no
+setting tied to a database, and the effective privileges, memberships and ownership of
+``kbot.ops.privileges``. The same
 functions run in the CI against the ephemeral cluster, so the server check is the one
 the CI already trusts.
 """
@@ -14,12 +16,14 @@ import argparse
 import json
 import os
 import sys
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
 import psycopg
 
 from kbot.db.roles import DATABASE, SERVICE_ROLES, SOCKET_DIR
+from kbot.ops import privileges
 
 # Role attributes table of 02 §9: (login, connection limit, role settings).
 EXPECTED_ATTRIBUTES: dict[str, tuple[bool, int, list[str]]] = {
@@ -110,7 +114,53 @@ def hba_problems(rules: list[tuple[Any, ...]], *, allow_map: bool) -> list[str]:
     return problems
 
 
-def run(conn: psycopg.Connection, catalog: Path, *, allow_map: bool = False) -> list[str]:
+SETTINGS_QUERY = """
+SELECT COALESCE(r.rolname::text, '(every role)'), d.datname::text, s.setconfig
+FROM pg_db_role_setting s
+LEFT JOIN pg_roles r ON r.oid = s.setrole
+JOIN pg_database d ON d.oid = s.setdatabase
+WHERE d.datname = %s OR r.rolname LIKE 'kbot\\_%%'
+ORDER BY 1, 2
+"""
+
+
+def setting_problems(rows: list[tuple[Any, ...]]) -> list[str]:
+    """Rows of SETTINGS_QUERY: settings tied to a database. There must be none: a setting
+    of a role in a database overrides the role's own one, so the timeout a session really
+    gets would differ from the table of 02 §9 (review of E4b, E4b-05)."""
+    return [
+        f"setting in database {database} for {role}: {list(config)}"
+        for role, database, config in rows
+    ]
+
+
+def expected_head(alembic_ini: Path) -> str:
+    """The head of the migrations of the code deployed."""
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    heads = ScriptDirectory.from_config(Config(str(alembic_ini))).get_heads()
+    if len(heads) != 1:
+        raise ValueError(f"the code has {len(heads)} migration heads")
+    return str(heads[0])
+
+
+def migration_problems(rows: list[tuple[Any, ...]], head: str) -> list[str]:
+    """Rows of alembic_version against the head of the code (review of E4b, E4b-06)."""
+    versions = [str(row[0]) for row in rows]
+    if versions != [head]:
+        return [f"migrations at {versions or 'nothing'}, the code is at {head}"]
+    return []
+
+
+def run(
+    conn: psycopg.Connection,
+    catalog: Path,
+    *,
+    head: str,
+    allowed_grants: Iterable[privileges.Grant],
+    allow_map: bool = False,
+) -> list[str]:
     """Every problem found; an empty list means the cluster matches 02 §9."""
     problems = []
     if conn.info.dbname != DATABASE:
@@ -118,6 +168,8 @@ def run(conn: psycopg.Connection, catalog: Path, *, allow_map: bool = False) -> 
     expected = json.loads(catalog.read_text(encoding="utf-8"))
     problems += catalog_problems(live_catalog(conn), expected)
     problems += attribute_problems(conn.execute(ATTRIBUTES_QUERY).fetchall())
+    problems += setting_problems(conn.execute(SETTINGS_QUERY, (DATABASE,)).fetchall())
+    problems += privileges.problems(conn, allowed_grants)
     rules = conn.execute(
         "SELECT type, auth_method, options, error FROM pg_hba_file_rules ORDER BY rule_number"
     ).fetchall()
@@ -128,24 +180,49 @@ def run(conn: psycopg.Connection, catalog: Path, *, allow_map: bool = False) -> 
     locks = conn.execute("SHOW max_locks_per_transaction").fetchone()
     if locks is None or int(locks[0]) < 256:
         problems.append(f"max_locks_per_transaction = {locks[0] if locks else '?'} (02 §3.9: 256)")
-    head = conn.execute("SELECT version_num FROM alembic_version").fetchall()
-    if len(head) != 1:
-        problems.append(f"alembic_version has {len(head)} rows")
+    problems += migration_problems(
+        conn.execute("SELECT version_num FROM alembic_version").fetchall(), head
+    )
     return problems
+
+
+def policy_grants(repo: Path) -> list[privileges.Grant]:
+    """The role matrix of tools/grant_policy.py of the repository deployed."""
+    sys.path.insert(0, str(repo))
+    try:
+        from tools.grant_policy import ALLOWED_GRANTS
+    finally:
+        sys.path.remove(str(repo))
+    return [(g.role, g.privilege, g.kind, g.target) for g in ALLOWED_GRANTS]
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="checks of 02 §9 on the live PostgreSQL")
-    parser.add_argument("--catalog", type=Path, required=True)
+    parser.add_argument(
+        "--repo",
+        type=Path,
+        default=Path(__file__).resolve().parents[3],
+        help="the repository deployed: its catalog, its migrations and its role matrix",
+    )
     parser.add_argument("--allow-map", action="store_true", help="the CI, which uses a map")
     arguments = parser.parse_args(argv)
+    repo: Path = arguments.repo
     dsn = os.environ.get("KBOT_ADMIN_DSN", f"host={SOCKET_DIR} dbname={DATABASE} user=postgres")
     with psycopg.connect(dsn, autocommit=True) as conn:
-        problems = run(conn, arguments.catalog, allow_map=arguments.allow_map)
+        problems = run(
+            conn,
+            repo / "sql" / "security_definer_catalog.json",
+            head=expected_head(repo / "alembic.ini"),
+            allowed_grants=policy_grants(repo),
+            allow_map=arguments.allow_map,
+        )
     for problem in problems:
         print(f"FAIL {problem}")
     if not problems:
-        print("OK   PostgreSQL matches 02 §9: catalog, roles, pg_hba, no TCP, locks, migrations")
+        print(
+            "OK   PostgreSQL matches 02 §9: catalog, roles, settings, privileges, pg_hba,"
+            " no TCP, locks, migrations"
+        )
     return 1 if problems else 0
 
 

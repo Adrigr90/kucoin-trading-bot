@@ -98,46 +98,66 @@ def sshd_settings(sshd_T_output: str) -> Verdict:
     return Verdict("sshd", True, "keys only, no root, no forwarding")
 
 
-# A rule row of `ufw status verbose`: "<to>  <action> <direction>  <from>  [# comment]",
-# where <to> and <from> may carry "(v6)" and an interface ("22/tcp on eth0").
-_UFW_RULE = re.compile(
-    r"^(?P<to>\S.*?)\s{2,}(?P<action>ALLOW|DENY|REJECT|LIMIT)\s+(?P<direction>IN|OUT|FWD)"
-    r"\s{2,}(?P<from>\S.*?)(?:\s+#.*)?$"
+# The firewall is the one of the Oracle image, iptables loaded by netfilter-persistent, not
+# ufw (owner decision of 16 Nov 2026). These are the rules `iptables -S INPUT` may print.
+_ALLOWED_V4_INPUT = (
+    re.compile(r"^-A INPUT -m state --state RELATED,ESTABLISHED -j ACCEPT$"),
+    re.compile(r"^-A INPUT -p icmp -j ACCEPT$"),
+    re.compile(r"^-A INPUT -i lo -j ACCEPT$"),
+    # fail2ban hooks its own chain in front of SSH.
+    re.compile(r"^-A INPUT -p tcp -m multiport --dports 22 -j f2b-sshd$"),
+)
+_SSH_V4 = re.compile(
+    r"^-A INPUT -s (?P<source>\S+) -p tcp -m state --state NEW -m tcp --dport 22 -j ACCEPT$"
+)
+_FINAL_V4 = re.compile(r"^-A INPUT -j (REJECT --reject-with icmp-host-prohibited|DROP)$")
+_ALLOWED_V6_INPUT = (
+    re.compile(r"^-A INPUT -i lo -j ACCEPT$"),
+    re.compile(r"^-A INPUT -m state --state RELATED,ESTABLISHED -j ACCEPT$"),
+    re.compile(r"^-A INPUT -p ipv6-icmp -j ACCEPT$"),
+    re.compile(r"^-A INPUT -p tcp -m multiport --dports 22 -j f2b-sshd$"),
+)
+# The rule Oracle's image needs to reach its boot volume over iSCSI, only as root.
+_ORACLE_ISCSI = re.compile(
+    r"^-A InstanceServices -d 169\.254\.0\.2/32 -p tcp -m owner --uid-owner 0 -m tcp"
+    r" --dport 3260 .*-j ACCEPT$"
 )
 
 
-def ufw_status(ufw_output: str) -> Verdict:
-    """``ufw status verbose``: active, deny incoming, and only SSH allowed in, only from
-    the owner's address, in IPv4 and IPv6 alike (review of E4a, E4a-05). Every row after
-    the header must parse; an unknown row fails the check."""
-    if not re.search(r"^Status: active", ufw_output, re.MULTILINE):
-        return Verdict("ufw", False, "not active")
-    if not re.search(r"^Default: deny \(incoming\)", ufw_output, re.MULTILINE):
-        return Verdict("ufw", False, "incoming is not denied by default")
-    lines = ufw_output.splitlines()
-    try:
-        start = next(i for i, line in enumerate(lines) if line.startswith("--")) + 1
-    except StopIteration:
-        return Verdict("ufw", False, "no rules table in the output")
+def firewall_status(v4: str, v6: str) -> Verdict:
+    """``iptables -S`` and ``ip6tables -S``: in IPv4, new connections only for SSH and only
+    from one address (a /32), everything else rejected at the end, and Oracle's own rules
+    in place (the jump to InstanceServices and its iSCSI rule); in IPv6, nothing new comes
+    in. A rule of INPUT that is not one of the expected ones fails the check."""
+    lines4 = [line.strip() for line in v4.splitlines() if line.strip()]
+    lines6 = [line.strip() for line in v6.splitlines() if line.strip()]
     problems = []
-    for line in lines[start:]:
-        if not line.strip():
+    input4 = [line for line in lines4 if line.startswith("-A INPUT ")]
+    ssh = [m["source"] for line in input4 if (m := _SSH_V4.match(line))]
+    if len(ssh) != 1 or not ssh[0].endswith("/32") or ssh[0].startswith("0.0.0.0"):  # noqa: S104
+        problems.append(f"SSH must be allowed from exactly one address, found {ssh}")
+    for line in input4:
+        if _SSH_V4.match(line) or _FINAL_V4.match(line):
             continue
-        match = _UFW_RULE.match(line.rstrip())
-        if match is None:
-            return Verdict("ufw", False, f"rule not understood: {line.strip()!r}")
-        if match["direction"] != "IN" or match["action"] not in ("ALLOW", "LIMIT"):
-            continue
-        to = match["to"].replace("(v6)", "").strip()
-        source = match["from"].replace("(v6)", "").strip()
-        port = to.split("/")[0].split(" ")[0]
-        if port != "22":
-            problems.append(f"port {to} allowed in from {source}")
-        elif source.startswith("Anywhere"):
-            problems.append("SSH allowed from anywhere, not only from the owner")
+        if not any(rule.match(line) for rule in _ALLOWED_V4_INPUT):
+            problems.append(f"unexpected IPv4 input rule: {line}")
+    policy_drop4 = "-P INPUT DROP" in lines4
+    if not policy_drop4 and (not input4 or not _FINAL_V4.match(input4[-1])):
+        problems.append("IPv4 input does not end rejecting everything else")
+    if "-A OUTPUT -d 169.254.0.0/16 -j InstanceServices" not in lines4 or not any(
+        _ORACLE_ISCSI.match(line) for line in lines4
+    ):
+        problems.append("the rules of the Oracle image (InstanceServices, iSCSI) are missing")
+    if "-P INPUT DROP" not in lines6:
+        problems.append("IPv6 input is not dropped by default")
+    for line in (line for line in lines6 if line.startswith("-A INPUT ")):
+        if not any(rule.match(line) for rule in _ALLOWED_V6_INPUT):
+            problems.append(f"unexpected IPv6 input rule: {line}")
     if problems:
-        return Verdict("ufw", False, "; ".join(sorted(set(problems))))
-    return Verdict("ufw", True, "active, deny incoming, SSH only from the owner's address")
+        return Verdict("firewall", False, "; ".join(problems))
+    return Verdict(
+        "firewall", True, f"SSH only from {ssh[0]}, Oracle's rules in place, IPv6 closed"
+    )
 
 
 def service_active(name: str, systemctl_output: str) -> Verdict:
@@ -310,7 +330,16 @@ def run_all(
     verdicts = [
         checked("listening ports", lambda: listening_ports(output(["ss", "-Hltn"]))),
         checked("sshd", lambda: sshd_settings(output(["sshd", "-T"]))),
-        checked("ufw", lambda: ufw_status(output(["ufw", "status", "verbose"]))),
+        checked(
+            "firewall",
+            lambda: firewall_status(output(["iptables", "-S"]), output(["ip6tables", "-S"])),
+        ),
+        checked(
+            "netfilter-persistent",
+            lambda: service_active(
+                "netfilter-persistent", output(["systemctl", "is-active", "netfilter-persistent"])
+            ),
+        ),
         checked(
             "fail2ban",
             lambda: service_active("fail2ban", output(["systemctl", "is-active", "fail2ban"])),

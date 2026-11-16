@@ -9,6 +9,13 @@
 # checks the whole at the end. Every step is
 # listed in docs/operacion/comandos.md.
 #
+# The firewall is the one the Oracle image ships (iptables, loaded at boot by
+# netfilter-persistent), never ufw: Oracle warns that ufw on its Ubuntu images can break
+# the rules the instance needs to reach its boot volume (owner decision of 16 Nov 2026).
+# Only the SSH rule of the image changes, to the owner's address; Oracle's own rules stay
+# as they are, and IPv6 is closed. The script refuses to restrict SSH to an address that
+# is not the one of the session running it, so a typo cannot lock the owner out.
+#
 # The data volume of D11 (110 GB) must be attached: without it the script stops before
 # creating anything (review of E4a, E4a-03). Only KBOT_ALLOW_BOOT_VOLUME=1, meant for a
 # throwaway test instance, lets the data live on the boot volume.
@@ -57,7 +64,7 @@ fi
 step "packages: security updates, firewall, fail2ban, nftables, age"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq ufw fail2ban nftables unattended-upgrades age chrony
+apt-get install -y -qq fail2ban nftables unattended-upgrades age chrony iptables-persistent
 
 step "system users: one per service, named after its SQL role, without a shell"
 getent group kbot >/dev/null || groupadd --system kbot
@@ -82,23 +89,49 @@ install -o root -g root -m 0644 "$repo/deploy/etc/ssh/sshd_config.d/10-kbot.conf
 sshd -t
 systemctl reload ssh
 
-step "retire the generic nftables.service before touching ufw (E4a-01)"
+step "retire the generic nftables.service before touching the firewall (E4a-01)"
 # Stopping it runs its ExecStop, `nft flush ruleset`, which would also wipe the rules of
-# ufw if they were already loaded; so it goes first, and its failure is not fatal.
+# the firewall if they were already loaded; so it goes first, and its failure is not fatal.
 systemctl disable --now nftables >/dev/null 2>&1 || true
 systemctl mask nftables >/dev/null 2>&1 || true
 
-step "ufw: deny everything incoming except SSH from the owner's address"
-ufw --force reset >/dev/null
-ufw default deny incoming
-ufw default allow outgoing
-ufw allow from "$owner_ip" to any port 22 proto tcp comment 'SSH from the owner'
-ufw logging low
-ufw --force enable
+step "firewall of the Oracle image: SSH only from the owner's address, IPv6 closed"
+v4=/etc/iptables/rules.v4
+original=/etc/iptables/rules.v4.oracle
+ssh_any='-A INPUT -p tcp -m state --state NEW -m tcp --dport 22 -j ACCEPT'
+ssh_owner="-A INPUT -s $owner_ip -p tcp -m state --state NEW -m tcp --dport 22 -j ACCEPT"
+# Never lock the owner out: the address must be the one this SSH session comes from.
+owner_host="${owner_ip%/32}"
+if ! ss -Htn state established '( sport = :22 )' | awk '{print $4}' | grep -q "^$owner_host:"; then
+  echo "no SSH session from $owner_host: refusing to restrict SSH to an address not in use" >&2
+  exit 1
+fi
+# Keep the file of the image once, untouched, and always derive the rules from it.
+[[ -f "$original" ]] || cp -p "$v4" "$original"
+if [[ "$(grep -cxF -- "$ssh_any" "$original")" != "1" ]]; then
+  echo "the SSH rule of the Oracle image is not where expected in $original: stopping" >&2
+  exit 1
+fi
+tmp="$(mktemp)"
+sed "s|^${ssh_any}\$|${ssh_owner}|" "$original" >"$tmp"
+# Exactly one line differs from the image, and it is the SSH rule.
+if [[ "$(diff "$original" "$tmp" | grep -c '^[<>]')" != "2" ]]; then
+  echo "unexpected difference with the rules of the image: stopping" >&2
+  exit 1
+fi
+iptables-restore --test <"$tmp"
+ip6tables-restore --test <"$repo/deploy/etc/iptables/rules.v6"
+install -o root -g root -m 0640 "$tmp" "$v4"
+install -o root -g root -m 0640 "$repo/deploy/etc/iptables/rules.v6" /etc/iptables/rules.v6
+rm -f "$tmp"
+systemctl enable netfilter-persistent >/dev/null
+netfilter-persistent reload
+iptables -S INPUT | grep -qxF -- "$ssh_owner" || { echo "the SSH rule is not loaded" >&2; exit 1; }
+iptables -S InstanceServices | grep -q -- '--dport 3260' || { echo "Oracle's rules are gone" >&2; exit 1; }
 
 step "metadata guard (E4-D04): only root may reach the instance metadata"
-# Its own unit, loaded after ufw, and only the table inet kbot_guard. The default nftables
-# file of Ubuntu is never used: it starts by flushing the whole ruleset (E4a-01).
+# Its own unit, loaded after the firewall of the image, and only the table inet kbot_guard.
+# The default nftables file of Ubuntu is never used: it flushes the whole ruleset (E4a-01).
 install -d -o root -g root -m 0755 /etc/kbot
 install -o root -g root -m 0644 "$repo/deploy/etc/kbot/metadata-guard.nft" /etc/kbot/metadata-guard.nft
 nft -c -f /etc/kbot/metadata-guard.nft
@@ -108,9 +141,9 @@ systemctl daemon-reload
 systemctl enable --now kbot-metadata-guard >/dev/null
 systemctl reload kbot-metadata-guard
 nft list table inet kbot_guard >/dev/null
-# The effective rules after the guard: ufw active and its chains still in the kernel.
-ufw status | grep -q '^Status: active'
-nft list ruleset | grep -q 'ufw' || { echo 'the rules of ufw are gone' >&2; exit 1; }
+# The effective rules after the guard: the SSH rule and Oracle's rules still loaded.
+iptables -S INPUT | grep -qxF -- "$ssh_owner" || { echo "the firewall rules are gone" >&2; exit 1; }
+iptables -S InstanceServices | grep -q -- '--dport 3260' || { echo "Oracle's rules are gone" >&2; exit 1; }
 
 step "fail2ban on sshd"
 install -o root -g root -m 0644 "$repo/deploy/etc/fail2ban/jail.d/kbot.conf" /etc/fail2ban/jail.d/kbot.conf

@@ -12,7 +12,11 @@ ssh-keygen -t ed25519 -f "$env:USERPROFILE\.ssh\kbot_admin" -C "kbot admin"
 
 Pide una frase de paso: elegirla y **no decírsela a nadie**, tampoco a Claude. Deja dos archivos: `kbot_admin` (privada, nunca sale del PC) y `kbot_admin.pub` (pública, se pega en Oracle).
 
-## 2. Instancia
+## 2. Red (antes de la instancia)
+
+Menú ☰ → **Networking** → **Virtual cloud networks** → **Start VCN Wizard** → **Create VCN with Internet Connectivity**: nombre `kbot-vcn`, compartimento raíz, el resto por defecto → **Create**. Crea una subred pública y otra privada; se usa la pública. **Se hace antes** porque, si el formulario de la instancia crea la red, la casilla de la IP pública puede quedar desactivada (16 nov 2026).
+
+## 2b. Instancia
 
 Menú ☰ → **Compute** → **Instances** → **Create instance**.
 
@@ -23,22 +27,24 @@ Menú ☰ → **Compute** → **Instances** → **Create instance**.
 | Placement | región **Germany Central (Frankfurt)**; dominio de disponibilidad: cualquiera (si uno no tiene capacidad, probar otro) |
 | Image | **Ubuntu** → **Canonical Ubuntu 24.04** (la de **aarch64**, para Ampere) |
 | Shape | **Ampere** → **VM.Standard.A1.Flex**, **2 OCPU** y **12 GB** de memoria. Debe aparecer la etiqueta *Always Free-eligible* |
-| Networking | crear una VCN nueva (`kbot-vcn`) y una subred pública nuevas; **asignar IPv4 pública: sí** |
+| Networking | **Select existing virtual cloud network** → `kbot-vcn`; **Select existing subnet** → `public subnet-kbot-vcn`; **asignar IPv4 pública: sí** |
 | Add SSH keys | **Paste public keys** → pegar el contenido de `kbot_admin.pub` |
 | Boot volume | **50 GB** (el mínimo que la consola permita a partir de 47) |
 | Oracle Cloud Agent (en *Show advanced options*) | **Compute Instance Monitoring: activado** (imprescindible para B30) |
 
-Pulsar **Create**. Si sale *Out of host capacity*, volver a intentarlo más tarde o en otro dominio de disponibilidad: **nunca cambiar a una forma de pago**.
+Elegir primero la forma (*Shape*) y después la imagen: así la lista solo enseña imágenes compatibles. La imagen es **Canonical Ubuntu 24.04**, no la *Minimal*. En *Advanced options → Oracle Cloud Agent*, dejar **solo** Compute Instance Monitoring.
+
+Pulsar **Create**. Si sale *Out of capacity*, cambiar solo el dominio de disponibilidad (con *Previous*) y repetir; si fallan los tres, volver a intentarlo más tarde: **nunca cambiar a una forma de pago**. El 15 nov 2026 fallaron los tres; el 16 nov funcionó AD-3.
 
 Apuntar la **IP pública** y el **OCID** de la instancia (en su página, *Instance information*).
 
 ## 3. Volumen de datos (110 GB)
 
-Menú ☰ → **Storage** → **Block Volumes** → **Create block volume**: nombre `kbot-datos`, mismo compartimento y dominio de disponibilidad que la instancia, **110 GB**, rendimiento *Balanced*. Después, en la instancia → **Attached block volumes** → **Attach block volume** → el volumen, tipo **Paravirtualized**, lectura y escritura. En el servidor aparecerá como `/dev/oracleoci/oraclevdb`.
+Menú ☰ → **Storage** → **Block Volumes** → **Create block volume**: nombre `kbot-datos`, mismo compartimento y dominio de disponibilidad que la instancia, **110 GB**, rendimiento *Balanced*. Después, desde el volumen → **Attached instances** → **Attach to instance**: **Read/write**, tipo **Paravirtualized** (por defecto sale *iSCSI*), y la instancia eligiendo primero el compartimento y después `kbot` (el botón de la propia instancia puede salir desactivado y su buscador no encontrarla). La consola puede no ofrecer *Device path*: el 16 nov 2026 el volumen apareció en el servidor como **`/dev/sdb`**, y ese es el dispositivo que se pasa a `01_sistema.sh`, que lo monta por su etiqueta `kbot-data`.
 
 ## 4. Lista de seguridad: SSH solo desde la IP del propietario
 
-En la VCN → **Security Lists** → la lista por defecto → **Ingress Rules**: dejar **una sola regla** de entrada: origen `<IP pública del propietario>/32`, protocolo TCP, puerto de destino 22. Borrar las demás reglas de entrada. (La IP del propietario se ve en https://api.ipify.org desde el PC.) Cuando la IP doméstica cambie, se actualiza aquí y en `ufw` (diccionario de comandos).
+En la VCN → **Security Lists** → la lista por defecto → **Ingress Rules**: la regla de entrada de SSH (origen `0.0.0.0/0`, TCP, puerto 22) se edita para que su origen sea `<IP pública del propietario>/32`. Las reglas ICMP se dejan: son avisos de la red y no abren ningún servicio. (La IP del propietario se ve en https://api.ipify.org desde el PC.) Cuando la IP doméstica cambie, se actualiza aquí y en el cortafuegos del servidor (diccionario de comandos).
 
 ## 5. Primera conexión
 

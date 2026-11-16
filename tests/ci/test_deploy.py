@@ -33,8 +33,8 @@ def tool(name: str) -> str:
     return path
 
 
-def run(*command: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(command, capture_output=True, text=True, check=False)
+def run(*command: str, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(command, capture_output=True, text=True, check=False, input=input_text)
 
 
 def as_root(*command: str) -> tuple[str, ...]:
@@ -70,10 +70,18 @@ def test_the_units_are_verified_only_when_everything_they_need_exists() -> None:
     # E4a-01: the guard never goes through /etc/nftables.conf (Ubuntu's flushes everything).
     assert "/etc/nftables.conf" not in system
     assert "kbot-metadata-guard" in system
-    # E4a-01, residual: the generic nftables.service is retired before ufw is enabled,
-    # because stopping it flushes the whole ruleset.
-    assert system.index("systemctl disable --now nftables") < system.index("ufw --force enable")
-    assert "nft list ruleset | grep -q 'ufw'" in system
+    # E4a-01, residual: the generic nftables.service is retired before the firewall is
+    # loaded, because stopping it flushes the whole ruleset.
+    assert system.index("systemctl disable --now nftables") < system.index(
+        "netfilter-persistent reload"
+    )
+    # Owner decision of 16 Nov 2026: the firewall of the Oracle image, never ufw; only the
+    # SSH rule changes, and never to an address other than the session's own.
+    commands = [line for line in system.splitlines() if not line.lstrip().startswith("#")]
+    assert not any("ufw" in line for line in commands)
+    assert "rules.v4.oracle" in system and "iptables-restore --test" in system
+    assert "refusing to restrict SSH to an address not in use" in system
+    assert "InstanceServices" in system
     # E4a-03: no data volume means no installation, unless a test instance says so.
     assert "KBOT_ALLOW_BOOT_VOLUME" in system
     assert "findmnt -no LABEL" in system
@@ -118,7 +126,7 @@ def test_units_keep_the_isolation_of_the_design() -> None:
     netcheck = (DEPLOY / "systemd" / "kbot-netcheck@.service").read_text(encoding="utf-8")
     assert "IPAddressDeny=any" in netcheck and "netcheck b19" in netcheck
     guard = (DEPLOY / "systemd" / "kbot-metadata-guard.service").read_text(encoding="utf-8")
-    assert "After=ufw.service" in guard and "RemainAfterExit=yes" in guard
+    assert "After=netfilter-persistent.service" in guard and "RemainAfterExit=yes" in guard
 
 
 def test_sshd_drop_in_is_valid(tmp_path: Path) -> None:
@@ -196,3 +204,18 @@ def test_f1a6_counts_a_refusal_only_by_its_sqlstate() -> None:
     assert '" 3 "' not in text and 'expect "$user cannot create in $schema" 3' not in text
     assert "ROLLBACK" in text  # nothing created by the test stays
     assert "SHOW statement_timeout" in text  # E4b-05: the timeout a real session gets
+
+
+def test_ipv6_rules_close_input_and_load() -> None:
+    """Owner decision of 16 Nov 2026: IPv6 closed, a second barrier."""
+    text = (DEPLOY / "etc" / "iptables" / "rules.v6").read_text(encoding="utf-8")
+    assert ":INPUT DROP" in text and ":FORWARD DROP" in text
+    rules = [line for line in text.splitlines() if line.startswith("-A INPUT")]
+    assert rules == [
+        "-A INPUT -i lo -j ACCEPT",
+        "-A INPUT -m state --state RELATED,ESTABLISHED -j ACCEPT",
+        "-A INPUT -p ipv6-icmp -j ACCEPT",
+    ]
+    restore = tool("ip6tables-restore")
+    done = run(*as_root(restore, "--test"), input_text=text)
+    assert done.returncode == 0, done.stderr

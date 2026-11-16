@@ -1,0 +1,12 @@
+# kbot (02 §9 and §13.1; owner decision of 16 Nov 2026: the firewall of the Oracle image,
+# not ufw). The image leaves IPv6 open; the instance has no public IPv6 address, but this
+# closes it as a second barrier: only the loopback, replies to connections the server
+# opened, and ICMPv6 (neighbour discovery needs it). Outgoing traffic is not restricted.
+*filter
+:INPUT DROP [0:0]
+:FORWARD DROP [0:0]
+:OUTPUT ACCEPT [0:0]
+-A INPUT -i lo -j ACCEPT
+-A INPUT -m state --state RELATED,ESTABLISHED -j ACCEPT
+-A INPUT -p ipv6-icmp -j ACCEPT
+COMMIT

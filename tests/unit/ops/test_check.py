@@ -22,18 +22,35 @@ pubkeyauthentication yes
 authenticationmethods publickey
 disableforwarding yes
 """
-UFW_HEADER = """Status: active
-Logging: on (low)
-Default: deny (incoming), allow (outgoing), disabled (routed)
-New profiles: skip
-
-To                         Action      From
---                         ------      ----
+# `iptables -S` on the instance of 16 Nov 2026 (Oracle's image), with the SSH rule of
+# 01_sistema.sh; Oracle's comments shortened.
+ORACLE = '-m comment --comment "See the Oracle-Provided Images section" -j ACCEPT'
+IPTABLES_OK = f"""-P INPUT ACCEPT
+-P FORWARD ACCEPT
+-P OUTPUT ACCEPT
+-N InstanceServices
+-N f2b-sshd
+-A INPUT -p tcp -m multiport --dports 22 -j f2b-sshd
+-A INPUT -m state --state RELATED,ESTABLISHED -j ACCEPT
+-A INPUT -p icmp -j ACCEPT
+-A INPUT -i lo -j ACCEPT
+-A INPUT -s 79.112.83.254/32 -p tcp -m state --state NEW -m tcp --dport 22 -j ACCEPT
+-A INPUT -j REJECT --reject-with icmp-host-prohibited
+-A FORWARD -j REJECT --reject-with icmp-host-prohibited
+-A OUTPUT -d 169.254.0.0/16 -j InstanceServices
+-A InstanceServices -d 169.254.0.2/32 -p tcp -m owner --uid-owner 0 -m tcp --dport 3260 {ORACLE}
+-A InstanceServices -d 169.254.169.254/32 -p tcp -m tcp --dport 80 {ORACLE}
+-A f2b-sshd -j RETURN
 """
-UFW_OK = (
-    UFW_HEADER
-    + "22/tcp                     ALLOW IN    83.0.0.1                   # SSH from the owner\n"
-)
+IP6TABLES_OK = """-P INPUT DROP
+-P FORWARD DROP
+-P OUTPUT ACCEPT
+-A INPUT -i lo -j ACCEPT
+-A INPUT -m state --state RELATED,ESTABLISHED -j ACCEPT
+-A INPUT -p ipv6-icmp -j ACCEPT
+"""
+SSH_OWNER = "-A INPUT -s 79.112.83.254/32 -p tcp -m state --state NEW -m tcp --dport 22 -j ACCEPT"
+SSH_ANY = "-A INPUT -p tcp -m state --state NEW -m tcp --dport 22 -j ACCEPT"
 HBA_OK = "# comment\nlocal   all   all   peer\n"
 PASSWD = "\n".join(
     [
@@ -128,28 +145,34 @@ def test_sshd_effective_settings() -> None:
     assert not missing.ok and "unset" in missing.detail
 
 
-def test_ufw_active_deny_incoming_ssh_only_from_the_owner() -> None:
-    assert check.ufw_status(UFW_OK).ok
-    assert not check.ufw_status(UFW_OK.replace("Status: active", "Status: inactive")).ok
-    anywhere = check.ufw_status(UFW_OK.replace("83.0.0.1  ", "Anywhere  "))
-    assert not anywhere.ok and "anywhere" in anywhere.detail
-    more = check.ufw_status(UFW_OK + "80/tcp                     ALLOW IN    Anywhere\n")
-    assert not more.ok and "80" in more.detail
+def test_the_firewall_of_the_image_admits_ssh_only_from_the_owner() -> None:
+    """Owner decision of 16 Nov 2026: the firewall of the Oracle image, not ufw."""
+    verdict = check.firewall_status(IPTABLES_OK, IP6TABLES_OK)
+    assert verdict.ok and "79.112.83.254/32" in verdict.detail
+    # The rule of the image as it comes, open to every address, fails.
+    anywhere = check.firewall_status(IPTABLES_OK.replace(SSH_OWNER, SSH_ANY), IP6TABLES_OK)
+    assert not anywhere.ok and "exactly one address" in anywhere.detail
+    # A wider source, a second address or another open port fail too.
+    wide = IPTABLES_OK.replace("79.112.83.254/32", "79.112.0.0/16")
+    assert not check.firewall_status(wide, IP6TABLES_OK).ok
+    second = IPTABLES_OK.replace(SSH_OWNER, SSH_OWNER + "\n" + SSH_OWNER.replace("254/32", "1/32"))
+    assert not check.firewall_status(second, IP6TABLES_OK).ok
+    web = IPTABLES_OK.replace(
+        SSH_OWNER, SSH_OWNER + "\n-A INPUT -p tcp -m tcp --dport 80 -j ACCEPT"
+    )
+    assert "unexpected IPv4 input rule" in check.firewall_status(web, IP6TABLES_OK).detail
 
 
-def test_ufw_ipv6_rows_count_too() -> None:
-    """Review of E4a, E4a-05: the (v6) rows were skipped by the first parser."""
-    v6_ssh = UFW_OK + "22/tcp (v6)                ALLOW IN    Anywhere (v6)\n"
-    verdict = check.ufw_status(v6_ssh)
-    assert not verdict.ok and "anywhere" in verdict.detail
-    v6_port = UFW_OK + "80/tcp (v6)                ALLOW IN    Anywhere (v6)\n"
-    assert "80" in check.ufw_status(v6_port).detail
-    interface = UFW_OK + "22/tcp on eth0             ALLOW IN    83.0.0.1\n"
-    assert check.ufw_status(interface).ok
-    unknown = UFW_OK + "something odd here\n"
-    assert not check.ufw_status(unknown).ok and "not understood" in check.ufw_status(unknown).detail
-    outgoing = UFW_OK + "Anywhere                   ALLOW OUT   Anywhere\n"
-    assert check.ufw_status(outgoing).ok
+def test_the_firewall_keeps_oracles_rules_and_closes_the_rest() -> None:
+    no_final = IPTABLES_OK.replace("-A INPUT -j REJECT --reject-with icmp-host-prohibited\n", "")
+    assert "end rejecting" in check.firewall_status(no_final, IP6TABLES_OK).detail
+    no_iscsi = "\n".join(line for line in IPTABLES_OK.splitlines() if "3260" not in line)
+    assert "Oracle image" in check.firewall_status(no_iscsi, IP6TABLES_OK).detail
+    open_v6 = IP6TABLES_OK.replace("-P INPUT DROP", "-P INPUT ACCEPT")
+    assert "IPv6" in check.firewall_status(IPTABLES_OK, open_v6).detail
+    ssh_v6 = IP6TABLES_OK + "-A INPUT -p tcp -m tcp --dport 22 -j ACCEPT\n"
+    assert "unexpected IPv6 input rule" in check.firewall_status(IPTABLES_OK, ssh_v6).detail
+    assert not check.firewall_status("", "").ok
 
 
 def test_postgresql_without_tcp_and_peer_only() -> None:
@@ -208,7 +231,8 @@ def test_run_all_uses_the_commands_and_files_of_the_server() -> None:
         outputs = {
             "ss": SS_OK,
             "sshd": SSHD_OK,
-            "ufw": UFW_OK,
+            "iptables": IPTABLES_OK,
+            "ip6tables": IP6TABLES_OK,
             "systemctl": "active\n",
             "nft": NFT_OK,
         }
@@ -240,7 +264,8 @@ def test_a_failed_command_or_unreadable_file_fails_its_check() -> None:
     def run(command: list[str]) -> Command:
         if command[0] == "ss":
             return Command("", 1, "ss: not permitted")
-        return Command("active\n" if command[0] == "systemctl" else NFT_OK, 0)
+        outputs = {"systemctl": "active\n", "iptables": IPTABLES_OK, "ip6tables": IP6TABLES_OK}
+        return Command(outputs.get(command[0], NFT_OK), 0)
 
     def read(path: str) -> str:
         raise OSError(f"cannot read {path}")

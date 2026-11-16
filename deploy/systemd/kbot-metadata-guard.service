@@ -4,7 +4,7 @@
 # which would also wipe the rules of that firewall.
 # The table is replaced atomically (declare, delete, declare again inside the file).
 [Unit]
-Description=kbot: only root may reach the instance metadata (nftables)
+Description=kbot: only root and the Oracle Cloud Agent may reach the instance metadata (nftables)
 Documentation=file:///opt/kbot/docs/especificacion/02_Especificacion_vigente.md
 After=netfilter-persistent.service network-pre.target
 Wants=network-pre.target

@@ -328,6 +328,21 @@ def service_users(passwd: str) -> Verdict:
 
 GUARD_ADDRESS = "169.254.169.254"
 GUARD_PORTS = {80, 443}
+# Who may reach the metadata now: root, and snap_daemon, the user the Oracle Cloud Agent
+# runs as (a snap; on the instance, 17 Nov 2026, its updater was connected to the metadata).
+# Stage E4c adds kbot_backup, in the guard, in netcheck and here at the same time (review
+# of E4a, E4a-04).
+METADATA_ALLOWED = frozenset({"root", "snap_daemon"})
+# The ids the guard names by number, the same on every Ubuntu: snapd gives snap_daemon a
+# fixed id. nft prints a user by name when the system knows it, and by number otherwise.
+_FIXED_UIDS = {0: "root", 584788: "snap_daemon"}
+
+
+def _user_name(value: int | str) -> str:
+    uid = int(value) if isinstance(value, str) and value.isdigit() else value
+    if isinstance(uid, int):
+        return _FIXED_UIDS.get(uid, str(uid))
+    return uid
 
 
 def _match(expr: dict[str, Any], left: dict[str, Any], op: str = "==") -> dict[str, Any] | None:
@@ -376,7 +391,7 @@ def _guard_rule_users(rule: dict[str, Any]) -> set[str] | None:
     rejects = any("reject" in e for e in exprs)
     if not (daddr and ports and users is not None and rejects):
         return None
-    return {"root" if u in (0, "0") else str(u) for u in users}
+    return {_user_name(u) for u in users}
 
 
 def _unconditional_accept(rule: dict[str, Any]) -> bool:
@@ -384,7 +399,7 @@ def _unconditional_accept(rule: dict[str, Any]) -> bool:
     return bool(exprs) and all("accept" in e for e in exprs)
 
 
-def metadata_guard(nft_json: str, allowed_users: frozenset[str] = frozenset({"root"})) -> Verdict:
+def metadata_guard(nft_json: str, allowed_users: frozenset[str] = METADATA_ALLOWED) -> Verdict:
     """``nft -j list table inet kbot_guard``: the rule of E4-D04 must sit in a chain hooked
     on output, before any unconditional accept, and exempt exactly the allowed users
     (review of E4a, E4a-04: a rule in a chain nothing calls filters nothing)."""

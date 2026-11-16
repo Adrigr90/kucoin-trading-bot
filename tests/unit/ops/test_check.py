@@ -78,7 +78,7 @@ def nft_json(
     accept_first: bool = False,
 ) -> str:
     """What ``nft -j list table inet kbot_guard`` prints for the guard, with variations."""
-    users = ["root"] if users is None else users
+    users = ["root", "snap_daemon"] if users is None else users
     chain = {"family": "inet", "table": "kbot_guard", "name": "output", "handle": 1}
     if hooked:
         chain |= {"type": "filter", "hook": "output", "prio": -10, "policy": "accept"}
@@ -262,7 +262,12 @@ def test_metadata_guard_is_checked_structurally() -> None:
     """Review of E4a, E4a-04: the rule must sit in the chain hooked on output, be reachable
     and exempt exactly the allowed users; the kernel's JSON is what is parsed."""
     assert check.metadata_guard(NFT_OK).ok
-    assert check.metadata_guard(nft_json(users=[0])).ok  # root as a number
+    # By number when nft cannot name them: 0 is root, 584788 snap_daemon (snapd's fixed id).
+    assert check.metadata_guard(nft_json(users=[0, 584788])).ok
+    assert check.metadata_guard(nft_json(users=["root", "584788"])).ok
+    # Root alone would cut off the Oracle Cloud Agent, which runs as snap_daemon (17 Nov).
+    root_only = check.metadata_guard(nft_json(users=["root"]))
+    assert not root_only.ok and "users exempted: ['root']" in root_only.detail
     assert not check.metadata_guard("").ok
     assert not check.metadata_guard("table inet kbot_guard 169.254.169.254 skuid reject").ok
     assert "hooked" in check.metadata_guard(nft_json(hooked=False)).detail
@@ -270,7 +275,7 @@ def test_metadata_guard_is_checked_structurally() -> None:
     assert "reachable" in check.metadata_guard(nft_json(rule_chain="unused")).detail
     # A rule behind an unconditional accept is never reached either.
     assert "reachable" in check.metadata_guard(nft_json(accept_first=True)).detail
-    extra = check.metadata_guard(nft_json(users=["root", "kbot_ingest"]))
+    extra = check.metadata_guard(nft_json(users=["root", "snap_daemon", "kbot_ingest"]))
     assert not extra.ok and "kbot_ingest" in extra.detail
     # Third round: an element the parser does not interpret (a range of user ids) must
     # fail the check, never be dropped to leave only root.
@@ -278,9 +283,9 @@ def test_metadata_guard_is_checked_structurally() -> None:
     assert not ranged.ok and "not understood" in ranged.detail
     prefix = check.metadata_guard(nft_json(users=[{"prefix": {"addr": "0", "len": 8}}]))
     assert not prefix.ok
-    e4c = nft_json(users=["root", "kbot_backup"])
+    e4c = nft_json(users=["root", "snap_daemon", "kbot_backup"])
     assert not check.metadata_guard(e4c).ok
-    assert check.metadata_guard(e4c, frozenset({"root", "kbot_backup"})).ok
+    assert check.metadata_guard(e4c, check.METADATA_ALLOWED | {"kbot_backup"}).ok
 
 
 def test_run_all_uses_the_commands_and_files_of_the_server() -> None:
@@ -344,6 +349,7 @@ def test_a_failed_command_or_unreadable_file_fails_its_check() -> None:
         ("guard", "kbot_ingest", {"metadata rejected"}),
         ("guard", "kbot_backup", {"metadata rejected"}),  # exempted only from E4c
         ("guard", "root", {"metadata reachable"}),
+        ("guard", "snap_daemon", {"metadata reachable"}),  # the Oracle Cloud Agent
     ],
 )
 def test_netcheck_expectations_depend_on_the_case_and_the_user(
@@ -355,5 +361,6 @@ def test_netcheck_expectations_depend_on_the_case_and_the_user(
     monkeypatch.setattr(netcheck, "postgres_socket_accepts", lambda u: u in ("kbot_ingest",))
     results = netcheck.expectations(case, user)
     assert set(results) == names
-    expected_ok = {"guard": user != "root", "b19": True}[case]  # can_connect is False
+    allowed = user in netcheck.METADATA_ALLOWED
+    expected_ok = {"guard": not allowed, "b19": True}[case]  # can_connect is False
     assert all(results.values()) is expected_ok

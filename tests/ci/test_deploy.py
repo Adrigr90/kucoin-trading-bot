@@ -158,6 +158,8 @@ def test_metadata_guard_is_valid_nftables_and_manages_only_its_table() -> None:
     text = guard.read_text(encoding="utf-8")
     assert "flush ruleset" not in text  # E4a-01: never the whole ruleset
     assert text.count("table inet kbot_guard") >= 2 and "delete table inet kbot_guard" in text
+    # Root and snap_daemon (the Oracle Cloud Agent) by their fixed ids, in IPv4 and IPv6.
+    assert text.count("meta skuid != { 0, 584788 } counter reject") == 2
     nft = tool("nft")
     done = run(*as_root(nft, "-c", "-f", str(guard)))
     assert done.returncode == 0, done.stderr

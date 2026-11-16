@@ -110,7 +110,7 @@ install -o root -g root -m 0640 "$repo/deploy/etc/iptables/rules.v6" /etc/iptabl
 systemctl enable netfilter-persistent >/dev/null
 netfilter-persistent reload
 
-step "metadata guard (E4-D04): only root may reach the instance metadata"
+step "metadata guard (E4-D04): only root and the Oracle Cloud Agent may reach the instance metadata"
 # Its own unit, loaded after the firewall of the image, and only the table inet kbot_guard.
 # The default nftables file of Ubuntu is never used: it flushes the whole ruleset (E4a-01).
 install -d -o root -g root -m 0755 /etc/kbot

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -22,26 +23,11 @@ pubkeyauthentication yes
 authenticationmethods publickey
 disableforwarding yes
 """
-# `iptables -S` on the instance of 16 Nov 2026 (Oracle's image), with the SSH rule of
-# 01_sistema.sh; Oracle's comments shortened.
-ORACLE = '-m comment --comment "See the Oracle-Provided Images section" -j ACCEPT'
-IPTABLES_OK = f"""-P INPUT ACCEPT
--P FORWARD ACCEPT
--P OUTPUT ACCEPT
--N InstanceServices
--N f2b-sshd
--A INPUT -p tcp -m multiport --dports 22 -j f2b-sshd
--A INPUT -m state --state RELATED,ESTABLISHED -j ACCEPT
--A INPUT -p icmp -j ACCEPT
--A INPUT -i lo -j ACCEPT
--A INPUT -s 79.112.83.254/32 -p tcp -m state --state NEW -m tcp --dport 22 -j ACCEPT
--A INPUT -j REJECT --reject-with icmp-host-prohibited
--A FORWARD -j REJECT --reject-with icmp-host-prohibited
--A OUTPUT -d 169.254.0.0/16 -j InstanceServices
--A InstanceServices -d 169.254.0.2/32 -p tcp -m owner --uid-owner 0 -m tcp --dport 3260 {ORACLE}
--A InstanceServices -d 169.254.169.254/32 -p tcp -m tcp --dport 80 {ORACLE}
--A f2b-sshd -j RETURN
-"""
+# `iptables -S` on the instance of 16 Nov 2026, verbatim: the rules of the Oracle image.
+# The CI checks that the iptables of the runner prints the same for the image's file.
+FIREWALL = Path(__file__).resolve().parents[2] / "fixtures" / "firewall"
+IPTABLES_OK = (FIREWALL / "oracle_iptables-S.txt").read_text(encoding="utf-8")
+# What `ip6tables -S` prints for deploy/etc/iptables/rules.v6 (also checked in the CI).
 IP6TABLES_OK = """-P INPUT DROP
 -P FORWARD DROP
 -P OUTPUT ACCEPT
@@ -49,8 +35,29 @@ IP6TABLES_OK = """-P INPUT DROP
 -A INPUT -m state --state RELATED,ESTABLISHED -j ACCEPT
 -A INPUT -p ipv6-icmp -j ACCEPT
 """
-SSH_OWNER = "-A INPUT -s 79.112.83.254/32 -p tcp -m state --state NEW -m tcp --dport 22 -j ACCEPT"
-SSH_ANY = "-A INPUT -p tcp -m state --state NEW -m tcp --dport 22 -j ACCEPT"
+SSH_IMAGE = "-A INPUT -p tcp -m state --state NEW -m tcp --dport 22 -j ACCEPT"
+ISCSI = "-A InstanceServices -d 169.254.0.2/32 -p tcp -m owner --uid-owner 0 -m tcp --dport 3260"
+F2B_JUMP = "-A INPUT -p tcp -m multiport --dports 22 -j f2b-sshd"
+BAN4 = "-s 203.0.113.7/32 -j REJECT --reject-with icmp-port-unreachable"
+BAN6 = "-s 2001:db8::7/128 -j REJECT --reject-with icmp6-port-unreachable"
+
+
+def with_fail2ban(rules: str, *chain: str, jump: bool = True, declare: bool = True) -> str:
+    """``-S`` after fail2ban's first ban: its chain, and its jump at the top of INPUT."""
+    lines = rules.splitlines()
+    first_rule = next(i for i, line in enumerate(lines) if line.startswith("-A "))
+    if jump:
+        lines.insert(first_rule, F2B_JUMP)
+    if declare:
+        lines.insert(first_rule, "-N f2b-sshd")
+    lines += [f"-A f2b-sshd {rule}" for rule in chain]
+    return "\n".join(lines) + "\n"
+
+
+def firewall(v4: str = IPTABLES_OK, v6: str = IP6TABLES_OK) -> Verdict:
+    return check.firewall_status(v4, v6)
+
+
 HBA_OK = "# comment\nlocal   all   all   peer\n"
 PASSWD = "\n".join(
     [
@@ -145,34 +152,87 @@ def test_sshd_effective_settings() -> None:
     assert not missing.ok and "unset" in missing.detail
 
 
-def test_the_firewall_of_the_image_admits_ssh_only_from_the_owner() -> None:
-    """Owner decision of 16 Nov 2026: the firewall of the Oracle image, not ufw."""
-    verdict = check.firewall_status(IPTABLES_OK, IP6TABLES_OK)
-    assert verdict.ok and "79.112.83.254/32" in verdict.detail
-    # The rule of the image as it comes, open to every address, fails.
-    anywhere = check.firewall_status(IPTABLES_OK.replace(SSH_OWNER, SSH_ANY), IP6TABLES_OK)
-    assert not anywhere.ok and "exactly one address" in anywhere.detail
-    # A wider source, a second address or another open port fail too.
-    wide = IPTABLES_OK.replace("79.112.83.254/32", "79.112.0.0/16")
-    assert not check.firewall_status(wide, IP6TABLES_OK).ok
-    second = IPTABLES_OK.replace(SSH_OWNER, SSH_OWNER + "\n" + SSH_OWNER.replace("254/32", "1/32"))
-    assert not check.firewall_status(second, IP6TABLES_OK).ok
-    web = IPTABLES_OK.replace(
-        SSH_OWNER, SSH_OWNER + "\n-A INPUT -p tcp -m tcp --dport 80 -j ACCEPT"
+def test_the_firewall_is_exactly_the_one_of_the_image() -> None:
+    """Owner decisions of 16 and 17 Nov 2026: the firewall of the Oracle image, not ufw,
+    with its IPv4 rules as shipped; the owner's address is limited in the security list
+    of Oracle, not on the server (review FW-02)."""
+    verdict = firewall()
+    assert verdict.ok, verdict.detail
+    assert "security list" in verdict.detail and "fail2ban: 0" in verdict.detail
+    # Limiting SSH on the server again changes the approved rules, and fails.
+    owner = SSH_IMAGE.replace("-A INPUT", "-A INPUT -s 79.112.83.254/32")
+    assert "IPv4 INPUT: rule 4" in firewall(IPTABLES_OK.replace(SSH_IMAGE, owner)).detail
+
+
+def test_the_firewall_check_fails_on_the_reviewers_examples() -> None:
+    """Review FW-01: three changes the earlier check let through."""
+    # An accept in fail2ban's chain lets in whatever reaches it, before the image's rules.
+    accept = firewall(with_fail2ban(IPTABLES_OK, "-j ACCEPT", "-j RETURN"))
+    assert not accept.ok and "not a ban of one address: '-j ACCEPT'" in accept.detail
+    # A drop before SSH, or before the iSCSI rules of the boot volume.
+    drop_ssh = firewall(IPTABLES_OK.replace(SSH_IMAGE, "-A INPUT -j DROP\n" + SSH_IMAGE))
+    assert "IPv4 INPUT: rule 4 is '-j DROP'" in drop_ssh.detail
+    drop_iscsi = firewall(IPTABLES_OK.replace(ISCSI, "-A InstanceServices -j DROP\n" + ISCSI))
+    assert "IPv4 InstanceServices: rule 1 is '-j DROP'" in drop_iscsi.detail
+
+
+def test_the_firewall_check_admits_only_bans_from_fail2ban() -> None:
+    second = BAN4.replace("203.0.113.7", "198.51.100.1")
+    banned = firewall(
+        with_fail2ban(IPTABLES_OK, BAN4, second, "-j RETURN"),
+        with_fail2ban(IP6TABLES_OK, BAN6, "-j RETURN"),
     )
-    assert "unexpected IPv4 input rule" in check.firewall_status(web, IP6TABLES_OK).detail
+    assert banned.ok and "fail2ban: 3" in banned.detail, banned.detail
+    for chain in (
+        (BAN4.replace("/32", "/24"), "-j RETURN"),  # more than one address
+        (BAN4.replace("203.0.113.7", "203.0.113.700"), "-j RETURN"),  # not an address
+        (BAN4.replace("REJECT --reject-with icmp-port-unreachable", "ACCEPT"), "-j RETURN"),
+        ("-j RETURN", BAN4),  # a ban after the return is never reached
+    ):
+        assert "not a ban of one address" in firewall(with_fail2ban(IPTABLES_OK, *chain)).detail
+    assert "end returning" in firewall(with_fail2ban(IPTABLES_OK, BAN4)).detail
+    unhooked = with_fail2ban(IPTABLES_OK, BAN4, "-j RETURN", jump=False)
+    assert "without the jump" in firewall(unhooked).detail
+    assert "jump without its chain" in firewall(with_fail2ban(IPTABLES_OK, declare=False)).detail
+    # A jump that sends every connection to the chain, not only SSH, is not fail2ban's.
+    everything = with_fail2ban(IPTABLES_OK, "-j RETURN").replace(F2B_JUMP, "-A INPUT -j f2b-sshd")
+    assert "IPv4 INPUT: rule 1 is '-j f2b-sshd'" in firewall(everything).detail
+    v6_as_v4 = with_fail2ban(IP6TABLES_OK, BAN6.replace("/128", "/32"), "-j RETURN")
+    assert "IPv6 f2b-sshd: not a ban" in firewall(v6=v6_as_v4).detail
 
 
-def test_the_firewall_keeps_oracles_rules_and_closes_the_rest() -> None:
+def test_the_firewall_check_fails_on_any_other_change() -> None:
+    web = IPTABLES_OK.replace(
+        SSH_IMAGE, SSH_IMAGE + "\n-A INPUT -p tcp -m tcp --dport 80 -j ACCEPT"
+    )
+    assert "IPv4 INPUT: rule 5 is" in firewall(web).detail
     no_final = IPTABLES_OK.replace("-A INPUT -j REJECT --reject-with icmp-host-prohibited\n", "")
-    assert "end rejecting" in check.firewall_status(no_final, IP6TABLES_OK).detail
-    no_iscsi = "\n".join(line for line in IPTABLES_OK.splitlines() if "3260" not in line)
-    assert "Oracle image" in check.firewall_status(no_iscsi, IP6TABLES_OK).detail
-    open_v6 = IP6TABLES_OK.replace("-P INPUT DROP", "-P INPUT ACCEPT")
-    assert "IPv6" in check.firewall_status(IPTABLES_OK, open_v6).detail
+    assert "IPv4 INPUT: missing rule 5" in firewall(no_final).detail
+    assert (
+        "IPv4: policies" in firewall(IPTABLES_OK.replace("FORWARD ACCEPT", "FORWARD DROP")).detail
+    )
+    # Oracle's rules: one changed, or two of them swapped.
+    no_iscsi = IPTABLES_OK.replace(ISCSI, "-A InstanceServices -d 169.254.9.9/32")
+    assert "IPv4 InstanceServices: rule 1 is" in firewall(no_iscsi).detail
+    lines = IPTABLES_OK.splitlines()
+    udp, tcp = (i for i, line in enumerate(lines) if "--dport 53 " in line)
+    lines[udp], lines[tcp] = lines[tcp], lines[udp]
+    assert "IPv4 InstanceServices: rule 6 is" in firewall("\n".join(lines)).detail
+    assert "unexpected chain DOCKER" in firewall(IPTABLES_OK + "-N DOCKER\n").detail
+    # IPv6: open, or with something more.
+    assert (
+        "IPv6: policies" in firewall(v6=IP6TABLES_OK.replace("INPUT DROP", "INPUT ACCEPT")).detail
+    )
     ssh_v6 = IP6TABLES_OK + "-A INPUT -p tcp -m tcp --dport 22 -j ACCEPT\n"
-    assert "unexpected IPv6 input rule" in check.firewall_status(IPTABLES_OK, ssh_v6).detail
-    assert not check.firewall_status("", "").ok
+    assert "IPv6 INPUT: unexpected rule 4" in firewall(v6=ssh_v6).detail
+    assert (
+        "IPv6 OUTPUT: unexpected rule 1" in firewall(v6=IP6TABLES_OK + "-A OUTPUT -j DROP\n").detail
+    )
+    # An output the parser does not understand, or none at all.
+    assert (
+        "line not understood" in firewall("iptables: Permission denied (you must be root)\n").detail
+    )
+    assert not firewall("", "").ok
 
 
 def test_postgresql_without_tcp_and_peer_only() -> None:

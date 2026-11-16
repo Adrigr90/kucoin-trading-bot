@@ -10,6 +10,7 @@ passed one (review of E4a, E4a-06).
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import re
 from collections.abc import Callable
@@ -98,65 +99,182 @@ def sshd_settings(sshd_T_output: str) -> Verdict:
     return Verdict("sshd", True, "keys only, no root, no forwarding")
 
 
-# The firewall is the one of the Oracle image, iptables loaded by netfilter-persistent, not
-# ufw (owner decision of 16 Nov 2026). These are the rules `iptables -S INPUT` may print.
-_ALLOWED_V4_INPUT = (
-    re.compile(r"^-A INPUT -m state --state RELATED,ESTABLISHED -j ACCEPT$"),
-    re.compile(r"^-A INPUT -p icmp -j ACCEPT$"),
-    re.compile(r"^-A INPUT -i lo -j ACCEPT$"),
-    # fail2ban hooks its own chain in front of SSH.
-    re.compile(r"^-A INPUT -p tcp -m multiport --dports 22 -j f2b-sshd$"),
+# The firewall is the one of the Oracle image, iptables loaded at boot by
+# netfilter-persistent, not ufw (owner decision of 16 Nov 2026). Its IPv4 rules stay as the
+# image ships them: the owner's address is limited only in the security list of Oracle
+# (owner decision of 17 Nov 2026, review FW-02). The check compares what `iptables -S` and
+# `ip6tables -S` print with the expected rules, chain by chain and in order (review FW-01):
+# any other rule, chain or policy fails, whatever it does. The only part that may vary is
+# what fail2ban adds on its first ban: a jump at the top of INPUT to its own chain, which
+# may hold only bans of single addresses and ends returning.
+_ORACLE_NOTE = (
+    '-m comment --comment "See the Oracle-Provided Images section in the Oracle Cloud'
+    ' Infrastructure documentation for security impact of modifying or removing this rule"'
 )
-_SSH_V4 = re.compile(
-    r"^-A INPUT -s (?P<source>\S+) -p tcp -m state --state NEW -m tcp --dport 22 -j ACCEPT$"
+# `iptables -S InstanceServices` on the instance (16 Nov 2026): what the instance needs to
+# reach its boot volume (iSCSI, only as root) and Oracle's services, and nothing else of
+# 169.254.0.0/16.
+_INSTANCE_SERVICES = tuple(
+    f"{match} {_ORACLE_NOTE} -j {target}"
+    for match, target in (
+        ("-d 169.254.0.2/32 -p tcp -m owner --uid-owner 0 -m tcp --dport 3260", "ACCEPT"),
+        ("-d 169.254.2.0/24 -p tcp -m owner --uid-owner 0 -m tcp --dport 3260", "ACCEPT"),
+        ("-d 169.254.4.0/24 -p tcp -m owner --uid-owner 0 -m tcp --dport 3260", "ACCEPT"),
+        ("-d 169.254.5.0/24 -p tcp -m owner --uid-owner 0 -m tcp --dport 3260", "ACCEPT"),
+        ("-d 169.254.0.2/32 -p tcp -m tcp --dport 80", "ACCEPT"),
+        ("-d 169.254.169.254/32 -p udp -m udp --dport 53", "ACCEPT"),
+        ("-d 169.254.169.254/32 -p tcp -m tcp --dport 53", "ACCEPT"),
+        ("-d 169.254.0.3/32 -p tcp -m owner --uid-owner 0 -m tcp --dport 80", "ACCEPT"),
+        ("-d 169.254.0.4/32 -p tcp -m tcp --dport 80", "ACCEPT"),
+        ("-d 169.254.169.254/32 -p tcp -m tcp --dport 80", "ACCEPT"),
+        ("-d 169.254.169.254/32 -p udp -m udp --dport 67", "ACCEPT"),
+        ("-d 169.254.169.254/32 -p udp -m udp --dport 69", "ACCEPT"),
+        ("-d 169.254.169.254/32 -p udp -m udp --dport 123", "ACCEPT"),
+        ("-d 169.254.0.0/16 -p tcp -m tcp", "REJECT --reject-with tcp-reset"),
+        ("-d 169.254.0.0/16 -p udp -m udp", "REJECT --reject-with icmp-port-unreachable"),
+    )
 )
-_FINAL_V4 = re.compile(r"^-A INPUT -j (REJECT --reject-with icmp-host-prohibited|DROP)$")
-_ALLOWED_V6_INPUT = (
-    re.compile(r"^-A INPUT -i lo -j ACCEPT$"),
-    re.compile(r"^-A INPUT -m state --state RELATED,ESTABLISHED -j ACCEPT$"),
-    re.compile(r"^-A INPUT -p ipv6-icmp -j ACCEPT$"),
-    re.compile(r"^-A INPUT -p tcp -m multiport --dports 22 -j f2b-sshd$"),
+F2B_CHAIN = "f2b-sshd"
+_F2B_JUMP = f"-p tcp -m multiport --dports 22 -j {F2B_CHAIN}"
+
+
+@dataclass(frozen=True)
+class FirewallRules:
+    """What ``-S`` must print for one family: the policies, the rules of each chain in
+    order, and the form of a ban of fail2ban (deploy/etc/fail2ban/jail.d/kbot.conf)."""
+
+    family: str
+    policies: dict[str, str]
+    chains: dict[str, tuple[str, ...]]
+    ban: re.Pattern[str]
+    address: Callable[[str], object]  # raises ValueError unless one single address
+
+
+IPV4_RULES = FirewallRules(
+    "IPv4",
+    policies={"INPUT": "ACCEPT", "FORWARD": "ACCEPT", "OUTPUT": "ACCEPT"},
+    chains={
+        "INPUT": (
+            "-m state --state RELATED,ESTABLISHED -j ACCEPT",
+            "-p icmp -j ACCEPT",
+            "-i lo -j ACCEPT",
+            "-p tcp -m state --state NEW -m tcp --dport 22 -j ACCEPT",
+            "-j REJECT --reject-with icmp-host-prohibited",
+        ),
+        "FORWARD": ("-j REJECT --reject-with icmp-host-prohibited",),
+        "OUTPUT": ("-d 169.254.0.0/16 -j InstanceServices",),
+        "InstanceServices": _INSTANCE_SERVICES,
+    },
+    ban=re.compile(r"-s (\S+)/32 -j REJECT --reject-with icmp-port-unreachable"),
+    address=ipaddress.IPv4Address,
 )
-# The rule Oracle's image needs to reach its boot volume over iSCSI, only as root.
-_ORACLE_ISCSI = re.compile(
-    r"^-A InstanceServices -d 169\.254\.0\.2/32 -p tcp -m owner --uid-owner 0 -m tcp"
-    r" --dport 3260 .*-j ACCEPT$"
+# deploy/etc/iptables/rules.v6: nothing new comes in (the instance has no public IPv6).
+IPV6_RULES = FirewallRules(
+    "IPv6",
+    policies={"INPUT": "DROP", "FORWARD": "DROP", "OUTPUT": "ACCEPT"},
+    chains={
+        "INPUT": (
+            "-i lo -j ACCEPT",
+            "-m state --state RELATED,ESTABLISHED -j ACCEPT",
+            "-p ipv6-icmp -j ACCEPT",
+        ),
+        "FORWARD": (),
+        "OUTPUT": (),
+    },
+    ban=re.compile(r"-s (\S+)/128 -j REJECT --reject-with icmp6-port-unreachable"),
+    address=ipaddress.IPv6Address,
 )
+
+
+def _first_difference(found: list[str], expected: tuple[str, ...]) -> str:
+    for index, (have, want) in enumerate(zip(found, expected, strict=False), 1):
+        if have != want:
+            return f"rule {index} is {have!r}, expected {want!r}"
+    if len(found) > len(expected):
+        return f"unexpected rule {len(expected) + 1}: {found[len(expected)]!r}"
+    return f"missing rule {len(found) + 1}: {expected[len(found)]!r}"
+
+
+def _is_address(kind: Callable[[str], object], text: str) -> bool:
+    try:
+        kind(text)
+    except ValueError:
+        return False
+    return True
+
+
+def _fail2ban_problems(
+    expected: FirewallRules, rules: list[str] | None, jump: bool
+) -> tuple[list[str], int]:
+    """fail2ban's chain and its jump come together, on the first ban. The chain may hold
+    only bans of single addresses and must end returning: an accept there would let in
+    what the rules of the image reject (review FW-01)."""
+    name = f"{expected.family} {F2B_CHAIN}"
+    if rules is None:
+        return ([f"{name}: jump without its chain"] if jump else []), 0
+    problems = [] if jump else [f"{name}: chain without the jump at the top of INPUT"]
+    body = rules[:-1] if rules[-1:] == ["-j RETURN"] else rules
+    if body is rules:
+        problems.append(f"{name}: does not end returning")
+    bans = 0
+    for rule in body:
+        match = expected.ban.fullmatch(rule)
+        if match is None or not _is_address(expected.address, match[1]):
+            problems.append(f"{name}: not a ban of one address: {rule!r}")
+        else:
+            bans += 1
+    return problems, bans
+
+
+def _rules_problems(expected: FirewallRules, output: str) -> tuple[list[str], int]:
+    """What separates ``-S`` from the expected rules, and the number of bans."""
+    name = expected.family
+    policies: dict[str, str] = {}
+    chains: dict[str, list[str]] = {}
+    for line in (raw.strip() for raw in output.splitlines()):
+        if not line:
+            continue
+        option, _, rest = line.partition(" ")
+        chain, _, rule = rest.partition(" ")
+        if option == "-P" and chain and rule:
+            policies[chain] = rule
+        elif option == "-N" and chain and not rule:
+            chains.setdefault(chain, [])
+        elif option == "-A" and chain and rule:
+            chains.setdefault(chain, []).append(rule)
+        else:
+            return [f"{name}: line not understood: {line!r}"], 0
+    problems = []
+    if policies != expected.policies:
+        problems.append(f"{name}: policies {policies}, expected {expected.policies}")
+    problems += [
+        f"{name}: unexpected chain {chain}"
+        for chain in chains
+        if chain not in expected.chains and chain != F2B_CHAIN
+    ]
+    jump = chains.get("INPUT", [])[:1] == [_F2B_JUMP]
+    for chain, rules in expected.chains.items():
+        found = chains.get(chain, [])[1:] if chain == "INPUT" and jump else chains.get(chain, [])
+        if found != list(rules):
+            problems.append(f"{name} {chain}: {_first_difference(found, rules)}")
+    fail2ban, bans = _fail2ban_problems(expected, chains.get(F2B_CHAIN), jump)
+    return problems + fail2ban, bans
 
 
 def firewall_status(v4: str, v6: str) -> Verdict:
-    """``iptables -S`` and ``ip6tables -S``: in IPv4, new connections only for SSH and only
-    from one address (a /32), everything else rejected at the end, and Oracle's own rules
-    in place (the jump to InstanceServices and its iSCSI rule); in IPv6, nothing new comes
-    in. A rule of INPUT that is not one of the expected ones fails the check."""
-    lines4 = [line.strip() for line in v4.splitlines() if line.strip()]
-    lines6 = [line.strip() for line in v6.splitlines() if line.strip()]
-    problems = []
-    input4 = [line for line in lines4 if line.startswith("-A INPUT ")]
-    ssh = [m["source"] for line in input4 if (m := _SSH_V4.match(line))]
-    if len(ssh) != 1 or not ssh[0].endswith("/32") or ssh[0].startswith("0.0.0.0"):  # noqa: S104
-        problems.append(f"SSH must be allowed from exactly one address, found {ssh}")
-    for line in input4:
-        if _SSH_V4.match(line) or _FINAL_V4.match(line):
-            continue
-        if not any(rule.match(line) for rule in _ALLOWED_V4_INPUT):
-            problems.append(f"unexpected IPv4 input rule: {line}")
-    policy_drop4 = "-P INPUT DROP" in lines4
-    if not policy_drop4 and (not input4 or not _FINAL_V4.match(input4[-1])):
-        problems.append("IPv4 input does not end rejecting everything else")
-    if "-A OUTPUT -d 169.254.0.0/16 -j InstanceServices" not in lines4 or not any(
-        _ORACLE_ISCSI.match(line) for line in lines4
-    ):
-        problems.append("the rules of the Oracle image (InstanceServices, iSCSI) are missing")
-    if "-P INPUT DROP" not in lines6:
-        problems.append("IPv6 input is not dropped by default")
-    for line in (line for line in lines6 if line.startswith("-A INPUT ")):
-        if not any(rule.match(line) for rule in _ALLOWED_V6_INPUT):
-            problems.append(f"unexpected IPv6 input rule: {line}")
-    if problems:
-        return Verdict("firewall", False, "; ".join(problems))
+    """``iptables -S`` and ``ip6tables -S`` against the expected rules (review FW-01): in
+    IPv4, exactly the rules of the Oracle image (new connections only for SSH, Oracle's
+    own rules); in IPv6, nothing new comes in; in both, only what fail2ban adds on a ban.
+    An output the parser does not understand fails the check."""
+    problems4, bans4 = _rules_problems(IPV4_RULES, v4)
+    problems6, bans6 = _rules_problems(IPV6_RULES, v6)
+    if problems4 or problems6:
+        return Verdict("firewall", False, "; ".join(problems4 + problems6))
     return Verdict(
-        "firewall", True, f"SSH only from {ssh[0]}, Oracle's rules in place, IPv6 closed"
+        "firewall",
+        True,
+        "IPv4 exactly as the Oracle image ships it (SSH limited to the owner in the security"
+        f" list of Oracle), IPv6 closed; addresses banned by fail2ban: {bans4 + bans6}",
     )
 
 

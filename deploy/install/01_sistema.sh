@@ -2,19 +2,20 @@
 # kbot, stage E4a (02 §9 and §13.1): harden a fresh Ubuntu Server 24.04 ARM64 instance of
 # Oracle Cloud and prepare it for the services. Run once as root on the server:
 #
-#   sudo bash /opt/kbot/deploy/install/01_sistema.sh <owner IPv4>/32 [data volume device]
+#   sudo bash /opt/kbot/deploy/install/01_sistema.sh [data volume device]
 #
 # It is idempotent: running it again only reapplies the same state. It never touches
 # the code (02_codigo.sh) nor PostgreSQL (03_postgresql.sh, stage E4b); 04_verificar.sh
-# checks the whole at the end. Every step is
-# listed in docs/operacion/comandos.md.
+# checks the whole at the end. Every step is listed in docs/operacion/comandos.md.
 #
 # The firewall is the one the Oracle image ships (iptables, loaded at boot by
 # netfilter-persistent), never ufw: Oracle warns that ufw on its Ubuntu images can break
 # the rules the instance needs to reach its boot volume (owner decision of 16 Nov 2026).
-# Only the SSH rule of the image changes, to the owner's address; Oracle's own rules stay
-# as they are, and IPv6 is closed. The script refuses to restrict SSH to an address that
-# is not the one of the session running it, so a typo cannot lock the owner out.
+# Its IPv4 rules stay exactly as the image ships them: new connections only for SSH, and
+# Oracle's own rules. SSH is limited to the owner's address in the security list of Oracle,
+# which the owner can change from the console at any time; the server does not repeat that
+# limit, so a new home address never locks the owner out (owner decision of 17 Nov 2026,
+# review FW-02). IPv6, which the image leaves open, is closed.
 #
 # The data volume of D11 (110 GB) must be attached: without it the script stops before
 # creating anything (review of E4a, E4a-03). Only KBOT_ALLOW_BOOT_VOLUME=1, meant for a
@@ -25,8 +26,7 @@ if [[ $EUID -ne 0 ]]; then
   echo "run as root (sudo)" >&2
   exit 1
 fi
-owner_ip="${1:?owner IPv4 address with its prefix, for example 83.0.0.1/32}"
-data_device="${2:-/dev/oracleoci/oraclevdb}"
+data_device="${1:-/dev/oracleoci/oraclevdb}"
 repo=/opt/kbot
 data=/srv/kbot
 label=kbot-data
@@ -95,39 +95,20 @@ step "retire the generic nftables.service before touching the firewall (E4a-01)"
 systemctl disable --now nftables >/dev/null 2>&1 || true
 systemctl mask nftables >/dev/null 2>&1 || true
 
-step "firewall of the Oracle image: SSH only from the owner's address, IPv6 closed"
+step "firewall of the Oracle image: its IPv4 rules as shipped, IPv6 closed"
 v4=/etc/iptables/rules.v4
-original=/etc/iptables/rules.v4.oracle
-ssh_any='-A INPUT -p tcp -m state --state NEW -m tcp --dport 22 -j ACCEPT'
-ssh_owner="-A INPUT -s $owner_ip -p tcp -m state --state NEW -m tcp --dport 22 -j ACCEPT"
-# Never lock the owner out: the address must be the one this SSH session comes from.
-owner_host="${owner_ip%/32}"
-if ! ss -Htn state established '( sport = :22 )' | awk '{print $4}' | grep -q "^$owner_host:"; then
-  echo "no SSH session from $owner_host: refusing to restrict SSH to an address not in use" >&2
+ssh_image='-A INPUT -p tcp -m state --state NEW -m tcp --dport 22 -j ACCEPT'
+# The IPv4 file of the image is never edited; it must still be the image's.
+if ! grep -q '^# iptables configuration for Oracle Cloud Infrastructure' "$v4" ||
+  [[ "$(grep -cxF -- "$ssh_image" "$v4")" != "1" ]] ||
+  ! grep -q -- '-A InstanceServices -d 169.254.0.2/32 .*--dport 3260' "$v4"; then
+  echo "$v4 is not the rules file of the Oracle image: stopping" >&2
   exit 1
 fi
-# Keep the file of the image once, untouched, and always derive the rules from it.
-[[ -f "$original" ]] || cp -p "$v4" "$original"
-if [[ "$(grep -cxF -- "$ssh_any" "$original")" != "1" ]]; then
-  echo "the SSH rule of the Oracle image is not where expected in $original: stopping" >&2
-  exit 1
-fi
-tmp="$(mktemp)"
-sed "s|^${ssh_any}\$|${ssh_owner}|" "$original" >"$tmp"
-# Exactly one line differs from the image, and it is the SSH rule.
-if [[ "$(diff "$original" "$tmp" | grep -c '^[<>]')" != "2" ]]; then
-  echo "unexpected difference with the rules of the image: stopping" >&2
-  exit 1
-fi
-iptables-restore --test <"$tmp"
 ip6tables-restore --test <"$repo/deploy/etc/iptables/rules.v6"
-install -o root -g root -m 0640 "$tmp" "$v4"
 install -o root -g root -m 0640 "$repo/deploy/etc/iptables/rules.v6" /etc/iptables/rules.v6
-rm -f "$tmp"
 systemctl enable netfilter-persistent >/dev/null
 netfilter-persistent reload
-iptables -S INPUT | grep -qxF -- "$ssh_owner" || { echo "the SSH rule is not loaded" >&2; exit 1; }
-iptables -S InstanceServices | grep -q -- '--dport 3260' || { echo "Oracle's rules are gone" >&2; exit 1; }
 
 step "metadata guard (E4-D04): only root may reach the instance metadata"
 # Its own unit, loaded after the firewall of the image, and only the table inet kbot_guard.
@@ -141,14 +122,18 @@ systemctl daemon-reload
 systemctl enable --now kbot-metadata-guard >/dev/null
 systemctl reload kbot-metadata-guard
 nft list table inet kbot_guard >/dev/null
-# The effective rules after the guard: the SSH rule and Oracle's rules still loaded.
-iptables -S INPUT | grep -qxF -- "$ssh_owner" || { echo "the firewall rules are gone" >&2; exit 1; }
-iptables -S InstanceServices | grep -q -- '--dport 3260' || { echo "Oracle's rules are gone" >&2; exit 1; }
 
 step "fail2ban on sshd"
 install -o root -g root -m 0644 "$repo/deploy/etc/fail2ban/jail.d/kbot.conf" /etc/fail2ban/jail.d/kbot.conf
 systemctl enable --now fail2ban >/dev/null
 systemctl restart fail2ban
+
+step "the firewall as loaded, with fail2ban in place"
+# A first look. The full comparison, chain by chain and in order (review FW-01), is
+# kbot.ops in 04_verificar.sh, once the code is installed.
+iptables -S | grep -qxF -- "$ssh_image" || { echo "the SSH rule of the image is not loaded" >&2; exit 1; }
+iptables -S InstanceServices | grep -q -- '--dport 3260' || { echo "Oracle's rules are gone" >&2; exit 1; }
+ip6tables -S INPUT | grep -qxF -- '-P INPUT DROP' || { echo "IPv6 is not closed" >&2; exit 1; }
 
 step "security updates every day, without automatic reboots"
 install -o root -g root -m 0644 "$repo/deploy/etc/apt/apt.conf.d/52kbot-unattended" \

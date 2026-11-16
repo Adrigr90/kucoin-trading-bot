@@ -1,21 +1,26 @@
 """The files of deploy/ are valid before they reach the server (02 §13.1, point 8).
 
 Each check needs a tool of the Ubuntu runner: shellcheck and bash for the scripts,
-systemd-analyze for the units, sshd for the SSH drop-in and nft for the metadata guard.
-On the PC (no such tools) the checks are skipped; in the CI (KBOT_CI) they are required.
+systemd-analyze for the units, sshd for the SSH drop-in, nft for the metadata guard and
+iptables (in a throwaway network namespace) for the firewall. On the PC (no such tools)
+the checks are skipped; in the CI (KBOT_CI) they are required.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
+from kbot.ops import check
+
 ROOT = Path(__file__).resolve().parents[2]
 DEPLOY = ROOT / "deploy"
+FIREWALL = ROOT / "tests" / "fixtures" / "firewall"  # recorded on the instance, 16 Nov 2026
 UNITS = sorted((DEPLOY / "systemd").glob("*"))
 PYTHON_UNITS = [
     u for u in UNITS if u.suffix == ".service" and u.name != "kbot-metadata-guard.service"
@@ -75,13 +80,14 @@ def test_the_units_are_verified_only_when_everything_they_need_exists() -> None:
     assert system.index("systemctl disable --now nftables") < system.index(
         "netfilter-persistent reload"
     )
-    # Owner decision of 16 Nov 2026: the firewall of the Oracle image, never ufw; only the
-    # SSH rule changes, and never to an address other than the session's own.
+    # Owner decisions of 16 and 17 Nov 2026: the firewall of the Oracle image, never ufw,
+    # and its IPv4 file only read, never written (review FW-02); only rules.v6 is installed.
     commands = [line for line in system.splitlines() if not line.lstrip().startswith("#")]
     assert not any("ufw" in line for line in commands)
-    assert "rules.v4.oracle" in system and "iptables-restore --test" in system
-    assert "refusing to restrict SSH to an address not in use" in system
-    assert "InstanceServices" in system
+    v4_uses = [line for line in commands if '"$v4"' in line]
+    assert v4_uses and all("grep" in line for line in v4_uses)
+    assert "owner_ip" not in system and "rules.v4.oracle" not in system
+    assert "ip6tables-restore --test" in system and "/etc/iptables/rules.v6" in system
     # E4a-03: no data volume means no installation, unless a test instance says so.
     assert "KBOT_ALLOW_BOOT_VOLUME" in system
     assert "findmnt -no LABEL" in system
@@ -219,3 +225,70 @@ def test_ipv6_rules_close_input_and_load() -> None:
     restore = tool("ip6tables-restore")
     done = run(*as_root(restore, "--test"), input_text=text)
     assert done.returncode == 0, done.stderr
+
+
+def test_the_file_of_the_image_passes_the_check_of_01() -> None:
+    """01_sistema.sh stops unless /etc/iptables/rules.v4 is still the image's: the file
+    recorded on the instance (16 Nov 2026) meets its three conditions."""
+    system = (DEPLOY / "install" / "01_sistema.sh").read_text(encoding="utf-8")
+    header = "# iptables configuration for Oracle Cloud Infrastructure"
+    iscsi = "-A InstanceServices -d 169.254.0.2/32 .*--dport 3260"
+    assert f"grep -q '^{header}' \"$v4\"" in system
+    assert f"grep -q -- '{iscsi}' \"$v4\"" in system
+    ssh_image = re.search(r"^ssh_image='(.*)'$", system, re.MULTILINE)
+    assert ssh_image is not None
+    lines = (FIREWALL / "oracle_rules.v4").read_text(encoding="utf-8").splitlines()
+    assert any(line.startswith(header) for line in lines)
+    assert lines.count(ssh_image[1]) == 1
+    assert any(re.search(iscsi, line) for line in lines)
+
+
+# As root in a throwaway network namespace: the file of the image (as recorded on the
+# instance) and rules.v6, loaded as netfilter-persistent loads them; then what fail2ban's
+# iptables-multiport action runs on its first ban (port "ssh", as in the jail); then the
+# reviewer's example of FW-01. Each `-S` comes after a marker line.
+_NETNS = r"""
+set -e
+iptables-restore < "$1"
+ip6tables-restore < "$2"
+echo '#image'; iptables -S; echo '#image6'; ip6tables -S
+for ipt in iptables ip6tables; do
+  $ipt -N f2b-sshd
+  $ipt -A f2b-sshd -j RETURN
+  $ipt -I INPUT -p tcp -m multiport --dports ssh -j f2b-sshd
+done
+iptables -I f2b-sshd 1 -s 203.0.113.7 -j REJECT --reject-with icmp-port-unreachable
+ip6tables -I f2b-sshd 1 -s 2001:db8::7 -j REJECT --reject-with icmp6-port-unreachable
+echo '#banned'; iptables -S; echo '#banned6'; ip6tables -S
+iptables -I f2b-sshd 1 -j ACCEPT
+echo '#accept'; iptables -S
+"""
+
+
+def test_the_firewall_check_reads_what_iptables_really_prints() -> None:
+    """Review FW-01: kbot.ops.check against the iptables of Ubuntu 24.04 (the runner's,
+    the same version as the server's), not only against texts written by hand."""
+    unshare = tool("unshare")
+    tool("iptables-restore")
+    image_file = FIREWALL / "oracle_rules.v4"
+    rules_v6 = DEPLOY / "etc" / "iptables" / "rules.v6"
+    done = run(
+        *as_root(unshare, "--net", "bash", "-c", _NETNS, "netns", str(image_file), str(rules_v6))
+    )
+    assert done.returncode == 0, done.stderr
+    printed: dict[str, list[str]] = {}
+    current: list[str] = []
+    for line in done.stdout.splitlines():
+        if line.startswith("#"):
+            current = printed.setdefault(line[1:], [])
+        else:
+            current.append(line)
+    text = {name: "\n".join(lines) + "\n" for name, lines in printed.items()}
+    # The runner prints for the image's file exactly what the instance printed.
+    assert text["image"] == (FIREWALL / "oracle_iptables-S.txt").read_text(encoding="utf-8")
+    image = check.firewall_status(text["image"], text["image6"])
+    assert image.ok, image.detail
+    banned = check.firewall_status(text["banned"], text["banned6"])
+    assert banned.ok and "fail2ban: 2" in banned.detail, banned.detail
+    opened = check.firewall_status(text["accept"], text["banned6"])
+    assert not opened.ok and "not a ban of one address: '-j ACCEPT'" in opened.detail

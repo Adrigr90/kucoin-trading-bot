@@ -187,6 +187,16 @@ def test_uv_checksum_is_pinned_for_the_server() -> None:
     assert "uv.sha256" in code and "KBOT_UV_SHA256" not in code
 
 
+def test_backup_recipients_are_two_public_keys_and_no_secret() -> None:
+    """E4c (02 §13.1, point 4): the copies are encrypted to the principal and the recovery
+    key; the repository and the server only ever hold the public halves."""
+    text = (DEPLOY / "etc" / "kbot" / "age-recipients.txt").read_text(encoding="utf-8")
+    assert "AGE-SECRET-KEY" not in text.upper()
+    keys = [line for line in text.splitlines() if line.strip() and not line.startswith("#")]
+    assert len(keys) == 2 and len(set(keys)) == 2
+    assert all(re.fullmatch(r"age1[02-9ac-hj-np-z]{58}", key) for key in keys)
+
+
 def test_tmpfiles_creates_the_shared_lock_owned_by_root() -> None:
     text = (DEPLOY / "etc" / "tmpfiles.d" / "kbot.conf").read_text(encoding="utf-8")
     assert "d /run/kbot 0750 root kbot" in text

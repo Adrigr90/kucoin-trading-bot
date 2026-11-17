@@ -237,14 +237,40 @@ def test_a_sealed_day_copy_holds_its_partitions_with_the_fingerprints_of_its_arc
             "huella": partition["huella"],
             "origen": copy.path.name,
         }
-    # A count that no longer matches the copy stops the hot copy, and nothing is published.
-    changed = json.loads((copy.path / local.MANIFEST).read_text(encoding="utf-8"))
-    changed["particiones"][[p["tabla"] for p in changed["particiones"]].index("candles")][
-        "filas"
-    ] = 1
-    (copy.path / local.MANIFEST).write_text(json.dumps(changed), encoding="utf-8")
-    later = NOW.replace(hour=11)
-    with pytest.raises(local.BackupError, match="is sealed but has 0 rows, its copy 1"):
+    # Residual of E4c1-02: one hex digit changed in a fingerprint of the manifest, with the
+    # rows and the dump kept, makes the copy no source of reuse: the hot copy takes that
+    # fingerprint in its own snapshot and never propagates the altered value.
+    slots = "market.depth_slot_status_p20150314"
+    true_print = hot.manifest["tablas"][slots]["huella"]
+    text = (copy.path / local.MANIFEST).read_text(encoding="utf-8")
+    flipped = "0" if true_print[-1] != "0" else "1"
+    (copy.path / local.MANIFEST).write_text(
+        text.replace(true_print, true_print[:-1] + flipped), encoding="utf-8", newline="\n"
+    )
+    assert local.published(directory, local.DAY_PREFIX) == []
+    second = local.hot_copy(directory, recipients, now=NOW.replace(hour=11), dsn=dsn)
+    assert second.manifest["tablas"][slots] == {
+        "modo": "incluido",
+        "filas": 3,
+        "huella": true_print,
+        "origen": "instantanea",
+    }
+    # The next run removes the copy, makes it again, and its fingerprints are reused again.
+    assert copy.path in local.reconcile(directory)
+    assert SEALED_DAY in local.pending_sealed_days(directory, set(), dsn)
+    local.sealed_day_copy(directory, recipients, SEALED_DAY, now=NOW.replace(hour=12), dsn=dsn)
+    third = local.hot_copy(directory, recipients, now=NOW.replace(hour=12), dsn=dsn)
+    assert third.manifest["tablas"][slots]["origen"] == copy.path.name
+    assert third.manifest["tablas"][slots]["huella"] == true_print
+    # A sealed partition that loses a row (a broken seal) no longer matches its copy: the
+    # hot copy stops and publishes nothing.
+    with connect("postgres") as admin:
+        admin.execute(
+            "DELETE FROM market.depth_slot_status_p20150314 WHERE slot_start = %s",
+            (datetime(2015, 3, 14, 0, 0, 20, tzinfo=UTC),),
+        )
+    later = NOW.replace(hour=13)
+    with pytest.raises(local.BackupError, match="is sealed but has 2 rows, its copy 3"):
         local.hot_copy(directory, recipients, now=later, dsn=dsn)
     assert not (directory / f"caliente-{later:%Y%m%dT%H%M%SZ}").exists()
 

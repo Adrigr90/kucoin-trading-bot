@@ -373,19 +373,24 @@ def _dump_info(plain: Path, encrypted: Path) -> dict[str, Any]:
 
 
 # The register: one JSON line per copy, written before the copy is published (E4c1-04).
+# It binds the name of the copy, its plain and encrypted dumps and its whole manifest, so a
+# manifest changed afterwards, even in one fingerprint, is no longer vouched for (residual of
+# E4c1-02): it is never reused, and the copy is removed and made again.
+_ENTRY_KEYS = ("copia", "sha256_claro", "sha256_cifrado", "sha256_manifiesto")
 
 
-def _entry(manifest: dict[str, Any]) -> dict[str, Any]:
+def _entry(manifest: dict[str, Any], manifest_sha256: str) -> dict[str, Any]:
     return {
         "copia": manifest["nombre"],
         "clase": manifest["clase"],
         "creada": manifest["creada"],
         "sha256_claro": manifest["volcado"]["sha256_claro"],
         "sha256_cifrado": manifest["volcado"]["sha256_cifrado"],
+        "sha256_manifiesto": manifest_sha256,
     }
 
 
-def _register(directory: Path, manifest: dict[str, Any]) -> None:
+def _register(directory: Path, manifest: dict[str, Any], manifest_sha256: str) -> None:
     """Appends the entry of a copy, durably, before the copy is published. A line that an
     earlier failure cut is left as it is and never read; the new entry starts a new line."""
     register = directory / REGISTER
@@ -396,7 +401,9 @@ def _register(directory: Path, manifest: dict[str, Any]) -> None:
             if handle.read(1) != b"\n":
                 separator = "\n"
     with register.open("a", encoding="utf-8", newline="\n") as handle:
-        handle.write(separator + json.dumps(_entry(manifest), sort_keys=True) + "\n")
+        handle.write(
+            separator + json.dumps(_entry(manifest, manifest_sha256), sort_keys=True) + "\n"
+        )
     parquet.sync(register)
 
 
@@ -416,21 +423,24 @@ def register_entries(directory: Path) -> list[dict[str, Any]]:
     return entries
 
 
-def _registered(entries: Sequence[dict[str, Any]], manifest: dict[str, Any]) -> bool:
+def _registered(
+    entries: Sequence[dict[str, Any]], manifest: dict[str, Any], manifest_sha256: str
+) -> bool:
     try:
-        wanted = _entry(manifest)
+        wanted = _entry(manifest, manifest_sha256)
     except (KeyError, TypeError):
         return False
-    keys = ("copia", "sha256_claro", "sha256_cifrado")
-    return any(all(e.get(k) == wanted[k] for k in keys) for e in entries)
+    return any(all(e.get(k) == wanted[k] for k in _ENTRY_KEYS) for e in entries)
 
 
 def published(directory: Path, prefix: str) -> list[Copy]:
-    """The published copies of a class whose register entry vouches for them."""
+    """The published copies of a class whose register entry vouches for them: the same
+    name, the same plain and encrypted dumps and the same bytes of the whole manifest."""
     entries = register_entries(directory)
     copies = []
     for path in sorted(p for p in directory.iterdir() if p.is_dir() and p.name.startswith(prefix)):
         try:
+            manifest_sha256 = sha256_file(path / MANIFEST)
             manifest = json.loads((path / MANIFEST).read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
@@ -438,7 +448,7 @@ def published(directory: Path, prefix: str) -> list[Copy]:
             isinstance(manifest, dict)
             and manifest.get("nombre") == path.name
             and (path / DUMP).is_file()
-            and _registered(entries, manifest)
+            and _registered(entries, manifest, manifest_sha256)
         ):
             copies.append(Copy(path, manifest))
     return copies
@@ -475,15 +485,16 @@ def _attempt(directory: Path, name: str) -> Iterator[tuple[Path, Path]]:
 
 
 def _finish(directory: Path, temporary: Path, final: Path, manifest: dict[str, Any]) -> Copy:
-    """Writes the manifest, registers the copy and only then publishes it, by renaming its
-    directory (E4c1-04). A failure before the rename leaves at most an entry without a copy,
-    which authenticates nothing that exists."""
+    """Writes the manifest, registers the copy with the SHA-256 of its dumps and of the
+    manifest itself, and only then publishes it, by renaming its directory (E4c1-04). A
+    failure before the rename leaves at most an entry without a copy, which authenticates
+    nothing that exists."""
     with (temporary / MANIFEST).open("w", encoding="utf-8", newline="\n") as handle:
         json.dump(manifest, handle, ensure_ascii=False, indent=1, sort_keys=True)
         handle.write("\n")
     for path in (temporary / DUMP, temporary / MANIFEST, temporary):
         parquet.sync(path)
-    _register(directory, manifest)
+    _register(directory, manifest, sha256_file(temporary / MANIFEST))
     temporary.rename(final)
     parquet.sync(final.parent)
     return Copy(final, manifest)

@@ -84,7 +84,7 @@ def test_the_recipients_are_the_two_public_keys_and_never_a_private_one(tmp_path
     assert local.recipients(repository / "age-recipients.txt") == [PRINCIPAL, RECOVERY]
 
 
-def finished(directory: Path, name: str, content: bytes = b"cipher") -> local.Copy:
+def finished(directory: Path, name: str, content: bytes = b"cipher", **extra: Any) -> local.Copy:
     """A copy taken through the real protocol of the module: attempt, then finish."""
     with local._attempt(directory, name) as (temporary, final):
         (temporary / local.DUMP).write_bytes(content)
@@ -96,6 +96,7 @@ def finished(directory: Path, name: str, content: bytes = b"cipher") -> local.Co
                 "sha256_claro": "a" * 64,
                 "sha256_cifrado": local.sha256_file(temporary / local.DUMP),
             },
+            **extra,
         }
         return local._finish(directory, temporary, final, manifest)
 
@@ -112,7 +113,7 @@ def test_a_copy_is_registered_before_it_is_published(tmp_path: Path) -> None:
 def test_a_register_that_fails_publishes_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def full_disk(directory: Path, manifest: dict[str, Any]) -> None:
+    def full_disk(*_: object) -> None:
         raise OSError(errno.ENOSPC, "No space left on device")
 
     monkeypatch.setattr(local, "_register", full_disk)
@@ -163,3 +164,21 @@ def test_a_line_cut_by_a_full_disk_never_breaks_the_register(tmp_path: Path) -> 
     names = [e["copia"] for e in local.register_entries(tmp_path)]
     assert names == [first.path.name, second.path.name]
     assert local.reconcile(tmp_path) == []
+
+
+def test_a_manifest_changed_in_one_fingerprint_is_no_longer_vouched_for(tmp_path: Path) -> None:
+    """Residual of E4c1-02: the register binds the bytes of the whole manifest, so one hex
+    digit changed in a fingerprint, with the rows and the dump kept, makes the copy unusable
+    as a source of fingerprints; the next run removes it and makes it again."""
+    partitions = [{"particion": "market.candles_p20261120", "filas": 7, "huella": "1" * 64}]
+    copy = finished(tmp_path, "dia-2026-11-20", particiones=partitions)
+    assert [c.path for c in local.published(tmp_path, local.DAY_PREFIX)] == [copy.path]
+    text = (copy.path / local.MANIFEST).read_text(encoding="utf-8")
+    altered = text.replace("1" * 64, "1" * 63 + "2")  # one hex digit; rows and dump kept
+    assert altered != text
+    (copy.path / local.MANIFEST).write_text(altered, encoding="utf-8", newline="\n")
+    assert local.published(tmp_path, local.DAY_PREFIX) == []  # never a source of reuse
+    assert local.reconcile(tmp_path) == [copy.path]
+    # Made again, it is vouched for and its fingerprints can be reused normally.
+    again = finished(tmp_path, "dia-2026-11-20", particiones=partitions)
+    assert [c.path for c in local.published(tmp_path, local.DAY_PREFIX)] == [again.path]

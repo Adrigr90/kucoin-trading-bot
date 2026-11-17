@@ -182,6 +182,17 @@ def _batches(conn: psycopg.Connection, table: Table, day: date) -> Iterator[list
             yield batch
 
 
+def day_fingerprint(conn: psycopg.Connection, table: Table, day: date) -> Fingerprint:
+    """The rows and the canonical fingerprint of one day of a table, exactly as its archive
+    file holds them. The copies of sealed days (stage E4c) record it per partition, so a
+    copy and a generation of the same day can be compared without reading either file."""
+    fingerprint = Fingerprint([c.name for c in table.columns])
+    for batch in _batches(conn, table, day):
+        for row in batch:
+            fingerprint.add(row)
+    return fingerprint
+
+
 def archive_day(
     connect: Connect,
     root: Path,

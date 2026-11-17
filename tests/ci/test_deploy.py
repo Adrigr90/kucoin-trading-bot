@@ -64,7 +64,13 @@ def test_the_units_are_verified_only_when_everything_they_need_exists() -> None:
     PostgreSQL, and only 04 verifies them, when the interpreter and postgresql.service are
     both in place."""
     scripts = sorted(p.name for p in (DEPLOY / "install").glob("0*.sh"))
-    assert scripts == ["01_sistema.sh", "02_codigo.sh", "03_postgresql.sh", "04_verificar.sh"]
+    assert scripts == [
+        "01_sistema.sh",
+        "02_codigo.sh",
+        "03_postgresql.sh",
+        "04_verificar.sh",
+        "05_copias.sh",  # stage E4c, after the verification
+    ]
     system = (DEPLOY / "install" / "01_sistema.sh").read_text(encoding="utf-8")
     verify = (DEPLOY / "install" / "04_verificar.sh").read_text(encoding="utf-8")
     for name in scripts[:3]:
@@ -185,6 +191,26 @@ def test_uv_checksum_is_pinned_for_the_server() -> None:
     assert name == "uv-aarch64-unknown-linux-gnu.tar.gz"
     code = (DEPLOY / "install" / "02_codigo.sh").read_text(encoding="utf-8")
     assert "uv.sha256" in code and "KBOT_UV_SHA256" not in code
+
+
+def test_the_local_backups_run_without_network_and_keep_no_plain_dump() -> None:
+    """E4c-1 (02 §13.1, point 4): the hourly copy as kbot_backup and the weekly global
+    objects as postgres, neither with any network (only the socket of PostgreSQL); the
+    installation stops on a private key or a plain dump left on the disk."""
+    backup = (DEPLOY / "systemd" / "kbot-backup.service").read_text(encoding="utf-8")
+    globals_unit = (DEPLOY / "systemd" / "kbot-backup-globals.service").read_text(encoding="utf-8")
+    assert "User=kbot_backup" in backup and "-m kbot.backup run" in backup
+    assert "User=postgres" in globals_unit and "-m kbot.backup globals" in globals_unit
+    for unit in (backup, globals_unit):
+        assert "IPAddressDeny=any" in unit and "RestrictAddressFamilies=AF_UNIX\n" in unit
+        assert "@resources" not in unit.split("[Service]")[1].replace("#", "")  # age is Go
+    assert "ReadWritePaths=/srv/kbot/backups\n" in backup
+    assert "ReadWritePaths=/srv/kbot/backups/globales\n" in globals_unit
+    timer = (DEPLOY / "systemd" / "kbot-backup.timer").read_text(encoding="utf-8")
+    assert "OnCalendar=*-*-* *:40:00" in timer  # far from the archive at 00:20 UTC
+    install = (DEPLOY / "install" / "05_copias.sh").read_text(encoding="utf-8")
+    assert "AGE-SECRET-KEY" in install and "volcado.dump" in install
+    assert "install -d -o postgres -g kbot_backup -m 2750" in install
 
 
 def test_backup_recipients_are_two_public_keys_and_no_secret() -> None:

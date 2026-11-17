@@ -1,0 +1,11 @@
+# kbot: the weekly copy of the global objects (stage E4c-1), on Sundays at 03:40 UTC.
+[Unit]
+Description=kbot: weekly copy of the global objects of PostgreSQL
+
+[Timer]
+OnCalendar=Sun *-*-* 03:40:00
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

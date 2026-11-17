@@ -89,6 +89,11 @@ def test_the_units_are_verified_only_when_everything_they_need_exists() -> None:
     assert not any("netfilter-persistent reload" in line for line in commands)
     assert 'iptables-restore <"$v4"' in system and "--noflush" not in "\n".join(commands)
     assert not any("iptables -S" in line and "| grep" in line for line in commands)
+    # And commands run as postgres need a current directory they can read (Alembic looks
+    # for pyproject.toml there): 03 and 04 run from the clone.
+    postgres = (DEPLOY / "install" / "03_postgresql.sh").read_text(encoding="utf-8")
+    assert postgres.index('cd "$repo"') < postgres.index('alembic" -c')
+    assert verify.index('cd "$repo"') < verify.index("kbot.ops.pgcheck")
     v4_uses = [line.strip() for line in commands if '"$v4"' in line]
     assert v4_uses and all("grep" in u or u == 'iptables-restore <"$v4"' for u in v4_uses)
     assert "owner_ip" not in system and "rules.v4.oracle" not in system

@@ -15,6 +15,8 @@ fi
 repo=/opt/kbot
 python="$repo/.venv/bin/python"
 failures=0
+# From the clone, which every user here can read, as in the CI and in 03_postgresql.sh.
+cd "$repo" || { echo "cannot enter $repo" >&2; exit 1; }
 
 check() { # description command...
   local name="$1"

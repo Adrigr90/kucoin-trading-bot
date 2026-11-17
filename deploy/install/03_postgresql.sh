@@ -33,6 +33,13 @@ if [[ ! -x "$repo/.venv/bin/alembic" ]]; then
   echo "$repo/.venv is missing: run 02_codigo.sh first" >&2
   exit 1
 fi
+# Every command runs from the clone, which every user here can read, as in the CI. The
+# administrator's home cannot be read by postgres, and Alembic looks for pyproject.toml in
+# the current directory (on the instance, 17 Nov 2026, it failed there with EACCES).
+if ! cd "$repo"; then
+  echo "cannot enter $repo" >&2
+  exit 1
+fi
 
 step "PostgreSQL $version from PGDG, without a default cluster"
 export DEBIAN_FRONTEND=noninteractive

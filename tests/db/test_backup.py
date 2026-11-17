@@ -107,7 +107,7 @@ def test_the_hot_copy_is_one_snapshot_and_only_its_encrypted_dump_stays(
             directory, recipients, now=NOW, dsn=dsn, before_dump=insert_after_the_snapshot
         )
         assert copy.path.name == "caliente-20261117T104000Z"
-        assert sorted(p.name for p in copy.path.iterdir()) == [local.DUMP, local.MANIFEST]
+        assert sorted(p.name for p in copy.path.iterdir()) == sorted([local.DUMP, local.MANIFEST])
         assert not list(directory.rglob("volcado.dump")), "a plain dump stayed on the disk"
         manifest = json.loads((copy.path / local.MANIFEST).read_text(encoding="utf-8"))
         assert manifest == copy.manifest

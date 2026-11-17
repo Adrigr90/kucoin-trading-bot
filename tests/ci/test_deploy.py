@@ -89,6 +89,8 @@ def test_the_units_are_verified_only_when_everything_they_need_exists() -> None:
     assert not any("netfilter-persistent reload" in line for line in commands)
     assert 'iptables-restore <"$v4"' in system and "--noflush" not in "\n".join(commands)
     assert not any("iptables -S" in line and "| grep" in line for line in commands)
+    # Only SSH listens: the image's rpcbind (port 111, for NFS) is stopped and masked.
+    assert "systemctl mask rpcbind.socket rpcbind.service" in system
     # And commands run as postgres need a current directory they can read (Alembic looks
     # for pyproject.toml there): 03 and 04 run from the clone.
     postgres = (DEPLOY / "install" / "03_postgresql.sh").read_text(encoding="utf-8")

@@ -89,6 +89,13 @@ install -o root -g root -m 0644 "$repo/deploy/etc/ssh/sshd_config.d/10-kbot.conf
 sshd -t
 systemctl reload ssh
 
+step "only SSH listens on the network: rpcbind (NFS, unused) stopped and masked"
+# The image ships nfs-common, which brings rpcbind, started by its socket on port 111 of
+# every address (on the instance, 17 Nov 2026). Nothing here uses NFS. The firewall and the
+# security list already block that port, but only SSH may listen (02 §9).
+systemctl disable --now rpcbind.socket rpcbind.service >/dev/null 2>&1 || true
+systemctl mask rpcbind.socket rpcbind.service >/dev/null
+
 step "retire the generic nftables.service before touching the firewall (E4a-01)"
 # Stopping it runs its ExecStop, `nft flush ruleset`, which would also wipe the rules of
 # the firewall if they were already loaded; so it goes first, and its failure is not fatal.

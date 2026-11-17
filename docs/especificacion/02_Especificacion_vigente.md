@@ -1433,7 +1433,7 @@ El diseño del despliegue, las copias y su restauración en la etapa E4 está en
 
 **Criterios de aptitud** (D16, pendientes): límite inferior del intervalo de confianza > 0, sensibilidad ±20 %, costes de estrés, concentración y periodos adversos. Para scalping y flujo de mercado, D28.
 
-### 12.1 Contrato de datos de la Fase 3 (F3-E1 y F3-E2) [propuesta del 17 nov 2026, revisada el mismo día: APROBABLE CON CORRECCIONES; CD-R01 a CD-R03 corregidos y pendientes de confirmación; F3-AL-01]
+### 12.1 Contrato de datos de la Fase 3 (F3-E1 y F3-E2) [propuesta del 17 nov 2026 y revisada dos veces: CD-R02 y CD-R03 resueltos; el residual de CD-R01, corregido y pendiente de confirmación; F3-AL-01]
 
 Fija qué datos ve un indicador y cuándo puede dar un valor. Vale para el histórico que se descarga en el PC (F3-E1) y, sin cambios, para los datos del grabador cuando los usen las estrategias (F4 en adelante). **Nada de F3-E1 ni de F3-E2 se programa antes de que el revisor lo apruebe** (`08` §3). Los puntos siguen los siete del contrato en `08` §3.
 
@@ -1464,9 +1464,10 @@ Son tres cosas distintas, y ninguna se deduce de otra:
 - **Informe de cobertura**, por instrumento y día:
   - los minutos de la ventana por presencia y por elegibilidad;
   - los tramos fallidos;
-  - la cobertura: los minutos `presente` entre todos los de la ventana que no son `no_elegible`.
+  - las **contradicciones**: minutos `no_elegible` con vela. Siguen siendo `presente`, porque la elegibilidad no cambia la presencia, pero se informan aparte y no cuentan en la cobertura;
+  - la **cobertura** (residual de CD-R01). Sea $E$ el conjunto de los minutos de la ventana cuya elegibilidad no es `no_elegible`, es decir, `elegible` o `desconocida`. La cobertura es $|\{m \in E : m \text{ presente}\}| \,/\, |E|$, siempre entre 0 y 1. Si $E$ está vacío, es «no aplicable», nunca 0 ni 100 %.
 
-  F3-A1 comprueba que coincide con los archivos. La elegibilidad no cambia la presencia: un minuto `no_elegible` con vela sigue siendo `presente`, y se informa aparte como contradicción con la evidencia.
+  F3-A1 comprueba que el informe coincide con los archivos, con el numerador, el denominador y las contradicciones por separado.
 
 **3. El tiempo no se comprime** (punto 2)
 - Toda serie se indexa por la apertura UTC de cada intervalo, $[apertura, apertura + Δ)$.
@@ -1532,7 +1533,7 @@ Son tres cosas distintas, y ninguna se deduce de otra:
 | CD-13 | Ventana `[12:00, 12:05)` de un instrumento cotizando; la respuesta trae solo 12:01, 12:02 y 12:03 (CD-R01) | 12:00 y 12:04 quedan `ausente` (elegibilidad `desconocida`, o `elegible` si hay evidencia); cobertura 3/5, nunca 3/3 |
 | CD-14 | Respuesta correcta y vacía para toda la ventana | Todos sus minutos `ausente`; cobertura 0 |
 | CD-15 | Fallan las peticiones de los dos extremos de la ventana | Esos minutos quedan `no_descargado` y la ventana no se recorta |
-| CD-16 | Contrato de Futures con `firstOpenDate` dentro de la ventana, o par con fecha de retirada en un anuncio | Solo los minutos fuera de esas fechas son `no_elegible`; una vela fuera de ellas se informa como contradicción |
+| CD-16 | Contrato de Futures con `firstOpenDate` dentro de la ventana, o par con fecha de retirada en un anuncio; además, una vela en un minuto `no_elegible` y una ventana entera `no_elegible` | Solo los minutos fuera de esas fechas son `no_elegible`. La vela en uno de ellos es una contradicción: se informa aparte y no entra ni en el numerador ni en el denominador; con cuatro minutos elegibles presentes y esa vela, la cobertura es 4/4, nunca 5/4. Una ventana entera `no_elegible` da cobertura «no aplicable» |
 | CD-17 | Agregado de 5 m `[10:00, 10:05)` con margen de 15 s y sin filas de `minute_status`; su último minuto se recibe y valida a las 10:05:16 (CD-R02) | A las 10:05:10 no está disponible; a las 10:05:16, sí. Una decisión posterior se ejecuta en la apertura del minuto de las 10:06, sin esperar al cierre del día |
 | CD-18 | Datos mixtos (minutos solo REST y contrastados), agregados de 5 m y una EMA cuya semilla solo REST ya salió de sus últimas $w$ velas (CD-R03) | El porcentaje cuenta minutos originales e incluye la semilla mientras la EMA no se reinicie; tras un reinicio por un hueco, la procedencia anterior deja de contar |
 
@@ -2012,3 +2013,5 @@ $$\Delta Cap=\underbrace{8}_{\text{distancia mark-stop de lo cerrado}}+\underbra
 | 17 nov 2026 | **E4a y E4b integradas en `main`** (pull request #6, `2e5889a`), por decisión del propietario («pasamos e4a y e4b a main»), sin esperar a E4c y E4d: el servidor ya funciona con ese código. Es una excepción a una pull request por etapa (P1). E4c, E4d y E5 siguen en ramas nuevas desde `main`, y la rama de la Fase 3 (`fase-3-e1`) ya contiene todo lo integrado | Propietario |
 | 17 nov 2026 | **Revisión del contrato de datos (commit `00f2394`): APROBABLE CON CORRECCIONES.** Coherentes la contigüidad, el UTC, la deduplicación, los conflictos, la incompletitud y las restricciones de volumen. **CD-R01** (MEDIO): la primera y la última vela no acreditan la elegibilidad. Una respuesta con huecos en los extremos convertía esos minutos en `no_elegible` y daba una cobertura de 3/3 en vez de 3/5 [H: KuCoin advierte de que sus velas pueden estar incompletas]. **CD-R02** (MEDIO): «minutos terminales» confundía la disponibilidad intradía con el cierre del día, y un agregado de 5 m habría esperado a medianoche. **CD-R03** (MEDIO): faltaba la unidad del porcentaje solo REST y qué entradas cuenta, también la procedencia que conserva un indicador recursivo y su reinicio | Revisor |
 | 17 nov 2026 | **Correcciones del contrato:** ventana solicitada, elegibilidad conocida y velas obtenidas separadas, con `no_elegible` solo con evidencia independiente (CD-R01). Disponibilidad intradía de cada minuto y del agregado, distinta del estado terminal del día (CD-R02). Porcentaje solo REST en minutos originales, con la procedencia completa de los indicadores recursivos desde su último reinicio (CD-R03). Seis casos nuevos, de CD-13 a CD-18. **Pendiente de confirmación** | Claude |
+| 18 nov 2026 | **Segunda revisión del contrato de datos (commit `76ac5ce`): APROBABLE CON CORRECCIONES.** CD-R02 y CD-R03 RESUELTOS: la disponibilidad intradía y su separación del cierre del día, y el porcentaje solo REST en minutos originales con la semilla recursiva y su reinicio. **CD-R01, residual MEDIO:** un minuto podía ser `presente` y `no_elegible` a la vez, pero solo se excluía del denominador. Con cuatro minutos elegibles presentes y una vela contradictoria, la lectura literal daba 5/4 = 125 %, y no se definía la cobertura de una ventana entera `no_elegible`. Sin más hallazgos | Revisor |
+| 18 nov 2026 | **Corrección del residual de CD-R01:** la cobertura es la de los minutos presentes dentro del conjunto $E$ de minutos no `no_elegible`, entre el tamaño de $E$. Las contradicciones se informan aparte, fuera del numerador y del denominador, y con $E$ vacío la cobertura es «no aplicable». CD-16 se amplía con los dos casos. **Pendiente de confirmación** | Claude |

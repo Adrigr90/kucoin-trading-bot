@@ -1433,7 +1433,7 @@ El diseño del despliegue, las copias y su restauración en la etapa E4 está en
 
 **Criterios de aptitud** (D16, pendientes): límite inferior del intervalo de confianza > 0, sensibilidad ±20 %, costes de estrés, concentración y periodos adversos. Para scalping y flujo de mercado, D28.
 
-### 12.1 Contrato de datos de la Fase 3 (F3-E1 y F3-E2) [propuesta del 17 nov 2026, pendiente de revisión; F3-AL-01]
+### 12.1 Contrato de datos de la Fase 3 (F3-E1 y F3-E2) [propuesta del 17 nov 2026, revisada el mismo día: APROBABLE CON CORRECCIONES; CD-R01 a CD-R03 corregidos y pendientes de confirmación; F3-AL-01]
 
 Fija qué datos ve un indicador y cuándo puede dar un valor. Vale para el histórico que se descarga en el PC (F3-E1) y, sin cambios, para los datos del grabador cuando los usen las estrategias (F4 en adelante). **Nada de F3-E1 ni de F3-E2 se programa antes de que el revisor lo apruebe** (`08` §3). Los puntos siguen los siete del contrato en `08` §3.
 
@@ -1443,17 +1443,30 @@ Fija qué datos ve un indicador y cuándo puede dar un valor. Vale para el hist�
 - **Universo:** los 20 + 20 instrumentos del último `universe_snapshots` del grabador en la fecha de la descarga, guardados como lista versionada en el repositorio con esa fecha, más los deslistados que KuCoin aún sirva [P: `docs/kucoin/historico.md`]. El sesgo de supervivencia que quede se declara en cada informe.
 - **Archivo:** Parquet (zstd) con las columnas y los tipos de `candles` de E3 (§3.8 y §3.9, punto 6: decimales en `decimal128(38, 18)`, horas en UTC con µs). Un archivo por mercado, símbolo y día UTC, escrito de forma atómica (temporal y renombrado), con su SHA-256 en un manifiesto. La descarga es **reanudable e idempotente**: repetirla no cambia ningún archivo cerrado.
 
-**2. Presencia de cada minuto** (punto 1)
+**2. Ventana, elegibilidad y presencia de cada minuto** (punto 1; CD-R01)
 
-Dentro de la vida observada de un instrumento (del primer al último minuto con vela que dio KuCoin), cada minuto tiene uno y solo uno de estos estados:
+Son tres cosas distintas, y ninguna se deduce de otra:
+- **Ventana solicitada:** los minutos que se piden a KuCoin para un instrumento. Es el denominador de la cobertura, y ni la primera ni la última vela obtenida la recortan.
+- **Elegibilidad conocida** (§3.5). Un minuto es `no_elegible` solo con **evidencia independiente de las velas**:
+  - la fecha de apertura del contrato que publica KuCoin en Futures (`firstOpenDate` [P: se confirma con la respuesta real en F3-E1]);
+  - la fecha de alta o de retirada de un anuncio oficial, guardada con su enlace en la lista versionada del universo;
+  - el estado de cotización que haya observado el grabador (`instruments`).
 
-| Estado | Cuándo | Para los indicadores |
+  Con esa evidencia, el minuto es `elegible`. Sin evidencia, la elegibilidad es `desconocida` y el minuto **cuenta en el denominador**: un minuto de un instrumento que quizá aún no cotizaba se informa como ausente de elegibilidad desconocida, y nunca se descarta.
+- **Velas obtenidas.** Cada minuto de la ventana tiene una y solo una presencia:
+
+| Presencia | Cuándo | Para los indicadores |
 |---|---|---|
 | `presente` | KuCoin devolvió su vela | Utilizable según su calidad (punto 5) |
-| `ausente` | KuCoin devolvió el tramo que lo contiene sin vela para él. Es `ausencia_no_verificable` (§3.4) | Ausencia: **nunca** «no hubo operaciones», nunca se rellena ni se copia el cierre anterior |
-| `no_descargado` | La petición del tramo falló o no se ha hecho. No es definitivo: la descarga lo reintenta | Igual que ausente |
+| `ausente` | La petición que lo cubre tuvo éxito y no trajo vela para él, también si la respuesta vino vacía o con huecos al principio o al final. Es `ausencia_no_verificable` (§3.4) | Ausencia: **nunca** «no hubo operaciones», nunca se rellena ni se copia el cierre anterior |
+| `no_descargado` | La petición que lo cubre falló o no se ha hecho. No es definitivo: la descarga lo reintenta | Igual que ausente |
 
-Fuera de la vida observada, el minuto es `no_elegible` (§3.5) y no cuenta. El **informe de cobertura** da, por instrumento y día, los minutos de cada estado y los tramos fallidos; F3-A1 comprueba que coincide con los archivos.
+- **Informe de cobertura**, por instrumento y día:
+  - los minutos de la ventana por presencia y por elegibilidad;
+  - los tramos fallidos;
+  - la cobertura: los minutos `presente` entre todos los de la ventana que no son `no_elegible`.
+
+  F3-A1 comprueba que coincide con los archivos. La elegibilidad no cambia la presencia: un minuto `no_elegible` con vela sigue siendo `presente`, y se informa aparte como contradicción con la evidencia.
 
 **3. El tiempo no se comprime** (punto 2)
 - Toda serie se indexa por la apertura UTC de cada intervalo, $[apertura, apertura + Δ)$.
@@ -1467,13 +1480,26 @@ Fuera de la vida observada, el minuto es `no_elegible` (§3.5) y no cuenta. El *
   - volumen y turnover sumados, en decimal exacto;
   - `minutos_presentes`, cuántos hay de los $N$ del intervalo ($N$ = 5, 15, 60, 240 o 1440).
 - **Completa** si `minutos_presentes` = $N$. **Incompleta** si $0 < n < N$: se guarda con su $n$ para los informes, pero **no alimenta indicadores ni señales**. Sin ningún minuto, no hay vela: es una ausencia.
-- **Solo existe cerrada:** no se forma la vela de un intervalo que no haya terminado dentro de lo descargado. Con datos en vivo, tampoco antes de que todos sus minutos sean terminales (§3.4).
+- **Solo existe cerrada, y tiene un instante de disponibilidad** (CD-R02). No se forma la vela de un intervalo que no haya terminado dentro de lo descargado. Además, hay que distinguir dos cosas:
+  - **Disponibilidad intradía de un minuto.** Una vela de 1 minuto está disponible cuando es **cerrada** según §3.4: intervalo terminado, reloj sincronizado, margen de estabilización cumplido, evidencia y campos validados.
+    - En vivo, ese instante es cuando se valida su última evidencia, y nunca antes del fin del minuto más el margen (hoy 15 s, provisional hasta D26).
+    - En el histórico, la regla declarada es el fin del minuto más el mismo margen.
+  - **Estado terminal diario** (`minute_status`, §3.5). Se asigna al cerrar el día y sirve para la completitud. **No es condición para usar una vela**: un agregado nunca espera al cierre del día.
+
+  Una vela superior completa está **disponible en el instante en que lo está el último de sus $N$ minutos**, el máximo de los de sus componentes. Antes no existe para nadie. Si le falta un minuto, no alimenta indicadores nunca: es incompleta, y se sabe en cuanto ese minuto queda cerrado como ausencia. Este instante es la disponibilidad de la regla causal de F3-E4 (`ejecución ≥ decisión ≥ disponibilidad`). Lo que llegue después (evidencia tardía, §3.5) no cambia retroactivamente un valor ya usado para decidir.
 - **Determinista e independiente del orden:** el resultado depende solo del conjunto de minutos por su clave (mercado, símbolo, apertura). Cargarlos en otro orden o repetir una vela idéntica no cambia nada. Dos velas distintas con la misma clave son un error que detiene el proceso: nunca se elige una.
 
 **5. Calidad** (punto 4)
 - Cada vela de 1 minuto lleva sus dimensiones P, V y T (§3.4) y su evidencia. En el histórico: P y T válidas sin contraste, V sujeta al punto 7 y evidencia `vela_rest_suficiente` en todas.
 - La vela superior hereda, en cada dimensión, **la peor de sus minutos**: de mejor a peor, contrastada y consistente, solo REST, discrepante. Una discrepancia invalida la dimensión en la que discrepa. Su evidencia es `vela_rest_suficiente` si alguno de sus minutos lo es.
-- Cada resultado lleva el **porcentaje de velas solo REST** que lo forman (100 % en el histórico; §12). Si se excluyen de la serie consistente lo decide D29.
+- **Porcentaje solo REST de cada resultado** (§12; CD-R03). Si esos resultados se excluyen de la serie consistente lo decide D29; esta regla solo fija cómo se cuenta:
+  - **Unidad:** el minuto original, es decir, la vela de 1 minuto, nunca la vela agregada. Una vela de 1 h cuenta como sus 60 minutos.
+  - **Procedencia** (las entradas consideradas): todos los minutos que influyen en el valor.
+    - En un indicador de ventana (SMA, Bollinger, volumen relativo, soportes y resistencias), los de las $w$ velas de su ventana.
+    - En uno recursivo (EMA, MACD, RSI y ATR de Wilder, ADX), **todos desde su último inicio o reinicio, la semilla incluida**: aunque ya no estén entre las últimas $w$ velas, siguen influyendo en su estado.
+    - Un reinicio (punto 6) borra la procedencia anterior.
+  - Como un indicador solo da valor sin huecos, su procedencia es siempre un tramo continuo de minutos presentes. La de un resultado que combina varios indicadores del mismo instrumento es la unión de sus tramos, y cada minuto cuenta una sola vez.
+  - **Porcentaje:** minutos `vela_rest_suficiente` de la procedencia entre todos los minutos de la procedencia. En el histórico, el 100 %.
 
 **6. Ventanas de los indicadores** (punto 5)
 - Un indicador con ventana de $w$ velas da valor en la vela $t$ solo si las $w$ velas de $t - (w-1)Δ$ a $t$ están **presentes, completas y con las dimensiones que el indicador necesita** (tabla de §3.4). Si no, no hay valor: nunca se interpola, nunca se repite el último y nunca se salta el hueco.
@@ -1503,8 +1529,14 @@ Fuera de la vida observada, el minuto es `no_elegible` (§3.5) y no cuenta. El *
 | CD-10 | Intervalo sin terminar al final de lo descargado | No hay vela |
 | CD-11 | Tramo cuya descarga falló | Sus minutos quedan `no_descargado` en el informe y cuentan como ausentes |
 | CD-12 | Cambio del `multiplier` dentro de una ventana de volumen | La ventana se rompe para los usos de volumen |
+| CD-13 | Ventana `[12:00, 12:05)` de un instrumento cotizando; la respuesta trae solo 12:01, 12:02 y 12:03 (CD-R01) | 12:00 y 12:04 quedan `ausente` (elegibilidad `desconocida`, o `elegible` si hay evidencia); cobertura 3/5, nunca 3/3 |
+| CD-14 | Respuesta correcta y vacía para toda la ventana | Todos sus minutos `ausente`; cobertura 0 |
+| CD-15 | Fallan las peticiones de los dos extremos de la ventana | Esos minutos quedan `no_descargado` y la ventana no se recorta |
+| CD-16 | Contrato de Futures con `firstOpenDate` dentro de la ventana, o par con fecha de retirada en un anuncio | Solo los minutos fuera de esas fechas son `no_elegible`; una vela fuera de ellas se informa como contradicción |
+| CD-17 | Agregado de 5 m `[10:00, 10:05)` con margen de 15 s y sin filas de `minute_status`; su último minuto se recibe y valida a las 10:05:16 (CD-R02) | A las 10:05:10 no está disponible; a las 10:05:16, sí. Una decisión posterior se ejecuta en la apertura del minuto de las 10:06, sin esperar al cierre del día |
+| CD-18 | Datos mixtos (minutos solo REST y contrastados), agregados de 5 m y una EMA cuya semilla solo REST ya salió de sus últimas $w$ velas (CD-R03) | El porcentaje cuenta minutos originales e incluye la semilla mientras la EMA no se reinicie; tras un reinicio por un hueco, la procedencia anterior deja de contar |
 
-Estas pruebas responden de F3-A1 (descarga y cobertura), F3-A2 (temporalidades), F3-A4 (anticipación) y F3-A5 (calidad, huecos, recalentamiento y volumen).
+Estas pruebas responden de F3-A1 (descarga, elegibilidad y cobertura), F3-A2 (temporalidades y disponibilidad), F3-A4 (anticipación) y F3-A5 (calidad, porcentaje solo REST, huecos, recalentamiento y volumen). El calentamiento concreto de cada indicador se fija en F3-E2, con su tabla.
 
 ## 13. Infraestructura, monitorización y alertas
 
@@ -1976,5 +2008,7 @@ $$\Delta Cap=\underbrace{8}_{\text{distancia mark-stop de lo cerrado}}+\underbra
 | 17 nov 2026 | **Instalación en la instancia terminada: todo en verde** (etiqueta `v0.2.3-e4b`, `132b91b`; informe en `docs/operacion/instalacion_2026-11-17.md`). Con el arreglo anterior (`v0.2.1-e4b`), `01` y `02` fueron correctos. `03` instaló PostgreSQL 18.7 con el clúster en `/srv/kbot/postgresql/18/main`, la configuración, los roles y la base, pero se detuvo en las migraciones: Alembic 1.20 busca `pyproject.toml` en el directorio actual, el del administrador, que `postgres` no puede leer. `03` y `04` entran ahora en `/opt/kbot`, como en la CI (`6532ff7`, `v0.2.2-e4b`), y `03` se reanudó hasta `0003 (head)`. El primer `04` dio todo en verde salvo los puertos a la escucha: `rpcbind`, que la imagen trae con `nfs-common`, escuchaba en el 111. `01` lo para y lo enmascara (`132b91b`, `v0.2.3-e4b`). **Resultado final de `04_verificar.sh`: «All checks passed.»** Unidades, F2-A10 con diez de diez (`docs/operacion/comprobacion_2026-11-17.md`), PostgreSQL contra §9 y F1-A6 con los usuarios reales. Desde el contexto real de cada usuario: la guarda rechaza a los cinco `kbot_*` y deja pasar a `snap_daemon` y `root`; B19 correcto para los cinco; el bloqueo REST entre `kbot_ingest` y `kbot_archive` se comporta como dice E4-D06; y el agente de Oracle sigue conectado a los metadatos y sin errores con la guarda activa. Ningún servicio del bot arrancado todavía. **Aprobado** más abajo (revisión de `7409ca6`) | Claude |
 | 17 nov 2026 | **Decisión del propietario: el grabador arranca ya** («Sí, ahora»), sin esperar a la revisión de la instalación y sabiendo que las copias llegan en E4c. `systemctl enable --now kbot-archive-daily.timer svc-ingest` a las 10:56 UTC: `kbot-archive-prepare` creó 540 particiones diarias y terminó; `svc-ingest` arrancó con 40 instrumentos (20 + 20; 10 + 10 con profundidad de nivel 50, como en P3); el primer archivo diario corre el 18 nov a las 00:20 UTC. A los dos minutos ya había velas REST y del WebSocket de los 40, calidad por minuto, instantáneas y métricas de profundidad, sin reinicios ni errores en su registro | Propietario y Claude |
 | 17 nov 2026 | **Revisión de la instalación (commit `7409ca6`): APROBADO.** Las cuatro correcciones son conformes: la carga directa del cortafuegos reemplaza las tablas y elimina la duplicación de `--noflush` [H: [manual de Ubuntu](https://manpages.ubuntu.com/manpages/noble/man8/iptables-restore.8.html)], la lectura completa de las reglas antes de `grep` evita la tubería rota, `03` y `04` entran en el repositorio antes de Alembic y de las comprobaciones, y se detienen y enmascaran `rpcbind.socket` y `rpcbind.service`. El informe y la comprobación aportan evidencia coherente de la aceptación en el servidor: **F2-A10 conforme**, con PostgreSQL contra §9, F1-A6, la guarda por usuario, B19 y el bloqueo REST entre usuarios. El código coincide con la etiqueta instalada `v0.2.3-e4b`; los commits posteriores solo añaden documentación. Sin hallazgos nuevos. Quedan la confirmación de las métricas en la consola de Oracle, E4c, E4d y las mediciones de E5. El arranque del grabador queda registrado como decisión expresa del propietario | Revisor |
-| 17 nov 2026 | **Contrato de datos de la Fase 3** (§12.1; F3-AL-01), en la rama `fase-3-e1`: presencia de cada minuto (`presente`, `ausente` o `no_descargado`, nunca «sin operaciones»), tiempo sin comprimir, temporalidades con velas completas o incompletas, calidad heredada por la peor, ventanas con recalentamiento, volumen limitado mientras B8 siga abierta y doce casos obligatorios (CD-01 a CD-12). **Pendiente de revisión**; nada de F3-E1 ni de F3-E2 se programa antes | Claude |
+| 17 nov 2026 | **Contrato de datos de la Fase 3** (§12.1; F3-AL-01), en la rama `fase-3-e1`: presencia de cada minuto (`presente`, `ausente` o `no_descargado`, nunca «sin operaciones»), tiempo sin comprimir, temporalidades con velas completas o incompletas, calidad heredada por la peor, ventanas con recalentamiento, volumen limitado mientras B8 siga abierta y doce casos obligatorios (CD-01 a CD-12). **Revisado más abajo** | Claude |
 | 17 nov 2026 | **E4a y E4b integradas en `main`** (pull request #6, `2e5889a`), por decisión del propietario («pasamos e4a y e4b a main»), sin esperar a E4c y E4d: el servidor ya funciona con ese código. Es una excepción a una pull request por etapa (P1). E4c, E4d y E5 siguen en ramas nuevas desde `main`, y la rama de la Fase 3 (`fase-3-e1`) ya contiene todo lo integrado | Propietario |
+| 17 nov 2026 | **Revisión del contrato de datos (commit `00f2394`): APROBABLE CON CORRECCIONES.** Coherentes la contigüidad, el UTC, la deduplicación, los conflictos, la incompletitud y las restricciones de volumen. **CD-R01** (MEDIO): la primera y la última vela no acreditan la elegibilidad. Una respuesta con huecos en los extremos convertía esos minutos en `no_elegible` y daba una cobertura de 3/3 en vez de 3/5 [H: KuCoin advierte de que sus velas pueden estar incompletas]. **CD-R02** (MEDIO): «minutos terminales» confundía la disponibilidad intradía con el cierre del día, y un agregado de 5 m habría esperado a medianoche. **CD-R03** (MEDIO): faltaba la unidad del porcentaje solo REST y qué entradas cuenta, también la procedencia que conserva un indicador recursivo y su reinicio | Revisor |
+| 17 nov 2026 | **Correcciones del contrato:** ventana solicitada, elegibilidad conocida y velas obtenidas separadas, con `no_elegible` solo con evidencia independiente (CD-R01). Disponibilidad intradía de cada minuto y del agregado, distinta del estado terminal del día (CD-R02). Porcentaje solo REST en minutos originales, con la procedencia completa de los indicadores recursivos desde su último reinicio (CD-R03). Seis casos nuevos, de CD-13 a CD-18. **Pendiente de confirmación** | Claude |

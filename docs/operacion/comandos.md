@@ -43,6 +43,18 @@ Cada comando que Claude ejecuta en el servidor por SSH (respuesta P-E4-1) aparec
 | `sudo -u postgres psql -d kbot -c '\dt market.*'` | Mira las tablas del esquema de mercado |
 | `sudo pg_lsclusters` | Estado del clúster |
 
+## E4c. Copias
+
+| Comando (en el servidor) | Qué hace |
+|---|---|
+| `sudo bash /opt/kbot/deploy/install/05_copias.sh` | Instala las claves públicas de las copias (nunca una privada), los directorios y las unidades; hace una primera copia de cada clase como comprobación y activa los temporizadores (cada hora en el minuto 40 y los domingos a las 03:40 UTC). Se puede repetir |
+| `sudo systemctl start kbot-backup.service` | Hace ahora una copia (la de los días sellados que falten y la caliente) y aplica la retención |
+| `sudo systemctl list-timers 'kbot-backup*'` | Cuándo tocan las próximas copias |
+| `sudo journalctl -u kbot-backup -n 20` | Registro de las últimas copias |
+| `sudo ls -l /srv/kbot/backups` | Las copias que hay en el servidor; cada una es un directorio con `volcado.age` (cifrado) y `manifiesto.json` |
+
+Las copias solo se descifran con las claves privadas del propietario, que nunca están en el servidor.
+
 ## Lo que nunca se ejecuta
 
 - Nada que cree claves de API de Oracle, de KuCoin o de otro servicio.

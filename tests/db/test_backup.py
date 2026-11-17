@@ -112,7 +112,14 @@ def test_the_hot_copy_is_one_snapshot_and_only_its_encrypted_dump_stays(
         manifest = json.loads((copy.path / local.MANIFEST).read_text(encoding="utf-8"))
         assert manifest == copy.manifest
         assert manifest["clase"] == "caliente" and manifest["dias_excluidos"] == []
-        assert manifest["recuentos"]["market.data_gaps"] == before  # not the late row
+        gaps = manifest["tablas"]["market.data_gaps"]
+        assert gaps["filas"] == before  # not the late row (E4c1-02: rows and fingerprint)
+        assert gaps["modo"] == "incluido" and len(gaps["huella"]) == 64
+        assert gaps["origen"] == "instantanea"
+        fixed = manifest["versiones"]  # 02 §10.1
+        assert str(fixed["postgresql"]).startswith("18") and "pg_dump" in fixed["pg_dump"]
+        assert fixed["alembic"] == ["0003"] and fixed["arquitectura"] and fixed["sistema"]
+        assert isinstance(fixed["extensiones"], dict)
         dump = manifest["volcado"]
         assert local.sha256_file(copy.path / local.DUMP) == dump["sha256_cifrado"]
         for n, identity in enumerate(keys):  # the principal key and the recovery key
@@ -220,6 +227,69 @@ def test_a_sealed_day_copy_holds_its_partitions_with_the_fingerprints_of_its_arc
         x for x in listing.splitlines() if " TABLE market " in x and "TABLE DATA" not in x
     ]
     assert definitions == [], "a copy of a sealed day carries data only"
+    # The hot copy reuses the fingerprints of the sealed day, after counting it again in
+    # its own snapshot (E4c1-02).
+    hot = local.hot_copy(directory, recipients, now=NOW, dsn=dsn)
+    for partition in manifest["particiones"]:
+        assert hot.manifest["tablas"][partition["particion"]] == {
+            "modo": "incluido",
+            "filas": partition["filas"],
+            "huella": partition["huella"],
+            "origen": copy.path.name,
+        }
+    # A count that no longer matches the copy stops the hot copy, and nothing is published.
+    changed = json.loads((copy.path / local.MANIFEST).read_text(encoding="utf-8"))
+    changed["particiones"][[p["tabla"] for p in changed["particiones"]].index("candles")][
+        "filas"
+    ] = 1
+    (copy.path / local.MANIFEST).write_text(json.dumps(changed), encoding="utf-8")
+    later = NOW.replace(hour=11)
+    with pytest.raises(local.BackupError, match="is sealed but has 0 rows, its copy 1"):
+        local.hot_copy(directory, recipients, now=later, dsn=dsn)
+    assert not (directory / f"caliente-{later:%Y%m%dT%H%M%SZ}").exists()
+
+
+def test_fingerprints_see_a_changed_value_and_a_moved_partition_bound(
+    connect: Connect,
+) -> None:
+    """E4c1-02: a value changed with the same count changes the fingerprint of its table.
+    E4c1-03: the bounds of a partition are in the fingerprint of the catalog, and putting
+    them back gives the same fingerprint again."""
+    schema = "kbot_backup_prueba"
+
+    def fingerprints() -> tuple[str, tuple[int, str]]:
+        with connect("kbot_backup", autocommit=False) as backup, backup.transaction():
+            table = local._relation_fingerprint(backup, schema, "t")
+            return local.catalog_fingerprint(backup), (table.rows, table.hexdigest())
+
+    def bound(upper: str) -> None:
+        admin.execute(f"ALTER TABLE {schema}.p DETACH PARTITION {schema}.p_1")
+        admin.execute(
+            f"ALTER TABLE {schema}.p ATTACH PARTITION {schema}.p_1"
+            f" FOR VALUES FROM ('2020-01-01') TO ('{upper}')"
+        )
+
+    with connect("postgres") as admin:
+        admin.execute(f"CREATE SCHEMA {schema}")
+        try:
+            admin.execute(f"CREATE TABLE {schema}.t (id int PRIMARY KEY, v text)")
+            admin.execute(f"INSERT INTO {schema}.t VALUES (1, 'a'), (2, 'b')")
+            admin.execute(f"CREATE TABLE {schema}.p (d date NOT NULL) PARTITION BY RANGE (d)")
+            admin.execute(
+                f"CREATE TABLE {schema}.p_1 PARTITION OF {schema}.p"
+                " FOR VALUES FROM ('2020-01-01') TO ('2020-01-02')"
+            )
+            catalog, table = fingerprints()
+            admin.execute(f"UPDATE {schema}.t SET v = 'c' WHERE id = 2")
+            catalog_after, table_after = fingerprints()
+            assert table_after[0] == table[0] and table_after[1] != table[1]
+            assert catalog_after == catalog  # a value is not the catalog
+            bound("2020-01-03")
+            assert fingerprints()[0] != catalog
+            bound("2020-01-02")
+            assert fingerprints()[0] == catalog
+        finally:
+            admin.execute(f"DROP SCHEMA {schema} CASCADE")
 
 
 def test_a_copy_that_fails_leaves_nothing_on_the_disk(dsn: str, tmp_path: Path) -> None:

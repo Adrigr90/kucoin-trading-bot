@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import errno
+import json
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -79,3 +82,84 @@ def test_the_recipients_are_the_two_public_keys_and_never_a_private_one(tmp_path
     # The file of the repository is the one the server installs.
     repository = Path(__file__).resolve().parents[3] / "deploy" / "etc" / "kbot"
     assert local.recipients(repository / "age-recipients.txt") == [PRINCIPAL, RECOVERY]
+
+
+def finished(directory: Path, name: str, content: bytes = b"cipher") -> local.Copy:
+    """A copy taken through the real protocol of the module: attempt, then finish."""
+    with local._attempt(directory, name) as (temporary, final):
+        (temporary / local.DUMP).write_bytes(content)
+        manifest: dict[str, Any] = {
+            "nombre": name,
+            "clase": "caliente",
+            "creada": "2026-11-18T10:40:00+00:00",
+            "volcado": {
+                "sha256_claro": "a" * 64,
+                "sha256_cifrado": local.sha256_file(temporary / local.DUMP),
+            },
+        }
+        return local._finish(directory, temporary, final, manifest)
+
+
+def test_a_copy_is_registered_before_it_is_published(tmp_path: Path) -> None:
+    """Review of E4c-1, E4c1-04: a published copy always has its register entry."""
+    copy = finished(tmp_path, "caliente-20261118T104000Z")
+    entries = local.register_entries(tmp_path)
+    assert [e["copia"] for e in entries] == [copy.path.name]
+    assert [c.path for c in local.published(tmp_path, local.HOT_PREFIX)] == [copy.path]
+    assert local.reconcile(tmp_path) == []
+
+
+def test_a_register_that_fails_publishes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def full_disk(directory: Path, manifest: dict[str, Any]) -> None:
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(local, "_register", full_disk)
+    with pytest.raises(OSError, match="No space"):
+        finished(tmp_path, "dia-2026-11-20")
+    assert list(tmp_path.iterdir()) == []  # neither the copy nor its attempt
+
+
+def test_a_rename_that_fails_leaves_only_an_entry_that_authenticates_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def refused(self: Path, target: Path) -> Path:
+        raise OSError(errno.EIO, "rename failed")
+
+    monkeypatch.setattr(Path, "rename", refused)
+    with pytest.raises(OSError, match="rename failed"):
+        finished(tmp_path, "dia-2026-11-20")
+    monkeypatch.undo()
+    assert sorted(p.name for p in tmp_path.iterdir()) == [local.REGISTER]
+    assert local.published(tmp_path, local.DAY_PREFIX) == []
+    # The day is still pending, and the next copy of it is published normally.
+    copy = finished(tmp_path, "dia-2026-11-20")
+    assert [c.path for c in local.published(tmp_path, local.DAY_PREFIX)] == [copy.path]
+
+
+def test_a_published_copy_without_its_entry_is_removed_and_goes_back_to_pending(
+    tmp_path: Path,
+) -> None:
+    kept = finished(tmp_path, "dia-2026-11-20")
+    lost = finished(tmp_path, "dia-2026-11-21", content=b"other")
+    register = tmp_path / local.REGISTER
+    lines = register.read_text(encoding="utf-8").splitlines()
+    register.write_text(lines[0] + "\n", encoding="utf-8")  # the entry of 21 Nov is lost
+    assert local.reconcile(tmp_path) == [lost.path]
+    assert [c.path for c in local.published(tmp_path, local.DAY_PREFIX)] == [kept.path]
+    # A manifest that no longer matches its entry is not vouched for either.
+    manifest = json.loads((kept.path / local.MANIFEST).read_text(encoding="utf-8"))
+    manifest["volcado"]["sha256_claro"] = "b" * 64
+    (kept.path / local.MANIFEST).write_text(json.dumps(manifest), encoding="utf-8")
+    assert local.reconcile(tmp_path) == [kept.path]
+
+
+def test_a_line_cut_by_a_full_disk_never_breaks_the_register(tmp_path: Path) -> None:
+    first = finished(tmp_path, "caliente-20261118T104000Z")
+    with (tmp_path / local.REGISTER).open("a", encoding="utf-8") as handle:
+        handle.write('{"copia": "caliente-2026')  # what a full disk can leave
+    second = finished(tmp_path, "caliente-20261118T114000Z")
+    names = [e["copia"] for e in local.register_entries(tmp_path)]
+    assert names == [first.path.name, second.path.name]
+    assert local.reconcile(tmp_path) == []

@@ -13,6 +13,9 @@ Wants=postgresql.service
 Type=oneshot
 User=postgres
 Group=postgres
+# To reach its directory it must search /srv/kbot/backups (kbot_backup, 0750); this grants
+# only that, in this unit: writing stays with kbot_backup (review of E4c-1, E4c1-01).
+SupplementaryGroups=kbot_backup
 WorkingDirectory=/opt/kbot
 Environment=PYTHONUNBUFFERED=1
 ExecStart=/opt/kbot/.venv/bin/python -m kbot.backup globals

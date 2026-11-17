@@ -1,8 +1,9 @@
-"""Local backups of the production database (02 §13.1, point 4; stage E4c-1).
+"""Local backups of the production database (02 §10.1 and §13.1, point 4; stage E4c-1).
 
 ``python -m kbot.backup run`` runs every hour, as kbot_backup:
 
-1. it removes the attempts that a stopped run left (temporary directories);
+1. it removes the attempts that a stopped run left (temporary directories) and every
+   published copy that the register does not vouch for (``reconcile``);
 2. it copies each sealed day that has no copy yet, once (``dia-YYYY-MM-DD``);
 3. it makes the hot copy (``caliente-YYYYMMDDTHHMMSSZ``);
 4. it applies the local retention.
@@ -14,11 +15,22 @@ Every copy is a directory with the encrypted dump (``volcado.age``) and its mani
 (``manifiesto.json``). The dump comes from one exported snapshot, which stays open until
 the counts, the fingerprints and the dump are done. It is encrypted with age for the
 recipients of /etc/kbot/age-recipients.txt (the principal key and the recovery key), and
-the plain dump is deleted before the copy is published. A copy is published by renaming
-its directory to the final name, so until then it is an attempt that the next run
-removes. The SHA-256 of the plain dump goes into the manifest and into the register,
-which only kbot_backup writes; a restore authenticates the dump with it before it runs
-anything (R-E4-04).
+the plain dump is deleted before the copy is published. The copy is then registered (the
+SHA-256 of its plain and encrypted dumps go to ``registro.jsonl``, which only its writer
+can touch) and only after that published, by renaming its directory to the final name.
+So a published copy always has its register entry, which a restore needs to authenticate
+the dump before it runs anything (R-E4-04; review of E4c-1, E4c1-04). If a step fails, the
+attempt goes at once with whatever it held; only a crash can leave one, and the next run
+removes it, with any published copy that the register does not vouch for.
+
+The manifest follows 02 §10.1: every table and every partition with its mode (in E4c-1
+always ``incluido``), rows and canonical fingerprint (E4c1-02); the fingerprint of the
+catalog, partitioning included (E4c1-03); and the versions of PostgreSQL, pg_dump, the
+extensions, Alembic, the system and the architecture. A sealed partition cannot change
+(``CHECK (false) NOT VALID``, and the daily check of E3 compares it with its archive), so
+its fingerprint is the one its sealed-day copy took once; the hot copy counts it again in
+its own snapshot and stops if the counts differ. Every other fingerprint is taken in the
+snapshot of the dump.
 
 In E4c-1 nothing leaves the server. No sealed day has a verified external alternative
 (R-E4-01), so the hot copy carries every day, and no copy of a sealed day is deleted
@@ -29,6 +41,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import platform
 import shutil
 import subprocess
 from collections.abc import Callable, Iterator, Sequence
@@ -41,7 +55,9 @@ from typing import Any
 import psycopg
 from psycopg import sql
 
+import kbot
 from kbot.archive import archiver, parquet
+from kbot.archive.canonical import Fingerprint, json_text
 from kbot.db.roles import DATABASE, SOCKET_DIR
 
 DSN = f"host={SOCKET_DIR} dbname={DATABASE} user=kbot_backup"
@@ -55,18 +71,15 @@ FORMAT = "kbot-copia-1"
 HOT_PREFIX = "caliente-"
 DAY_PREFIX = "dia-"
 GLOBALS_PREFIX = "globales-"
+COPY_PREFIXES = (HOT_PREFIX, DAY_PREFIX, GLOBALS_PREFIX)
 HOT_KEEP = 3  # the last three hourly copies, plus the last daily one (02 §13.1, point 4)
 GLOBALS_KEEP = 2
+BATCH = 20_000
 # The schemas the copies describe: every schema of the database except the system ones.
 _USER_SCHEMAS = sql.SQL(
     "n.nspname NOT IN ('pg_catalog', 'information_schema')"
     " AND n.nspname NOT LIKE 'pg\\_toast%' AND n.nspname NOT LIKE 'pg\\_temp%'"
 )
-
-
-def _over_user_schemas(query: str) -> sql.Composed:
-    """A catalog query whose ``{schemas}`` is the filter of the kbot schemas."""
-    return sql.SQL(query).format(schemas=_USER_SCHEMAS)  # type: ignore[arg-type]
 
 
 class BackupError(Exception):
@@ -103,10 +116,11 @@ def _tool(name: str) -> str:
     return path
 
 
-def _run(command: Sequence[str]) -> None:
+def _run(command: Sequence[str]) -> str:
     done = subprocess.run(list(command), capture_output=True, text=True, check=False)  # noqa: S603
     if done.returncode != 0:
         raise BackupError(f"{Path(command[0]).name} failed: {done.stderr.strip()}")
+    return done.stdout.strip()
 
 
 def encrypt(plain: Path, out: Path, recipients_file: Path) -> None:
@@ -130,64 +144,210 @@ def _one(conn: psycopg.Connection, query: str) -> Any:
     return row[0]
 
 
+def _over_user_schemas(query: str) -> sql.Composed:
+    """A catalog query whose ``{schemas}`` is the filter of the kbot schemas."""
+    return sql.SQL(query).format(schemas=_USER_SCHEMAS)  # type: ignore[arg-type]
+
+
+_CATALOG_QUERIES = (
+    "SELECT n.nspname, c.relname, c.relkind::text, c.relispartition"
+    " FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace"
+    " WHERE {schemas} AND c.relkind IN ('r', 'p', 'v', 'm', 'S')"
+    " ORDER BY 1, 2",
+    "SELECT n.nspname, c.relname, a.attname, pg_catalog.format_type(a.atttypid, a.atttypmod),"
+    " a.attnotnull, pg_catalog.pg_get_expr(d.adbin, d.adrelid)"
+    " FROM pg_catalog.pg_attribute a"
+    " JOIN pg_catalog.pg_class c ON c.oid = a.attrelid"
+    " JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace"
+    " LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum"
+    " WHERE {schemas} AND c.relkind IN ('r', 'p') AND a.attnum > 0"
+    " AND NOT a.attisdropped ORDER BY 1, 2, a.attnum",
+    "SELECT n.nspname, c.relname, k.conname, pg_catalog.pg_get_constraintdef(k.oid),"
+    " k.convalidated"
+    " FROM pg_catalog.pg_constraint k"
+    " JOIN pg_catalog.pg_class c ON c.oid = k.conrelid"
+    " JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace"
+    " WHERE {schemas} ORDER BY 1, 2, 3",
+    "SELECT n.nspname, c.relname, pg_catalog.pg_get_indexdef(c.oid)"
+    " FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace"
+    " WHERE {schemas} AND c.relkind IN ('i', 'I') ORDER BY 1, 2",
+    "SELECT n.nspname, p.proname, pg_catalog.pg_get_function_identity_arguments(p.oid),"
+    " pg_catalog.pg_get_functiondef(p.oid)"
+    " FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace"
+    " WHERE {schemas} AND p.prokind IN ('f', 'p') ORDER BY 1, 2, 3",
+    # The partitioning (E4c1-03): the key of each partitioned table, and the parent and
+    # the bounds of each partition, by name.
+    "SELECT n.nspname, c.relname, pg_catalog.pg_get_partkeydef(c.oid)"
+    " FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace"
+    " WHERE {schemas} AND c.relkind = 'p' ORDER BY 1, 2",
+    "SELECT n.nspname, c.relname, pn.nspname, p.relname,"
+    " pg_catalog.pg_get_expr(c.relpartbound, c.oid)"
+    " FROM pg_catalog.pg_inherits i"
+    " JOIN pg_catalog.pg_class c ON c.oid = i.inhrelid"
+    " JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace"
+    " JOIN pg_catalog.pg_class p ON p.oid = i.inhparent"
+    " JOIN pg_catalog.pg_namespace pn ON pn.oid = p.relnamespace"
+    " WHERE {schemas} ORDER BY 1, 2",
+)
+
+
 def catalog_fingerprint(conn: psycopg.Connection) -> str:
     """SHA-256 of the catalog of the database by name, never by object id: relations,
     columns, constraints (with whether they are validated, because the seals are
-    ``CHECK (false) NOT VALID``), indexes and functions. A restore compares it once every
-    row is loaded (02 §13.1, point 4, step 4)."""
-    queries = (
-        "SELECT n.nspname, c.relname, c.relkind::text, c.relispartition"
-        " FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace"
-        " WHERE {schemas} AND c.relkind IN ('r', 'p', 'v', 'm', 'S')"
-        " ORDER BY 1, 2",
-        "SELECT n.nspname, c.relname, a.attname, pg_catalog.format_type(a.atttypid, a.atttypmod),"
-        " a.attnotnull, pg_catalog.pg_get_expr(d.adbin, d.adrelid)"
-        " FROM pg_catalog.pg_attribute a"
-        " JOIN pg_catalog.pg_class c ON c.oid = a.attrelid"
-        " JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace"
-        " LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum"
-        " WHERE {schemas} AND c.relkind IN ('r', 'p') AND a.attnum > 0"
-        " AND NOT a.attisdropped ORDER BY 1, 2, a.attnum",
-        "SELECT n.nspname, c.relname, k.conname, pg_catalog.pg_get_constraintdef(k.oid),"
-        " k.convalidated"
-        " FROM pg_catalog.pg_constraint k"
-        " JOIN pg_catalog.pg_class c ON c.oid = k.conrelid"
-        " JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace"
-        " WHERE {schemas} ORDER BY 1, 2, 3",
-        "SELECT n.nspname, c.relname, pg_catalog.pg_get_indexdef(c.oid)"
-        " FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace"
-        " WHERE {schemas} AND c.relkind IN ('i', 'I') ORDER BY 1, 2",
-        "SELECT n.nspname, p.proname, pg_catalog.pg_get_function_identity_arguments(p.oid),"
-        " pg_catalog.pg_get_functiondef(p.oid)"
-        " FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace"
-        " WHERE {schemas} AND p.prokind IN ('f', 'p') ORDER BY 1, 2, 3",
-    )
+    ``CHECK (false) NOT VALID``), indexes, functions and the partitioning. A restore
+    compares it once every row is loaded (02 §13.1, point 4, step 4)."""
     digest = hashlib.sha256()
-    for query in queries:
+    for query in _CATALOG_QUERIES:
         for row in conn.execute(_over_user_schemas(query)).fetchall():
             digest.update(json.dumps(list(row), default=str).encode("utf-8") + b"\n")
         digest.update(b"--\n")
     return digest.hexdigest()
 
 
-def table_counts(conn: psycopg.Connection) -> dict[str, int]:
-    """The rows of every table of the database (a partitioned table counts its partitions)."""
-    tables = conn.execute(
+def versions(conn: psycopg.Connection) -> dict[str, Any]:
+    """The versions that 02 §10.1 asks every manifest to fix."""
+    return {
+        "postgresql": _one(conn, "SHOW server_version"),
+        "pg_dump": _run([_tool("pg_dump"), "--version"]),
+        "age": _run([_tool("age"), "--version"]),
+        "extensiones": dict(
+            conn.execute("SELECT extname, extversion FROM pg_catalog.pg_extension ORDER BY 1")
+        ),
+        "alembic": [row[0] for row in conn.execute("SELECT version_num FROM alembic_version")],
+        "sistema": platform.platform(),
+        "arquitectura": platform.machine(),
+        "python": platform.python_version(),
+        "kbot": kbot.__version__,
+    }
+
+
+def _qualified(conn: psycopg.Connection, schema: str, name: str) -> str:
+    return sql.Identifier(schema, name).as_string(conn)
+
+
+def _relation_fingerprint(conn: psycopg.Connection, schema: str, name: str) -> Fingerprint:
+    """The canonical fingerprint of every row of a table, in primary key order (in the order
+    of all its columns when it has none), with jsonb as its JCS text, as in E3."""
+    relation = _qualified(conn, schema, name)
+    columns = conn.execute(
+        "SELECT a.attname, pg_catalog.format_type(a.atttypid, a.atttypmod)"
+        " FROM pg_catalog.pg_attribute a WHERE a.attrelid = %s::regclass"
+        " AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum",
+        (relation,),
+    ).fetchall()
+    key = [
+        row[0]
+        for row in conn.execute(
+            "SELECT a.attname FROM pg_catalog.pg_index i"
+            " JOIN pg_catalog.pg_attribute a"
+            " ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)"
+            " WHERE i.indrelid = %s::regclass AND i.indisprimary"
+            " ORDER BY array_position(i.indkey::int2[], a.attnum)",
+            (relation,),
+        )
+    ]
+    order = key or [column for column, _ in columns]
+    json_columns = {i for i, (_, sql_type) in enumerate(columns) if sql_type == "jsonb"}
+    selected = [
+        sql.SQL("{}::text").format(sql.Identifier(column))
+        if i in json_columns
+        else sql.Identifier(column)
+        for i, (column, _) in enumerate(columns)
+    ]
+    query = sql.SQL("SELECT {columns} FROM {relation} ORDER BY {order}").format(
+        columns=sql.SQL(", ").join(selected),
+        relation=sql.Identifier(schema, name),
+        order=sql.SQL(", ").join(sql.Identifier(column) for column in order),
+    )
+    fingerprint = Fingerprint([column for column, _ in columns])
+    with conn.cursor(name="kbot_backup_fingerprint") as cursor:
+        cursor.execute(query)
+        while batch := cursor.fetchmany(BATCH):
+            for row in batch:
+                fingerprint.add(
+                    tuple(
+                        json_text(json.loads(v)) if i in json_columns and v is not None else v
+                        for i, v in enumerate(row)
+                    )
+                    if json_columns
+                    else row
+                )
+    return fingerprint
+
+
+def _count(conn: psycopg.Connection, schema: str, name: str) -> int:
+    query = sql.SQL("SELECT count(*) FROM {}").format(sql.Identifier(schema, name))
+    row = conn.execute(query).fetchone()
+    return int(row[0]) if row else 0
+
+
+def _sealed_fingerprints(directory: Path) -> dict[str, tuple[int, str, str]]:
+    """Rows and fingerprint of every partition of the registered sealed-day copies, by the
+    qualified name of the partition, with the copy they come from."""
+    found: dict[str, tuple[int, str, str]] = {}
+    for copy in published(directory, DAY_PREFIX):
+        for partition in copy.manifest.get("particiones", []):
+            found[partition["particion"]] = (
+                int(partition["filas"]),
+                str(partition["huella"]),
+                copy.path.name,
+            )
+    return found
+
+
+def table_fingerprints(
+    conn: psycopg.Connection, sealed: set[date], from_copies: dict[str, tuple[int, str, str]]
+) -> dict[str, dict[str, Any]]:
+    """Mode, rows and fingerprint of every table and every partition (02 §10.1, E4c1-02),
+    in the open snapshot. A sealed partition with a registered copy reuses that copy's
+    fingerprint, after counting it here: a different count stops the copy."""
+    relations = conn.execute(
         _over_user_schemas(
-            "SELECT n.nspname, c.relname FROM pg_catalog.pg_class c"
+            "SELECT n.nspname, c.relname, p.relname"
+            " FROM pg_catalog.pg_class c"
             " JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace"
-            " WHERE {schemas} AND c.relkind IN ('r', 'p') AND NOT c.relispartition"
-            " ORDER BY 1, 2"
+            " LEFT JOIN pg_catalog.pg_inherits i ON i.inhrelid = c.oid"
+            " LEFT JOIN pg_catalog.pg_class p ON p.oid = i.inhparent"
+            " WHERE {schemas} AND c.relkind = 'r' ORDER BY 1, 2"
         )
     ).fetchall()
-    counts: dict[str, int] = {}
-    for schema, name in tables:
-        query = sql.SQL("SELECT count(*) FROM {}.{}").format(
-            sql.Identifier(schema), sql.Identifier(name)
-        )
-        row = conn.execute(query).fetchone()
-        counts[f"{schema}.{name}"] = int(row[0]) if row else 0
-    return counts
+    tables: dict[str, dict[str, Any]] = {}
+    described: dict[str, archiver.Table] = {}
+    for schema, name, parent in relations:
+        qualified = f"{schema}.{name}"
+        day = None
+        if schema == "market" and parent in archiver.TABLES and name.startswith(f"{parent}_p"):
+            try:
+                day = datetime.strptime(name[len(parent) + 2 :], "%Y%m%d").date()
+            except ValueError:
+                day = None  # not a daily partition: fingerprinted as any other table
+        if day is not None and day in sealed and qualified in from_copies:
+            rows = _count(conn, schema, name)
+            copied_rows, fingerprint, origin = from_copies[qualified]
+            if rows != copied_rows:
+                raise BackupError(
+                    f"{qualified} is sealed but has {rows} rows, its copy {copied_rows}"
+                )
+            tables[qualified] = {
+                "modo": "incluido",
+                "filas": rows,
+                "huella": fingerprint,
+                "origen": origin,
+            }
+            continue
+        if day is not None:
+            if parent not in described:
+                described[parent] = archiver.describe(conn, parent)
+            fingerprint = archiver.day_fingerprint(conn, described[parent], day)
+        else:
+            fingerprint = _relation_fingerprint(conn, schema, name)
+        tables[qualified] = {
+            "modo": "incluido",
+            "filas": fingerprint.rows,
+            "huella": fingerprint.hexdigest(),
+            "origen": "instantanea",
+        }
+    return tables
 
 
 def _snapshot(conn: psycopg.Connection) -> tuple[str, datetime]:
@@ -212,32 +372,89 @@ def _dump_info(plain: Path, encrypted: Path) -> dict[str, Any]:
     }
 
 
-def _publish(temporary: Path, final: Path, manifest: dict[str, Any]) -> Copy:
-    """Writes the manifest and makes the copy durable, then renames it to its final name,
-    which is what publishes it."""
-    with (temporary / MANIFEST).open("w", encoding="utf-8", newline="\n") as handle:
-        json.dump(manifest, handle, ensure_ascii=False, indent=1, sort_keys=True)
-        handle.write("\n")
-    for path in (temporary / DUMP, temporary / MANIFEST, temporary):
-        parquet.sync(path)
-    temporary.rename(final)
-    parquet.sync(final.parent)
-    return Copy(final, manifest)
+# The register: one JSON line per copy, written before the copy is published (E4c1-04).
 
 
-def _register(directory: Path, manifest: dict[str, Any]) -> None:
-    """Appends the copy to the register of its directory, which only its writer can touch."""
-    entry = {
+def _entry(manifest: dict[str, Any]) -> dict[str, Any]:
+    return {
         "copia": manifest["nombre"],
         "clase": manifest["clase"],
         "creada": manifest["creada"],
         "sha256_claro": manifest["volcado"]["sha256_claro"],
         "sha256_cifrado": manifest["volcado"]["sha256_cifrado"],
     }
+
+
+def _register(directory: Path, manifest: dict[str, Any]) -> None:
+    """Appends the entry of a copy, durably, before the copy is published. A line that an
+    earlier failure cut is left as it is and never read; the new entry starts a new line."""
     register = directory / REGISTER
+    separator = ""
+    if register.exists() and register.stat().st_size > 0:
+        with register.open("rb") as handle:
+            handle.seek(-1, os.SEEK_END)
+            if handle.read(1) != b"\n":
+                separator = "\n"
     with register.open("a", encoding="utf-8", newline="\n") as handle:
-        handle.write(json.dumps(entry, sort_keys=True) + "\n")
+        handle.write(separator + json.dumps(_entry(manifest), sort_keys=True) + "\n")
     parquet.sync(register)
+
+
+def register_entries(directory: Path) -> list[dict[str, Any]]:
+    """The valid entries of the register; a line that does not parse is skipped."""
+    register = directory / REGISTER
+    if not register.exists():
+        return []
+    entries = []
+    for line in register.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(entry, dict):
+            entries.append(entry)
+    return entries
+
+
+def _registered(entries: Sequence[dict[str, Any]], manifest: dict[str, Any]) -> bool:
+    try:
+        wanted = _entry(manifest)
+    except (KeyError, TypeError):
+        return False
+    keys = ("copia", "sha256_claro", "sha256_cifrado")
+    return any(all(e.get(k) == wanted[k] for k in keys) for e in entries)
+
+
+def published(directory: Path, prefix: str) -> list[Copy]:
+    """The published copies of a class whose register entry vouches for them."""
+    entries = register_entries(directory)
+    copies = []
+    for path in sorted(p for p in directory.iterdir() if p.is_dir() and p.name.startswith(prefix)):
+        try:
+            manifest = json.loads((path / MANIFEST).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if (
+            isinstance(manifest, dict)
+            and manifest.get("nombre") == path.name
+            and (path / DUMP).is_file()
+            and _registered(entries, manifest)
+        ):
+            copies.append(Copy(path, manifest))
+    return copies
+
+
+def reconcile(directory: Path) -> list[Path]:
+    """Removes every published copy that the register does not vouch for, or whose manifest
+    cannot be read (E4c1-04). Such a copy cannot be authenticated before a restore, so it
+    counts as never made: a sealed day goes back to pending."""
+    valid = {copy.path for prefix in COPY_PREFIXES for copy in published(directory, prefix)}
+    removed = []
+    for path in sorted(directory.iterdir()):
+        if path.is_dir() and path.name.startswith(COPY_PREFIXES) and path not in valid:
+            shutil.rmtree(path)
+            removed.append(path)
+    return removed
 
 
 @contextmanager
@@ -255,6 +472,21 @@ def _attempt(directory: Path, name: str) -> Iterator[tuple[Path, Path]]:
     except BaseException:
         shutil.rmtree(temporary, ignore_errors=True)
         raise
+
+
+def _finish(directory: Path, temporary: Path, final: Path, manifest: dict[str, Any]) -> Copy:
+    """Writes the manifest, registers the copy and only then publishes it, by renaming its
+    directory (E4c1-04). A failure before the rename leaves at most an entry without a copy,
+    which authenticates nothing that exists."""
+    with (temporary / MANIFEST).open("w", encoding="utf-8", newline="\n") as handle:
+        json.dump(manifest, handle, ensure_ascii=False, indent=1, sort_keys=True)
+        handle.write("\n")
+    for path in (temporary / DUMP, temporary / MANIFEST, temporary):
+        parquet.sync(path)
+    _register(directory, manifest)
+    temporary.rename(final)
+    parquet.sync(final.parent)
+    return Copy(final, manifest)
 
 
 def _encrypt_and_drop(plain: Path, temporary: Path, recipients_file: Path) -> dict[str, Any]:
@@ -276,16 +508,17 @@ def hot_copy(
     """The hourly copy of the whole database, from one snapshot (02 §13.1, point 4)."""
     keys = recipients(recipients_file)
     name = f"{HOT_PREFIX}{now.astimezone(UTC):%Y%m%dT%H%M%SZ}"
+    from_copies = _sealed_fingerprints(directory)
     with _attempt(directory, name) as (temporary, final):
         plain = temporary / "volcado.dump"
         with _connect(dsn) as conn, conn.transaction():
             snapshot, snapshot_at = _snapshot(conn)
-            sealed = [
-                row[0].isoformat()
-                for row in conn.execute("SELECT day FROM market.archive_seals ORDER BY day")
+            sealed_days = [
+                row[0] for row in conn.execute("SELECT day FROM market.archive_seals ORDER BY day")
             ]
-            counts = table_counts(conn)
+            tables = table_fingerprints(conn, set(sealed_days), from_copies)
             catalog = catalog_fingerprint(conn)
+            fixed = versions(conn)
             before_dump()
             _run(
                 [
@@ -303,17 +536,16 @@ def hot_copy(
             "nombre": name,
             "creada": now.astimezone(UTC).isoformat(),
             "instantanea": snapshot_at.astimezone(UTC).isoformat(),
-            "dias_sellados": sealed,
+            "dias_sellados": [day.isoformat() for day in sealed_days],
             # E4c-1: no sealed day has a verified external alternative yet (R-E4-01).
             "dias_excluidos": [],
-            "recuentos": counts,
+            "tablas": tables,
             "catalogo": catalog,
+            "versiones": fixed,
             "destinatarios": keys,
             "volcado": _encrypt_and_drop(plain, temporary, recipients_file),
         }
-        copy = _publish(temporary, final, manifest)
-    _register(directory, manifest)
-    return copy
+        return _finish(directory, temporary, final, manifest)
 
 
 def sealed_day_copy(
@@ -349,6 +581,7 @@ def sealed_day_copy(
                     }
                 )
             catalog = catalog_fingerprint(conn)
+            fixed = versions(conn)
             _run(
                 [
                     _tool("pg_dump"),
@@ -370,12 +603,11 @@ def sealed_day_copy(
             "instantanea": snapshot_at.astimezone(UTC).isoformat(),
             "particiones": partitions,
             "catalogo": catalog,
+            "versiones": fixed,
             "destinatarios": keys,
             "volcado": _encrypt_and_drop(plain, temporary, recipients_file),
         }
-        copy = _publish(temporary, final, manifest)
-    _register(directory, manifest)
-    return copy
+        return _finish(directory, temporary, final, manifest)
 
 
 def globals_copy(
@@ -392,12 +624,16 @@ def globals_copy(
             "clase": "globales",
             "nombre": name,
             "creada": now.astimezone(UTC).isoformat(),
+            "versiones": {
+                "pg_dumpall": _run([_tool("pg_dumpall"), "--version"]),
+                "age": _run([_tool("age"), "--version"]),
+                "sistema": platform.platform(),
+                "arquitectura": platform.machine(),
+            },
             "destinatarios": keys,
             "volcado": _encrypt_and_drop(plain, temporary, recipients_file),
         }
-        copy = _publish(temporary, final, manifest)
-    _register(directory, manifest)
-    return copy
+        return _finish(directory, temporary, final, manifest)
 
 
 def remove_attempts(directory: Path) -> list[Path]:
@@ -459,7 +695,7 @@ def globals_retention(directory: Path) -> list[Path]:
 
 
 def pending_sealed_days(directory: Path, eligible: set[date], dsn: str = DSN) -> list[date]:
-    """Sealed days without a published copy that still need one (not yet eligible)."""
+    """Sealed days without a registered copy that still need one (not yet eligible)."""
     with psycopg.connect(dsn) as conn:
         sealed = [
             row[0]
@@ -468,5 +704,5 @@ def pending_sealed_days(directory: Path, eligible: set[date], dsn: str = DSN) ->
                 " (SELECT 1 FROM market.archive_retirements r WHERE r.day = s.day) ORDER BY s.day"
             )
         ]
-    copied = {p.name[len(DAY_PREFIX) :] for p in _named(directory, DAY_PREFIX)}
+    copied = {copy.path.name[len(DAY_PREFIX) :] for copy in published(directory, DAY_PREFIX)}
     return [d for d in sealed if d.isoformat() not in copied and d not in eligible]

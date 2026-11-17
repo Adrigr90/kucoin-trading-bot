@@ -39,10 +39,18 @@ Instancia `kbot` (AD-3, `VM.Standard.A1.Flex`, 2 OCPU, 12 GB, Ubuntu 24.04 aarch
 | `02_codigo.sh v0.2.3-e4b` y `01_sistema.sh /dev/sdb` | Correctos (`exit=0`). Ningún socket en el puerto 111; `rpcbind.socket` y `rpcbind.service`, enmascarados |
 | `04_verificar.sh` | **«All checks passed.»** Unidades de systemd; F2-A10 con **diez de diez** comprobaciones en verde ([`comprobacion_2026-11-17.md`](comprobacion_2026-11-17.md)); PostgreSQL contra `02` §9; F1-A6 con los usuarios reales (60 líneas, todas en verde) |
 
-Nada del bot está arrancado todavía: ni `svc-ingest` ni `kbot-archive-daily.timer`.
+Al terminar la instalación no había nada del bot arrancado.
+
+## Arranque del grabador (decisión del propietario)
+
+El propietario decidió arrancarlo sin esperar a la revisión de la instalación, sabiendo que las copias llegan en E4c. A las 10:56 UTC se ejecutó `sudo systemctl enable --now kbot-archive-daily.timer svc-ingest`:
+
+- `kbot-archive-prepare` creó 540 particiones diarias (de hoy − 30 a hoy + 14) y terminó correctamente.
+- `svc-ingest` arrancó con **40 instrumentos** (20 de Spot y 20 de Futures; 10 + 10 con profundidad de nivel 50, como en P3).
+- El temporizador del archivo diario corre por primera vez el 18 nov a las 00:20 UTC (más su retraso aleatorio).
+- A los dos minutos había 40 velas REST y 40 del WebSocket (el primer minuto cerrado de cada instrumento), 100 filas de calidad por minuto, 60 instantáneas y 450 métricas de profundidad, sin reinicios y sin errores ni avisos en su registro; 117 MiB de memoria de los 1 GiB de su límite.
 
 ## Lo que queda
 
-- **Arrancar el grabador y el archivo diario** (`svc-ingest` y `kbot-archive-daily.timer`): lo decide el propietario.
 - **Métricas del agente en la consola de Oracle** (*Compute → Instances → kbot → Metrics*): las mira el propietario dentro de un rato, para confirmar que la monitorización sigue llegando con la guarda activa.
 - **E4c** (copias y restauración) y **E4d** (operación y medición).

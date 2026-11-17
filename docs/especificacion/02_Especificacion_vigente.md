@@ -1433,6 +1433,79 @@ El diseño del despliegue, las copias y su restauración en la etapa E4 está en
 
 **Criterios de aptitud** (D16, pendientes): límite inferior del intervalo de confianza > 0, sensibilidad ±20 %, costes de estrés, concentración y periodos adversos. Para scalping y flujo de mercado, D28.
 
+### 12.1 Contrato de datos de la Fase 3 (F3-E1 y F3-E2) [propuesta del 17 nov 2026, pendiente de revisión; F3-AL-01]
+
+Fija qué datos ve un indicador y cuándo puede dar un valor. Vale para el histórico que se descarga en el PC (F3-E1) y, sin cambios, para los datos del grabador cuando los usen las estrategias (F4 en adelante). **Nada de F3-E1 ni de F3-E2 se programa antes de que el revisor lo apruebe** (`08` §3). Los puntos siguen los siete del contrato en `08` §3.
+
+**1. Datos de partida**
+- **Serie:** las velas de 1 minuto de `last` (operaciones) de cada instrumento. `mark` e `index` no alimentan indicadores en la F3.
+- **Histórico (F3-E1):** solo REST, con el cliente de la E1 (solo `GET`, lista blanca, el único presupuesto REST de la máquina, sin claves). Cada vela descargada es `cerrada_rest` con evidencia `vela_rest_suficiente`. No hay flujo grabado: su flujo cuenta como S3 y **nunca** se infiere `ausencia_sin_trades_probable` (§3.4 [H12]).
+- **Universo:** los 20 + 20 instrumentos del último `universe_snapshots` del grabador en la fecha de la descarga, guardados como lista versionada en el repositorio con esa fecha, más los deslistados que KuCoin aún sirva [P: `docs/kucoin/historico.md`]. El sesgo de supervivencia que quede se declara en cada informe.
+- **Archivo:** Parquet (zstd) con las columnas y los tipos de `candles` de E3 (§3.8 y §3.9, punto 6: decimales en `decimal128(38, 18)`, horas en UTC con µs). Un archivo por mercado, símbolo y día UTC, escrito de forma atómica (temporal y renombrado), con su SHA-256 en un manifiesto. La descarga es **reanudable e idempotente**: repetirla no cambia ningún archivo cerrado.
+
+**2. Presencia de cada minuto** (punto 1)
+
+Dentro de la vida observada de un instrumento (del primer al último minuto con vela que dio KuCoin), cada minuto tiene uno y solo uno de estos estados:
+
+| Estado | Cuándo | Para los indicadores |
+|---|---|---|
+| `presente` | KuCoin devolvió su vela | Utilizable según su calidad (punto 5) |
+| `ausente` | KuCoin devolvió el tramo que lo contiene sin vela para él. Es `ausencia_no_verificable` (§3.4) | Ausencia: **nunca** «no hubo operaciones», nunca se rellena ni se copia el cierre anterior |
+| `no_descargado` | La petición del tramo falló o no se ha hecho. No es definitivo: la descarga lo reintenta | Igual que ausente |
+
+Fuera de la vida observada, el minuto es `no_elegible` (§3.5) y no cuenta. El **informe de cobertura** da, por instrumento y día, los minutos de cada estado y los tramos fallidos; F3-A1 comprueba que coincide con los archivos.
+
+**3. El tiempo no se comprime** (punto 2)
+- Toda serie se indexa por la apertura UTC de cada intervalo, $[apertura, apertura + Δ)$.
+- Dos velas son **consecutivas** solo si la apertura de la segunda es la de la primera más Δ. **La posición en una lista nunca decide la contigüidad:** entre dos velas presentes separadas por un hueco hay ausencias, aunque no haya filas.
+
+**4. Temporalidades superiores** (punto 3)
+- 5 m, 15 m, 1 h, 4 h y 1 d, con límites en UTC: cada intervalo empieza en un múltiplo de su duración contado desde las 00:00 UTC. Las de 4 h empiezan a las 00, 04, 08, 12, 16 y 20 UTC, y la de 1 d a las 00:00 UTC.
+- La vela del intervalo $I$ se forma con los minutos presentes de $I$:
+  - apertura del primero y cierre del último;
+  - máximo y mínimo de todos;
+  - volumen y turnover sumados, en decimal exacto;
+  - `minutos_presentes`, cuántos hay de los $N$ del intervalo ($N$ = 5, 15, 60, 240 o 1440).
+- **Completa** si `minutos_presentes` = $N$. **Incompleta** si $0 < n < N$: se guarda con su $n$ para los informes, pero **no alimenta indicadores ni señales**. Sin ningún minuto, no hay vela: es una ausencia.
+- **Solo existe cerrada:** no se forma la vela de un intervalo que no haya terminado dentro de lo descargado. Con datos en vivo, tampoco antes de que todos sus minutos sean terminales (§3.4).
+- **Determinista e independiente del orden:** el resultado depende solo del conjunto de minutos por su clave (mercado, símbolo, apertura). Cargarlos en otro orden o repetir una vela idéntica no cambia nada. Dos velas distintas con la misma clave son un error que detiene el proceso: nunca se elige una.
+
+**5. Calidad** (punto 4)
+- Cada vela de 1 minuto lleva sus dimensiones P, V y T (§3.4) y su evidencia. En el histórico: P y T válidas sin contraste, V sujeta al punto 7 y evidencia `vela_rest_suficiente` en todas.
+- La vela superior hereda, en cada dimensión, **la peor de sus minutos**: de mejor a peor, contrastada y consistente, solo REST, discrepante. Una discrepancia invalida la dimensión en la que discrepa. Su evidencia es `vela_rest_suficiente` si alguno de sus minutos lo es.
+- Cada resultado lleva el **porcentaje de velas solo REST** que lo forman (100 % en el histórico; §12). Si se excluyen de la serie consistente lo decide D29.
+
+**6. Ventanas de los indicadores** (punto 5)
+- Un indicador con ventana de $w$ velas da valor en la vela $t$ solo si las $w$ velas de $t - (w-1)Δ$ a $t$ están **presentes, completas y con las dimensiones que el indicador necesita** (tabla de §3.4). Si no, no hay valor: nunca se interpola, nunca se repite el último y nunca se salta el hueco.
+- **Recalentamiento:** tras cualquier vela no utilizable, el indicador vuelve a su estado inicial. Los recursivos (EMA, MACD, RSI y ATR de Wilder, ADX) se reinician y no dan valor hasta completar otra vez su calentamiento. Cada indicador declara su calentamiento en F3-E2; por ejemplo, una EMA de periodo $n$ arranca con la media simple de sus $n$ primeras velas y da valor desde la $n$-ésima.
+- **Sin anticipación:** el valor en $t$ depende solo de velas cerradas hasta $t$; se prueba envenenando todo lo posterior (F3-A4).
+- **Aritmética:** las velas guardan decimales exactos y el indicador los convierte a coma flotante de 64 bits al entrar, como regla declarada (`08`, F3-E2).
+
+**7. Volumen mientras B8 siga abierta** (punto 6)
+- **Permitido:** los usos invariantes a escala dentro de un mismo instrumento. Es decir, el volumen relativo (el volumen de la vela entre la media de las $w$ anteriores del mismo instrumento) y la ponderación del VWAP de ese instrumento.
+- **Prohibido hasta que E5 cierre B8:** comparar volúmenes entre instrumentos, umbrales absolutos de volumen y el volumen de la vela frente al flujo de operaciones.
+- En Futures el volumen va en contratos, con el `multiplier` al lado (§3.8). Si el multiplicador cambia dentro de una ventana, la ventana se rompe para los usos de volumen, como con un hueco.
+- **El código lo impide:** cada indicador declara su uso del volumen, y un uso prohibido se rechaza con un error mientras B8 esté abierta, nunca en silencio.
+
+**8. Casos obligatorios** (punto 7; pruebas de F3-E1 y F3-E2)
+
+| # | Caso | Resultado exigido |
+|---|---|---|
+| CD-01 | Falta un minuto dentro de una vela de 5 m | Vela incompleta con `minutos_presentes` = 4; ningún indicador la usa |
+| CD-02 | Hueco dentro de la ventana de un indicador | Sin valor mientras la ventana lo contenga; después, recalentamiento completo (la EMA, reiniciada) |
+| CD-03 | Falta la vela de ejecución, la primera de 1 minuto posterior a la decisión (F3-E4) | La señal caduca, sin ejecución |
+| CD-04 | Datos solo REST | Cada resultado informa su porcentaje solo REST (100 %) |
+| CD-05 | Un uso de volumen condicionado a B8, por ejemplo un umbral absoluto | Rechazado con error |
+| CD-06 | Los mismos minutos en otro orden y con duplicados idénticos | Velas superiores idénticas |
+| CD-07 | Dos velas distintas con la misma clave | Error; no se elige ninguna |
+| CD-08 | Dos velas de 1 h completas separadas por una hora sin minutos | No son consecutivas: una ventana de 2 no da valor en la segunda |
+| CD-09 | Límites: el minuto de las 23:59 UTC y las velas de 4 h | El minuto pertenece al día en que empieza; las de 4 h empiezan a las 00, 04, 08, 12, 16 y 20 UTC |
+| CD-10 | Intervalo sin terminar al final de lo descargado | No hay vela |
+| CD-11 | Tramo cuya descarga falló | Sus minutos quedan `no_descargado` en el informe y cuentan como ausentes |
+| CD-12 | Cambio del `multiplier` dentro de una ventana de volumen | La ventana se rompe para los usos de volumen |
+
+Estas pruebas responden de F3-A1 (descarga y cobertura), F3-A2 (temporalidades), F3-A4 (anticipación) y F3-A5 (calidad, huecos, recalentamiento y volumen).
+
 ## 13. Infraestructura, monitorización y alertas
 
 | Componente | RAM | Prioridad |
@@ -1902,3 +1975,4 @@ $$\Delta Cap=\underbrace{8}_{\text{distancia mark-stop de lo cerrado}}+\underbra
 | 17 nov 2026 | **Instalación en la instancia, primer intento (etiqueta `v0.2.0-e4b`, sobre `5d7e344`).** Con permiso del propietario, Claude clonó el repositorio en `/opt/kbot` y ejecutó `01_sistema.sh /dev/sdb`. Hizo todos sus pasos hasta el cortafuegos, la guarda y `fail2ban` incluidos (volumen `kbot-data` formateado y montado en `/srv/kbot`, paquetes, usuarios, `sshd`, `rules.v6`). Se detuvo, **sin dejar nada abierto**, en su comprobación final, por dos fallos. (1) De Claude: `iptables -S | grep -q` falla con `pipefail` cuando `grep` deja de leer pronto e `iptables` recibe una tubería rota, aunque la regla estaba cargada; la versión anterior leía solo `INPUT`, que cabe en una escritura. (2) De la imagen: `netfilter-persistent reload` usa `--noflush` (`IPTABLES_RESTORE_NOFLUSH=yes` en `/etc/default/netfilter-persistent`) y duplicó todas las reglas de `INPUT`, `FORWARD` y `OUTPUT`, aunque no las de `InstanceServices`; sin efecto práctico, porque la segunda copia nunca se alcanza, pero la comprobación estricta habría fallado y cada recarga añadiría otra copia. Corrección: `01` carga los archivos con `iptables-restore` sin `--noflush`, lee las reglas enteras antes de buscar en ellas y exige la regla de SSH una sola vez; la CI reproduce en el espacio de red desechable las dos formas de carga. Una conexión SSH nueva entró sin problema después del fallo. **Pendiente de revisión** | Claude |
 | 17 nov 2026 | **Instalación en la instancia terminada: todo en verde** (etiqueta `v0.2.3-e4b`, `132b91b`; informe en `docs/operacion/instalacion_2026-11-17.md`). Con el arreglo anterior (`v0.2.1-e4b`), `01` y `02` fueron correctos. `03` instaló PostgreSQL 18.7 con el clúster en `/srv/kbot/postgresql/18/main`, la configuración, los roles y la base, pero se detuvo en las migraciones: Alembic 1.20 busca `pyproject.toml` en el directorio actual, el del administrador, que `postgres` no puede leer. `03` y `04` entran ahora en `/opt/kbot`, como en la CI (`6532ff7`, `v0.2.2-e4b`), y `03` se reanudó hasta `0003 (head)`. El primer `04` dio todo en verde salvo los puertos a la escucha: `rpcbind`, que la imagen trae con `nfs-common`, escuchaba en el 111. `01` lo para y lo enmascara (`132b91b`, `v0.2.3-e4b`). **Resultado final de `04_verificar.sh`: «All checks passed.»** Unidades, F2-A10 con diez de diez (`docs/operacion/comprobacion_2026-11-17.md`), PostgreSQL contra §9 y F1-A6 con los usuarios reales. Desde el contexto real de cada usuario: la guarda rechaza a los cinco `kbot_*` y deja pasar a `snap_daemon` y `root`; B19 correcto para los cinco; el bloqueo REST entre `kbot_ingest` y `kbot_archive` se comporta como dice E4-D06; y el agente de Oracle sigue conectado a los metadatos y sin errores con la guarda activa. Ningún servicio del bot arrancado todavía. **Pendiente de revisión** | Claude |
 | 17 nov 2026 | **Decisión del propietario: el grabador arranca ya** («Sí, ahora»), sin esperar a la revisión de la instalación y sabiendo que las copias llegan en E4c. `systemctl enable --now kbot-archive-daily.timer svc-ingest` a las 10:56 UTC: `kbot-archive-prepare` creó 540 particiones diarias y terminó; `svc-ingest` arrancó con 40 instrumentos (20 + 20; 10 + 10 con profundidad de nivel 50, como en P3); el primer archivo diario corre el 18 nov a las 00:20 UTC. A los dos minutos ya había velas REST y del WebSocket de los 40, calidad por minuto, instantáneas y métricas de profundidad, sin reinicios ni errores en su registro | Propietario y Claude |
+| 17 nov 2026 | **Contrato de datos de la Fase 3** (§12.1; F3-AL-01), en la rama `fase-3-e1`: presencia de cada minuto (`presente`, `ausente` o `no_descargado`, nunca «sin operaciones»), tiempo sin comprimir, temporalidades con velas completas o incompletas, calidad heredada por la peor, ventanas con recalentamiento, volumen limitado mientras B8 siga abierta y doce casos obligatorios (CD-01 a CD-12). **Pendiente de revisión**; nada de F3-E1 ni de F3-E2 se programa antes | Claude |

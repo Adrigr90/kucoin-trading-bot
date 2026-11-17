@@ -1,5 +1,7 @@
 # Instalación en la instancia de Oracle (E4a y E4b), 17 de noviembre de 2026
 
+**Revisión: APROBADO** el mismo día (commit `7409ca6`): las cuatro correcciones, conformes, y F2-A10, conforme con esta evidencia; sin hallazgos nuevos.
+
 Instancia `kbot` (AD-3, `VM.Standard.A1.Flex`, 2 OCPU, 12 GB, Ubuntu 24.04 aarch64, volumen de datos de 110 GB en `/dev/sdb`). Claude ejecutó cada orden por SSH desde el PC del propietario y con su permiso (P-E4-1). Antes, el revisor había aprobado el cortafuegos y la exención del agente de Oracle (`5d7e344`). El propietario autorizó crear las etiquetas y, durante esta instalación, corregir sin volver a preguntar los fallos pequeños que aparecieran, con la CI en verde antes de cada etiqueta. Los registros completos están en el servidor, en `/var/log/kbot-*.log`.
 
 ## Orden y resultado

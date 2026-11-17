@@ -108,7 +108,14 @@ fi
 ip6tables-restore --test <"$repo/deploy/etc/iptables/rules.v6"
 install -o root -g root -m 0640 "$repo/deploy/etc/iptables/rules.v6" /etc/iptables/rules.v6
 systemctl enable netfilter-persistent >/dev/null
-netfilter-persistent reload
+# The files are loaded replacing the whole filter table, never with `netfilter-persistent
+# reload`: the image sets IPTABLES_RESTORE_NOFLUSH=yes in /etc/default/netfilter-persistent,
+# so that reload appends the rules of the files to the chains already loaded instead of
+# replacing them (on the instance, 17 Nov 2026, every rule of INPUT, FORWARD and OUTPUT
+# ended up twice). At boot the chains are empty and netfilter-persistent loads the same
+# files. fail2ban, restarted below, adds its own chain again on its next ban.
+iptables-restore <"$v4"
+ip6tables-restore </etc/iptables/rules.v6
 
 step "metadata guard (E4-D04): only root and the Oracle Cloud Agent may reach the instance metadata"
 # Its own unit, loaded after the firewall of the image, and only the table inet kbot_guard.
@@ -130,10 +137,18 @@ systemctl restart fail2ban
 
 step "the firewall as loaded, with fail2ban in place"
 # A first look. The full comparison, chain by chain and in order (review FW-01), is
-# kbot.ops in 04_verificar.sh, once the code is installed.
-iptables -S | grep -qxF -- "$ssh_image" || { echo "the SSH rule of the image is not loaded" >&2; exit 1; }
-iptables -S InstanceServices | grep -q -- '--dport 3260' || { echo "Oracle's rules are gone" >&2; exit 1; }
-ip6tables -S INPUT | grep -qxF -- '-P INPUT DROP' || { echo "IPv6 is not closed" >&2; exit 1; }
+# kbot.ops in 04_verificar.sh, once the code is installed. The rules are read whole before
+# grep: `iptables -S | grep -q` fails under pipefail when grep stops reading early and
+# iptables gets a broken pipe (it happened on the instance, 17 Nov 2026).
+rules4="$(iptables -S)"
+rules6="$(ip6tables -S)"
+if [[ "$(grep -cxF -- "$ssh_image" <<<"$rules4")" != "1" ]]; then
+  echo "the SSH rule of the image is not loaded exactly once" >&2
+  exit 1
+fi
+grep -q -- '-A InstanceServices -d 169.254.0.2/32 .*--dport 3260' <<<"$rules4" ||
+  { echo "Oracle's rules are gone" >&2; exit 1; }
+grep -qxF -- '-P INPUT DROP' <<<"$rules6" || { echo "IPv6 is not closed" >&2; exit 1; }
 
 step "security updates every day, without automatic reboots"
 install -o root -g root -m 0644 "$repo/deploy/etc/apt/apt.conf.d/52kbot-unattended" \

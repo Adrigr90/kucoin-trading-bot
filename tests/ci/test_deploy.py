@@ -78,14 +78,19 @@ def test_the_units_are_verified_only_when_everything_they_need_exists() -> None:
     # E4a-01, residual: the generic nftables.service is retired before the firewall is
     # loaded, because stopping it flushes the whole ruleset.
     assert system.index("systemctl disable --now nftables") < system.index(
-        "netfilter-persistent reload"
+        'iptables-restore <"$v4"'
     )
     # Owner decisions of 16 and 17 Nov 2026: the firewall of the Oracle image, never ufw,
     # and its IPv4 file only read, never written (review FW-02); only rules.v6 is installed.
     commands = [line for line in system.splitlines() if not line.lstrip().startswith("#")]
     assert not any("ufw" in line for line in commands)
-    v4_uses = [line for line in commands if '"$v4"' in line]
-    assert v4_uses and all("grep" in line for line in v4_uses)
+    # The installation on the instance (17 Nov 2026): the image makes `netfilter-persistent
+    # reload` append instead of replace, and `iptables -S | grep -q` breaks under pipefail.
+    assert not any("netfilter-persistent reload" in line for line in commands)
+    assert 'iptables-restore <"$v4"' in system and "--noflush" not in "\n".join(commands)
+    assert not any("iptables -S" in line and "| grep" in line for line in commands)
+    v4_uses = [line.strip() for line in commands if '"$v4"' in line]
+    assert v4_uses and all("grep" in u or u == 'iptables-restore <"$v4"' for u in v4_uses)
     assert "owner_ip" not in system and "rules.v4.oracle" not in system
     assert "ip6tables-restore --test" in system and "/etc/iptables/rules.v6" in system
     # E4a-03: no data volume means no installation, unless a test instance says so.
@@ -246,9 +251,11 @@ def test_the_file_of_the_image_passes_the_check_of_01() -> None:
 
 
 # As root in a throwaway network namespace: the file of the image (as recorded on the
-# instance) and rules.v6, loaded as netfilter-persistent loads them; then what fail2ban's
+# instance) and rules.v6, loaded as 01_sistema.sh loads them; then what fail2ban's
 # iptables-multiport action runs on its first ban (port "ssh", as in the jail); then the
-# reviewer's example of FW-01. Each `-S` comes after a marker line.
+# reviewer's example of FW-01; then the file loaded again as 01 does, and once more as the
+# image's `netfilter-persistent reload` does (--noflush, from /etc/default). Each `-S`
+# comes after a marker line.
 _NETNS = r"""
 set -e
 iptables-restore < "$1"
@@ -264,6 +271,10 @@ ip6tables -I f2b-sshd 1 -s 2001:db8::7 -j REJECT --reject-with icmp6-port-unreac
 echo '#banned'; iptables -S; echo '#banned6'; ip6tables -S
 iptables -I f2b-sshd 1 -j ACCEPT
 echo '#accept'; iptables -S
+iptables-restore < "$1"
+echo '#reloaded'; iptables -S
+iptables-restore --noflush < "$1"
+echo '#noflush'; iptables -S
 """
 
 
@@ -294,3 +305,8 @@ def test_the_firewall_check_reads_what_iptables_really_prints() -> None:
     assert banned.ok and "fail2ban: 2" in banned.detail, banned.detail
     opened = check.firewall_status(text["accept"], text["banned6"])
     assert not opened.ok and "not a ban of one address: '-j ACCEPT'" in opened.detail
+    # Loading the file again as 01 does replaces everything, fail2ban's chain included;
+    # the reload of the image appends a second copy of every rule of the built-in chains.
+    assert text["reloaded"] == text["image"]
+    twice = check.firewall_status(text["noflush"], text["image6"])
+    assert not twice.ok and "IPv4 INPUT: unexpected rule 6" in twice.detail, twice.detail

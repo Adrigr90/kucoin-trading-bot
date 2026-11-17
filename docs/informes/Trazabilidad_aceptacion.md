@@ -2,7 +2,7 @@
 
 Única tabla del proyecto que une cada criterio de aceptación con las pruebas que lo comprueban y su estado. Las definiciones completas están en el alcance de cada fase (`05_Fase1_Alcance.md` §4 y `07_Fase2_Alcance.md` §4, en el paquete de contexto); el detalle de cada revisión, en `07` §10 y en [`Informe_Fase1.md`](Informe_Fase1.md).
 
-**Identificadores por fase** (auditoría de E2, hallazgo E2-05, 8 de noviembre de 2026): **F1-A1 a F1-A10** para la Fase 1 y **F2-A1 a F2-A15** para la Fase 2. Los criterios de la Fase 2 son de toda la fase, no de una etapa: E1 cerró F2-A2, F2-A3 y F2-A4, y E2 responde de F2-A1 y de F2-A5 a F2-A8.
+**Identificadores por fase** (auditoría de E2, hallazgo E2-05, 8 de noviembre de 2026): **F1-A1 a F1-A10** para la Fase 1, **F2-A1 a F2-A15** para la Fase 2 y **F3-A1 a F3-A12** para la Fase 3 (`08_Fase3_Alcance.md` §5). Los criterios de la Fase 2 son de toda la fase, no de una etapa: E1 cerró F2-A2, F2-A3 y F2-A4, y E2 responde de F2-A1 y de F2-A5 a F2-A8.
 
 **Registros anteriores al 8 de noviembre de 2026** (registro de cambios de `02` y revisiones de E1 y E2) citan los criterios sin prefijo: «A#» es F1-A# en lo que se refiere a la Fase 1 y F2-A# en lo que se refiere a la Fase 2. Los nombres A2-01, A3-01 y A4-01 son hallazgos de la revisión de E1, no criterios.
 
@@ -15,7 +15,7 @@
 | F1-A3 | Ningún cálculo fuera de las cuantizaciones lanza `Inexact`; uno que perdería precisión falla en lugar de redondear | `tests/unit/test_decimal.py` | Pasa (6 nov 2026) |
 | F1-A4 | `jcs` reproduce los ejemplos de la RFC 8785 y serializa los decimales como texto | `tests/unit/test_jcs.py` | Pasa (6 nov 2026) |
 | F1-A5 | Dos implementaciones independientes dan los valores de RC14 | `tests/unit/test_merkle.py` | Pasa (6 nov 2026) |
-| F1-A6 | Roles sin contraseña, solo `peer`, sin TCP, identidad no autorizada rechazada, sin `CREATE`, PUBLIC sin derechos | `tests/db/test_roles.py`, `tests/db/test_privileges.py` | Pasa en la CI; se repite en el servidor (F2-A10) |
+| F1-A6 | Roles sin contraseña, solo `peer`, sin TCP, identidad no autorizada rechazada, sin `CREATE`, PUBLIC sin derechos | `tests/db/test_roles.py`, `tests/db/test_privileges.py`, `deploy/install/f1a6_servidor.sh` | Pasa en la CI y en el servidor con los usuarios reales (17 nov 2026, aprobado) |
 | F1-A7 | `config.risk_limits` coincide con el DM y ningún servicio puede cambiarla | `tests/db/test_risk_limits.py` | Pasa (6 nov 2026) |
 | F1-A8 | La CI rechaza una sentencia fuera de la lista blanca, un secreto de prueba y un límite distinto del DM | `tests/ci/test_sql_guard.py`, `tests/ci/test_grant_policy.py`, `tests/ci/test_gitleaks.py`, `tests/ci/test_limits_check.py` | Pasa (6 nov 2026) |
 | F1-A9 | Las claves foráneas toman `FOR KEY SHARE` | `tests/db/test_fk_locks.py` | Pasa (6 nov 2026) |
@@ -34,11 +34,28 @@
 | F2-A7 | `kbot_ingest` solo tiene permisos en `market` y la base coincide con la matriz de roles | `tests/db/test_market.py` (`test_f2_a7_*`, también con las seis tablas nuevas), `tests/db/test_privileges.py`, `tests/db/test_partitions.py`, `tests/db/test_roles.py` | E2: conforme, validado en PostgreSQL de la tercera a la séptima revisión. E3a (aprobada el 10 nov 2026): las doce tablas rehechas por la `0003` conservan exactamente los permisos de `kbot_ingest`. El rol nuevo `kbot_archive` solo lee `market`, inserta en sus tablas del archivo y ejecuta preparar y sellar; retirar no lo ejecuta nadie |
 | F2-A8 | Profundidad: exactamente un estado terminal por intervalo; silencio con conexión sana como libro vigente; bytes por instrumento y día | `tests/unit/market/test_depth.py`, `tests/unit/ingest/test_core.py`, `tests/db/test_market.py`, `tests/db/test_market_recovery.py`, `tests/db/test_ingest.py` | E2: unicidad y silencio sano conformes; I-E2-07 resuelto en la cuarta revisión, e I-E2-04 (libros tardíos: `depth_late_books`, `store.slot_states`) en la quinta. Los bytes por día, en E5 |
 | F2-A9 | Parquet con SHA-256 de cada archivo; tamaño y consulta medidos | `tools/kucoin_history.py`, `tools/measure_archive.py`, `tests/unit/archive/test_measure.py`, `tests/db/test_rows_equivalence.py`, `tests/db/test_storage_scale.py`, `tests/unit/kucoin/test_history.py`, `docs/kucoin/historico.md`, `tests/db/test_partitions.py` | E3 en curso: B3 y B13 medidos el 9 nov 2026 (histórico del índice y de los pares deslistados). E3a (aprobada el 10 nov 2026): particiones por día, sello y retirada, sin el archivador. E3b (aprobada el 10 nov 2026): archivador con una generación de doce archivos Parquet por día sellado, SHA-256 de cada archivo, huella canónica comparada al releer y comprobación diaria (`src/kbot/archive/`, `tests/unit/archive/`, `tests/db/test_archive.py`). E3c (aprobada el 11 nov 2026): `--sink rows` equivalente a `DatabaseSink`, también con los escritores REST [CI]; 117 minutos completos grabados; medición del Parquet (con zstd 3, 31,9 GB al año), de DuckDB y de PostgreSQL 18 con 1.260 particiones |
-| F2-A10 | Servidor endurecido; F1-A6 repetida con los usuarios reales | — | No empezada (E4) |
+| F2-A10 | Servidor endurecido; F1-A6 repetida con los usuarios reales | `deploy/`, `src/kbot/ops/`, `tests/ci/test_deploy.py`, `tests/unit/ops/`, `tests/fixtures/firewall/`, `tests/db/test_pgcheck.py` | E4a aprobada en su parte sin servidor (12 nov 2026); E4b (PostgreSQL, `pgcheck`, `f1a6_servidor.sh`) aprobada en su parte sin servidor (16 nov 2026); cortafuegos de la imagen de Oracle en lugar de `ufw` (decisión del propietario del 16 nov 2026), con la IP del propietario solo en la lista de seguridad, la comprobación estricta de FW-01 y el agente de Oracle (`snap_daemon`) exento de la guarda, aprobados en su parte sin servidor (17 nov 2026, `5d7e344`); **instalado en el servidor el 17 nov 2026 con todo en verde** (`v0.2.3-e4b`; `docs/operacion/instalacion_2026-11-17.md` y `comprobacion_2026-11-17.md`) y **conforme** según el revisor (`7409ca6`). Queda confirmar las métricas del agente en la consola de Oracle |
 | F2-A11 | Copias cifradas, retención comprobada, restauración y RPO medidos | — | No empezada (E4) |
-| F2-A12 | 72 h seguidas sin intervención, dentro de lo gratuito | — | No empezada (E5) |
+| F2-A12 | 72 h seguidas sin intervención, dentro de lo gratuito | — | El grabador funciona desde el 17 nov 2026 a las 10:56 UTC; la medición es de E5 |
 | F2-A13 | Inactividad de Oracle: 7 días con sus métricas por encima de los umbrales | — | No empezada (E4 y E5) |
 | F2-A14 | Informe de la medición con propuestas para D26, D04 y D29 | — | No empezada (E5) |
 | F2-A15 | Coste 0 €: todo dentro de Always Free, cuenta sin pasar a pago | — | No empezada (E4 y E5) |
+
+## Fase 3: indicadores y estrategias (alcance aprobado el 17 de noviembre de 2026)
+
+| ID | Criterio | Pruebas | Estado |
+|---|---|---|---|
+| F3-A1 | Descarga histórica con el cliente de la E1, reanudable e idempotente, sin fabricar velas; informe de cobertura | — | No empezada |
+| F3-A2 | Temporalidades superiores reconstruidas desde 1 minuto igual en cualquier orden, sin velas sin cerrar | — | No empezada |
+| F3-A3 | Cada indicador contra TA-Lib dentro de su tolerancia, en x86-64 y en aarch64 | — | No empezada |
+| F3-A4 | Ningún indicador ni señal cambia al envenenar los datos posteriores | — | No empezada |
+| F3-A5 | Sin valor con velas no utilizables, sin datos suficientes o con huecos; recalentamiento tras el hueco | — | No empezada |
+| F3-A6 | Cada familia con su ficha aprobada y sus ejemplos numéricos reproducidos | — | No empezada |
+| F3-A7 | Régimen determinista, con casos en sus fronteras | — | No empezada |
+| F3-A8 | Combinador: una sola posición neta por instrumento, sin señales opuestas | — | No empezada |
+| F3-A9 | Backtest con `ejecución ≥ decisión ≥ disponibilidad` en todas las temporalidades | — | No empezada |
+| F3-A10 | Señal única por su clave; `kbot_strategy` solo inserta señales; matriz de permisos exacta | — | No empezada |
+| F3-A11 | Informe exploratorio de cada familia, que declara no ser la validación | — | No empezada |
+| F3-A12 | Coste 0 €: sin servicios de pago; dependencias nuevas, solo libres | — | No empezada |
 
 Los resultados de la CI los comunica el propietario o los lee Claude en GitHub; el revisor independiente los contrasta con el código en cada revisión, pero no sustituyen a una auditoría de todos los puntos de parada posibles.

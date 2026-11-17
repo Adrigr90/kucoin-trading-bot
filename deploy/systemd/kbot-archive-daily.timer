@@ -1,0 +1,13 @@
+# kbot: the daily archive at 00:20 UTC (02 §3.9 and §13.1; stage E4a). Twenty minutes
+# after midnight, so that the recorder has closed the day and prepared nothing else.
+[Unit]
+Description=kbot: daily archive timer
+
+[Timer]
+OnCalendar=*-*-* 00:20:00 UTC
+RandomizedDelaySec=5min
+Persistent=true
+Unit=kbot-archive-daily.service
+
+[Install]
+WantedBy=timers.target

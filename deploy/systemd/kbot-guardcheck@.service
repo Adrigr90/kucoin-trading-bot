@@ -1,0 +1,32 @@
+# kbot: the metadata guard of E4-D04, checked from the real context of a user, with no
+# IPAddressDeny at all so that only the kernel rule by user can reject the connection
+# (review of E4a, E4a-04). `kbot.ops.netcheck guard` expects the instance metadata to be
+# rejected for every user but the exempted ones (root and snap_daemon, the user of the
+# Oracle Cloud Agent, now; kbot_backup from E4c), and accepted for those. The rule matches
+# the user id, so running as kbot_sync here is the same context as its SFTP session, which
+# cannot run programs.
+#
+#   systemctl start kbot-guardcheck@kbot_ingest
+#   systemctl start kbot-guardcheck@kbot_sync
+#   systemctl start kbot-guardcheck@snap_daemon
+[Unit]
+Description=kbot: metadata guard check (no IPAddressDeny) as %i
+After=kbot-metadata-guard.service
+
+[Service]
+Type=oneshot
+User=%i
+Group=%i
+WorkingDirectory=/opt/kbot
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/kbot/.venv/bin/python -m kbot.ops.netcheck guard
+TimeoutStartSec=2min
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+CapabilityBoundingSet=
+UMask=0077
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6

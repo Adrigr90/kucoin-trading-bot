@@ -1,0 +1,35 @@
+# kbot: market.prepare_partitions() before the recorder starts and once a day (02 §3.9;
+# stage E4a). The recorder cannot call it (no EXECUTE), so this unit runs as kbot_archive.
+[Unit]
+Description=kbot: prepare the daily partitions of [today - 30, today + 14]
+After=postgresql.service
+Requires=postgresql.service
+
+[Service]
+Type=oneshot
+User=kbot_archive
+Group=kbot_archive
+WorkingDirectory=/opt/kbot
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/kbot/.venv/bin/python -m kbot.archive prepare --root /srv/kbot/archive
+TimeoutStartSec=10min
+MemoryMax=512M
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+UMask=0077
+RestrictAddressFamilies=AF_UNIX
+# No network at all: PostgreSQL is reached through its Unix socket (B19, point 35).
+IPAddressDeny=any

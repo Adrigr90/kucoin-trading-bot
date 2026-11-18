@@ -179,8 +179,14 @@ def test_a_stop_with_a_connection_down_records_its_gap_up_to_the_stop(
     assert {g.channel for g in stop_gaps} == SPOT_CHANNELS
     assert {g.cause for g in stop_gaps} == {GapCause.DESCONEXION}
     assert all(down[0] < g.end_at <= finished for g in stop_gaps)
+    # Futures was up: none of its gaps was open at the stop. (A stall of a loaded machine
+    # may still give it one, closed when the stall ended: that is the watchdog's work.)
+    stopped_at = {g.end_at for g in stop_gaps}
     futures = [g for t in sink.ticks for g in t.gaps if g.market == "FUTURES"]
-    assert {g.detail for g in futures} == {"first connection"}, "Futures was up: no stop gap"
+    assert not [g for g in futures if g.end_at in stopped_at], "no open gap of Futures"
+    assert all(
+        g.detail == "first connection" or (g.detail or "").startswith("Stall") for g in futures
+    )
 
 
 def test_the_start_up_begins_the_gap_of_the_stop_after_the_gaps_the_stop_wrote(

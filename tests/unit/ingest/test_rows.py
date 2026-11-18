@@ -17,6 +17,7 @@ from psycopg.types.json import Jsonb
 from kbot.ingest.core import TickOutput
 from kbot.ingest.rows import PRIMARY_KEYS, FolderInUse, RowSink, insert_row
 from kbot.market import store
+from kbot.market.depth import LateBook
 from kbot.market.gaps import DataGap, GapCause
 from kbot.market.last_candles import FlowMinute
 from kbot.market.mark_candles import FlowState
@@ -128,6 +129,25 @@ def test_a_gap_whose_start_is_taken_keeps_its_tail_as_in_postgresql(tmp_path: Pa
         (iso(10), iso(20), "sin_pong"),
         (iso(20), iso(30), "proceso_detenido"),
     ]
+
+
+def test_the_other_writers_that_ask_still_get_no_rows(tmp_path: Path) -> None:
+    """Review GR-06: only the gaps are answered. A late book (``RETURNING 1``) is written
+    once, twice given, and its writer is answered with no rows, as before."""
+    sink = RowSink(tmp_path)
+    late = LateBook(
+        "SPOT",
+        "BTC-USDT",
+        5,
+        T0 + timedelta(seconds=10),
+        T0 + timedelta(seconds=20),
+        7,
+        T0 + timedelta(seconds=15),
+        T0 + timedelta(seconds=75),
+    )
+    sink.write_tick(TickOutput(late_books=[late, late]))
+    sink.close()
+    assert sink.counts["depth_late_books"] == 1
 
 
 def test_a_folder_used_before_is_refused_untouched(tmp_path: Path) -> None:

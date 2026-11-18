@@ -9,8 +9,9 @@ same code; a test in the CI compares them with the rows PostgreSQL stores. A row
 of an earlier one is left out, as PostgreSQL leaves it out (review of E3c, E3c-04): the sink
 keeps a 16-byte digest of every key it wrote, some 150 MB for a day of the reference universe.
 The connection answers the two questions ``store.write_gap`` asks, from the gaps written: an
-insert ``RETURNING`` gives the row only if it was written, and the end of the gap that holds
-a start is known, so a gap whose start is taken keeps its tail here too (review GR-06).
+insert of a gap ``RETURNING`` gives the row only if it was written, and the end of the gap
+that holds a start is known, so a gap whose start is taken keeps its tail here too (review
+GR-06). Every other question is answered with no rows, as before.
 
 After each write it flushes every file and then appends a progress mark to ``PROGRESS``:
 the rows each file held at that moment. Each file has its own buffer, so a recording that
@@ -210,15 +211,17 @@ class RowSink(MemorySink):
                 return []
             raise ValueError(f"{table}: a second row with the key of another")
         seen.add(key)
-        if table == "data_gaps":
-            gap_key = tuple(values[c] for c in PRIMARY_KEYS["data_gaps"])
-            self._gap_ends[gap_key] = values["end_at"]
         file = self._files.get(table)
         if file is None:
             file = (self.folder / f"{table}.jsonl").open("a", encoding="utf-8", newline="\n")
             self._files[table] = file
         file.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
         self.counts[table] += 1
+        if table != "data_gaps":
+            # The other writers that ask (the late evidence, ``RETURNING 1``) were always
+            # answered with no rows here; that does not change.
+            return []
+        self._gap_ends[tuple(values[c] for c in PRIMARY_KEYS["data_gaps"])] = values["end_at"]
         returning = _RETURNING.search(flat)
         if returning is None:
             return []

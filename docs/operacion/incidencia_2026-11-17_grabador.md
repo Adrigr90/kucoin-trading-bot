@@ -101,9 +101,24 @@ El revisor la dio por **APROBABLE CON CORRECCIONES**. Ve adecuados el pong de 10
 
 **Cuarta revisión (sobre `cb4c275`): APROBABLE CON CORRECCIONES.** GR-08 quedó resuelto, sin hallazgos nuevos. Quedaba un último matiz de GR-01, ya corregido: la confirmación de una escritura se hace dentro de la propia escritura, antes de darla por terminada, así que la parada nunca puede llegar antes que ella.
 
+**Quinta revisión (sobre `2ffd88b`): APROBADO.** GR-01 a GR-08 quedan cerrados, sin hallazgos nuevos.
+
+## El primer corte con el código nuevo (18 nov, 12:49 UTC)
+
+Con `v0.2.5-grabador` instalada, KuCoin tuvo unos minutos lentos en Spot, y el diario lo deja ver entero:
+- **12:47 a 12:48:** los pongs se alargan a 4,9, 8,4 y 4,1 s.
+- **12:49:04:** un pong no llega en 10 s. Mientras tanto seguían entrando datos: 2.104 mensajes desde el ping, el último 0,0 s antes.
+- **Cinco reintentos fallidos:**
+  - cuatro veces KuCoin no confirma en 10 s las 70 suscripciones (`no acknowledgement`);
+  - una vez el handshake expira (`TimeoutError`).
+  - Las esperas crecieron: 5,0; 5,0; 5,6; 10,3; 33,6 y 46,6 s.
+- **12:53:02:** se reconecta solo, sin reinicios. Queda un hueco `sin_pong` de 4 min en los 70 canales de Spot.
+
+Con el código anterior, un episodio así podía dejar Spot muerto en silencio durante horas, como el 17 nov. Una espera de pong más larga no lo habría evitado, porque las reconexiones también fallaban.
+
 ## Lo que queda
 
 - **Una parada que no llega a escribir lo abierto sigue perdiendo el hueco abierto.** Pasa con un proceso matado (`SIGKILL`) o un corte de luz. Los minutos escritos con la conexión caída conservan sus filas S3, y los que no tienen vela quedan `sin_explicar`.
 - **No se sabe por qué KuCoin respondió HTTP 400.** No está documentado, y el código anterior no lo registraba; ahora quedaría en el diario.
-- **La espera del pong (10 s) se sigue midiendo con más días.** En la primera media hora, el pong más lento tardó 6,4 s.
-- **Las correcciones de la revisión, pendientes de confirmar.** Su instalación necesita otra etiqueta.
+- **La espera del pong (10 s) se sigue midiendo con más días.** En las primeras 1 h 51 min, el pong más lento que llegó a tiempo tardó 8,4 s, y uno pasó de 10 s (el corte de las 12:49).
+- **Instalar la versión aprobada (`2ffd88b`),** con una etiqueta nueva.

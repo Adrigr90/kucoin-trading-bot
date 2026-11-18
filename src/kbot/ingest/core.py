@@ -207,6 +207,7 @@ def _new_instrument(
     resume: ResumePoints,
     resume_cause: GapCause,
     max_backfill: timedelta,
+    gap_starts: ResumePoints | None = None,
 ) -> _Instrument:
     if spec.market not in MARKETS:
         raise ValueError(f"unknown market: {spec.market!r}")
@@ -215,6 +216,15 @@ def _new_instrument(
     def point(channel: str) -> datetime | None:
         value = resume.get((spec.market, spec.symbol, channel))
         return as_utc(value, "resume") if value is not None else None
+
+    def gap_point(channel: str) -> datetime | None:
+        """Where the gap of the stop begins: the resume point, unless ``gap_starts`` moves
+        it past the gaps already written that cover it (``gaps.covered_until``)."""
+        key = (spec.market, spec.symbol, channel)
+        if gap_starts is None or key not in gap_starts:
+            return point(channel)
+        value = gap_starts[key]
+        return as_utc(value, "gap start") if value is not None else None
 
     def start(channel: str) -> datetime:
         value = point(channel)
@@ -249,7 +259,7 @@ def _new_instrument(
                 channel,
                 spec.symbol,
                 started_at=started_at,
-                resumed_from=point(channel),
+                resumed_from=gap_point(channel),
                 resume_cause=resume_cause,
             )
             for channel in spec.channels()
@@ -267,12 +277,15 @@ class RecorderCore:
         resume_cause: GapCause = GapCause.PROCESO_DETENIDO,
         max_backfill: timedelta = MAX_BACKFILL,
         lateness: timedelta = LATENESS,
+        gap_starts: ResumePoints | None = None,
     ) -> None:
         """``resume`` maps (market, symbol, channel) to where the previous run stopped
         recording that channel; the trackers resume there, so the stop is closed as a gap
         and its slots as ``desconectado``. Trackers go back at most ``max_backfill``: older
         minutes get their S3 rows when their day is closed, and the gap row still covers
-        the whole stop."""
+        the whole stop. ``gap_starts`` maps the same keys to where the gap of the stop
+        begins: past the gaps already written that cover the resume point, such as the
+        ones a stop writes (``stop``), so that the two do not overlap."""
         started_at = as_utc(started_at, "started_at")
         self.lateness = lateness
         self.max_backfill = max_backfill
@@ -280,6 +293,14 @@ class RecorderCore:
         self._instruments: dict[tuple[str, str], _Instrument] = {}
         self._retired: list[_Instrument] = []
         self._closed_gaps: list[DataGap] = []
+        # Gaps handed out by a tick and not yet known to be in the database (``written``):
+        # if that write fails, the stop writes them (review GR-01).
+        self._handed_out: list[DataGap] = []
+        # The retired instruments a tick closed for, not yet known to be in the database,
+        # with where each of their channels had closed before it: if that write fails, the
+        # stop covers their time from there, since nobody records them again (residual of
+        # GR-01). Kept even when that tick finished them.
+        self._retired_unwritten: dict[int, tuple[_Instrument, dict[str, datetime]]] = {}
         # Minutes waiting for their REST candle, per (market, symbol): kept apart from the
         # instruments, so they are decided even after their instrument left the universe.
         self._awaiting: dict[tuple[str, str], dict[datetime, _Awaiting]] = {}
@@ -298,6 +319,7 @@ class RecorderCore:
                 resume=resume or {},
                 resume_cause=resume_cause,
                 max_backfill=max_backfill,
+                gap_starts=gap_starts,
             )
 
     # --- what to record --------------------------------------------------------------------
@@ -499,6 +521,7 @@ class RecorderCore:
     def tick(self, now: datetime) -> TickOutput:
         now = as_utc(now, "now")
         out = TickOutput(gaps=self._closed_gaps, late_minutes=self._late_minutes)
+        self._handed_out += self._closed_gaps
         self._closed_gaps = []
         self._late_minutes = []
         for instrument in [*self._instruments.values(), *self._retired]:
@@ -507,9 +530,54 @@ class RecorderCore:
             until = self._proven(instrument.spec.market, now)
             if instrument.retired_at is not None:
                 until = min(until, instrument.retired_at + self.lateness)
+                self._retired_unwritten.setdefault(
+                    id(instrument), (instrument, _cursors(instrument))
+                )
             self._close(instrument, until, out)
         self._retired = [i for i in self._retired if not i.finished()]
         return out
+
+    def written(self) -> None:
+        """Every tick so far is in the database: its gaps, and what it closed for the retired
+        instruments, no longer wait for the stop."""
+        self._handed_out = []
+        self._retired_unwritten = {}
+
+    def stop(self, now: datetime) -> list[DataGap]:
+        """The recorder stops at ``now``: the gaps it knows and has not written, so that
+        nothing it could not record stays unexplained (incident of 17 November 2026, when a
+        stop lost a gap open for six hours). Called once, instead of another ``tick``: one
+        that closed slots and minutes after a tick that could not be written would leave
+        time without rows and without a gap.
+
+        * The gaps of the ticks not known to be written (``written``): a tick whose write
+          failed takes them with it otherwise (review GR-01). Writing one twice changes
+          nothing (``store.write_gap``).
+        * The gaps closed since the last tick.
+        * A gap still open (its connection is down) closes at ``now`` with its own cause.
+          The next start-up begins the gap of the stop where the gaps written cover its
+          resume point up to (``gap_starts``), so after this one when it covers it.
+        * An instrument that left the universe and has not closed everything before it left
+          never will: from where each of its channels stopped closing to the moment it left
+          (the slot and the minute that hold that moment never close, ``finished``) is a
+          ``proceso_detenido`` gap. The next start-up does not record it, so nobody else
+          would explain that time. Where it stopped closing is what the database holds: if
+          the last tick that closed for it is not known to be written, from where it had
+          closed before that tick, even if that tick finished it (residual of GR-01)."""
+        now = as_utc(now, "now")
+        gaps = [*self._handed_out, *self._closed_gaps]
+        self._handed_out, self._closed_gaps = [], []
+        for instrument in self._instruments.values():
+            for tracker in instrument.gaps.values():
+                gap = tracker.up(now)  # closes the open gap, if any
+                if gap is not None:
+                    gaps.append(gap)
+        retired = {id(i): (i, _cursors(i)) for i in self._retired}
+        retired.update(self._retired_unwritten)
+        self._retired_unwritten = {}
+        for instrument, cursors in retired.values():
+            gaps += _never_closed(instrument, cursors)
+        return gaps
 
     def _proven(self, market: str, now: datetime) -> datetime:
         """How far the trackers of ``market`` may close (review of E2, third round).
@@ -692,6 +760,40 @@ def _valid_trade(data: dict[str, Any]) -> bool:
         and is_int(matched)
         and 0 <= matched < 2**63  # a 64-bit time, so it always gives a date
     )
+
+
+def _cursors(instrument: _Instrument) -> dict[str, datetime]:
+    """Where each channel of the instrument has closed up to: its next slot or minute."""
+    cursors = {f"obu{level}": d.next_slot for level, d in instrument.depth.items()}
+    cursors["trade"] = instrument.trade.next_minute
+    cursors["kline"] = instrument.kline.next_minute
+    if instrument.mark is not None:
+        cursors["mark-price"] = instrument.mark.next_minute
+    return cursors
+
+
+def _never_closed(instrument: _Instrument, cursors: Mapping[str, datetime]) -> list[DataGap]:
+    """The time a retired instrument will never have in the database, per channel, from
+    ``cursors`` up to the slot or minute that holds the moment it left
+    (``RecorderCore.stop``)."""
+    at = instrument.retired_at
+    if at is None:
+        return []
+    spec = instrument.spec
+    minute, slot = floor_to(at, MINUTE), slot_start(at)
+    return [
+        DataGap(
+            spec.market,
+            channel,
+            spec.symbol,
+            start,
+            end,
+            GapCause.PROCESO_DETENIDO,
+            "stopped before closing an instrument that left the universe",
+        )
+        for channel, start in cursors.items()
+        if start < (end := slot if channel.startswith("obu") else minute)
+    ]
 
 
 def _mark_flow(spec: InstrumentSpec, result: MinuteResult) -> FlowMinute:

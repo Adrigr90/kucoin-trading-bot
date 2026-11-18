@@ -1,0 +1,8 @@
+# kbot (02 §13.1, point 4; stage E4c): the age recipients of every backup. Public keys only.
+# The private keys are on the owner's SD card and on paper (owner decision of 17 Nov 2026):
+# never on the server, in Git or with Claude. Checked on 17 Nov 2026 by encrypting a test
+# text to both with age 1.3.2.
+# Principal
+age1qtkaygfztawje3lye07w82gd0m2vqc6z5ymfpqnszpj04x4d296qsp2vfv
+# Recovery
+age1pwcwfacsagfjpqydkcxpc6lzzzed7fhqsjxdj6unzv0t3q3pwazqeql06x

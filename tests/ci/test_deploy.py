@@ -64,7 +64,13 @@ def test_the_units_are_verified_only_when_everything_they_need_exists() -> None:
     PostgreSQL, and only 04 verifies them, when the interpreter and postgresql.service are
     both in place."""
     scripts = sorted(p.name for p in (DEPLOY / "install").glob("0*.sh"))
-    assert scripts == ["01_sistema.sh", "02_codigo.sh", "03_postgresql.sh", "04_verificar.sh"]
+    assert scripts == [
+        "01_sistema.sh",
+        "02_codigo.sh",
+        "03_postgresql.sh",
+        "04_verificar.sh",
+        "05_copias.sh",  # stage E4c, after the verification
+    ]
     system = (DEPLOY / "install" / "01_sistema.sh").read_text(encoding="utf-8")
     verify = (DEPLOY / "install" / "04_verificar.sh").read_text(encoding="utf-8")
     for name in scripts[:3]:
@@ -185,6 +191,90 @@ def test_uv_checksum_is_pinned_for_the_server() -> None:
     assert name == "uv-aarch64-unknown-linux-gnu.tar.gz"
     code = (DEPLOY / "install" / "02_codigo.sh").read_text(encoding="utf-8")
     assert "uv.sha256" in code and "KBOT_UV_SHA256" not in code
+
+
+def test_the_local_backups_run_without_network_and_keep_no_plain_dump() -> None:
+    """E4c-1 (02 §13.1, point 4): the hourly copy as kbot_backup and the weekly global
+    objects as postgres, neither with any network (only the socket of PostgreSQL); the
+    installation stops on a private key or a plain dump left on the disk."""
+    backup = (DEPLOY / "systemd" / "kbot-backup.service").read_text(encoding="utf-8")
+    globals_unit = (DEPLOY / "systemd" / "kbot-backup-globals.service").read_text(encoding="utf-8")
+    assert "User=kbot_backup" in backup and "-m kbot.backup run" in backup
+    assert "User=postgres" in globals_unit and "-m kbot.backup globals" in globals_unit
+    for unit in (backup, globals_unit):
+        assert "IPAddressDeny=any" in unit and "RestrictAddressFamilies=AF_UNIX\n" in unit
+        assert "@resources" not in unit.split("[Service]")[1].replace("#", "")  # age is Go
+    assert "ReadWritePaths=/srv/kbot/backups\n" in backup
+    assert "ReadWritePaths=/srv/kbot/backups/globales\n" in globals_unit
+    timer = (DEPLOY / "systemd" / "kbot-backup.timer").read_text(encoding="utf-8")
+    assert "OnCalendar=*-*-* *:40:00" in timer  # far from the archive at 00:20 UTC
+    install = (DEPLOY / "install" / "05_copias.sh").read_text(encoding="utf-8")
+    assert "AGE-SECRET-KEY" in install and "volcado.dump" in install
+    assert "install -d -o postgres -g kbot_backup -m 2750" in install
+    assert "SupplementaryGroups=kbot_backup" in globals_unit and "UMask=0027" in globals_unit
+
+
+# As root: the directories of the copies with the very lines of 05_copias.sh, and the real
+# users. postgres, as its unit runs it (SupplementaryGroups=kbot_backup, UMask=0027), must
+# reach its directory and publish a copy that kbot_backup reads but cannot change; without
+# that group it must not even reach it (review of E4c-1, E4c1-01).
+_GLOBALS_LAYOUT = r"""
+set -e
+root="$(mktemp -d /tmp/kbot-copias.XXXXXX)"
+trap 'rm -rf "$root"' EXIT
+chmod 0755 "$root"
+getent passwd kbot_backup >/dev/null ||
+  useradd --system --shell /usr/sbin/nologin --no-create-home kbot_backup
+getent passwd postgres >/dev/null
+backups="$root/backups"
+@LAYOUT@
+if setpriv --reuid=postgres --regid=postgres --clear-groups -- \
+  ls "$backups/globales" 2>/dev/null; then
+  echo "postgres reached the globals without the group of its unit"
+  exit 1
+fi
+setpriv --reuid=postgres --regid=postgres --groups=kbot_backup -- sh -c '
+  umask 0027
+  d="$1/globales"
+  : > "$d/.lock"
+  mkdir "$d/.globales-1.tmp"
+  echo cifrado > "$d/.globales-1.tmp/volcado.age"
+  mv "$d/.globales-1.tmp" "$d/globales-1"
+' sh "$backups"
+setpriv --reuid=kbot_backup --regid=kbot_backup --init-groups -- \
+  cat "$backups/globales/globales-1/volcado.age"
+if setpriv --reuid=kbot_backup --regid=kbot_backup --init-groups -- \
+  touch "$backups/globales/x" 2>/dev/null; then
+  echo "kbot_backup can write the globals"
+  exit 1
+fi
+stat -c 'mode %G %a' "$backups/globales/globales-1/volcado.age"
+"""
+
+
+def test_the_global_objects_reach_their_directory_with_the_real_modes() -> None:
+    tool("setpriv")
+    install = (DEPLOY / "install" / "05_copias.sh").read_text(encoding="utf-8")
+    layout = [
+        line.strip()
+        for line in install.splitlines()
+        if line.strip().startswith("install -d -o") and '"$backups' in line
+    ]
+    assert len(layout) == 2, layout  # the directory of the copies and that of the globals
+    script = _GLOBALS_LAYOUT.replace("@LAYOUT@", "\n".join(layout))
+    done = run(*as_root("bash", "-c", script))
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "cifrado" in done.stdout and "mode kbot_backup 640" in done.stdout, done.stdout
+
+
+def test_backup_recipients_are_two_public_keys_and_no_secret() -> None:
+    """E4c (02 §13.1, point 4): the copies are encrypted to the principal and the recovery
+    key; the repository and the server only ever hold the public halves."""
+    text = (DEPLOY / "etc" / "kbot" / "age-recipients.txt").read_text(encoding="utf-8")
+    assert "AGE-SECRET-KEY" not in text.upper()
+    keys = [line for line in text.splitlines() if line.strip() and not line.startswith("#")]
+    assert len(keys) == 2 and len(set(keys)) == 2
+    assert all(re.fullmatch(r"age1[02-9ac-hj-np-z]{58}", key) for key in keys)
 
 
 def test_tmpfiles_creates_the_shared_lock_owned_by_root() -> None:

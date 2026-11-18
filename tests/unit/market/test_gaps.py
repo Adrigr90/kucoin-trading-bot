@@ -6,9 +6,31 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from kbot.market.gaps import GapCause, GapTracker, cause_from_state_detail
+from kbot.market.gaps import GapCause, GapTracker, cause_from_state_detail, covered_until
 
 T0 = datetime(2026, 11, 7, 12, 0, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    ("gaps", "reached"),
+    [
+        ([], 0),
+        ([(-10, 5), (5, 9), (20, 30)], 9),  # one after another, then a hole from 9 to 20
+        ([(3, 9), (-1, 4)], 9),  # in any order
+        ([(0, 4)], 4),  # one that begins at the point covers it
+        ([(2, 9)], 0),  # begins after the point: from 0 to 2 nothing explains the time
+        ([(-5, -1)], 0),  # ends before
+        ([(-5, 30), (1, 4)], 30),  # one inside another
+    ],
+)
+def test_the_gap_of_a_stop_begins_where_the_written_gaps_stop_covering(
+    gaps: list[tuple[int, int]], reached: int
+) -> None:
+    """Incident of 17 November 2026: a stop writes its open gaps up to the moment it
+    stopped, and the next start-up begins the gap of the stop after them. It only moves
+    past time that the written gaps cover without a hole, so no instant is ever left
+    unexplained; at worst the gap of the stop overlaps one already written."""
+    assert covered_until(at(0), [(at(s), at(e)) for s, e in gaps]) == at(reached)
 
 
 def at(seconds: float) -> datetime:

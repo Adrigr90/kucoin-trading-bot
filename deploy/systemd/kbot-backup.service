@@ -1,0 +1,49 @@
+# kbot: the hourly local backup, as kbot_backup (02 §13.1, point 4; stage E4c-1): a copy
+# of each sealed day that has none yet, the hot copy of the whole database from one
+# snapshot, and the local retention. Every copy is encrypted with age before it is kept.
+# In E4c-1 nothing leaves the server: no network at all, only the socket of PostgreSQL;
+# stage E4c-2 opens the way to Object Storage. The timer runs it at minute 40, far from
+# the daily archive (00:20 UTC), whose seal must not wait for the locks of a dump.
+# @resources is not denied: age is a Go program and raises its open file limit at start.
+[Unit]
+Description=kbot: local backup of the database (hot copy and sealed days)
+Documentation=file:///opt/kbot/docs/especificacion/02_Especificacion_vigente.md
+After=postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=oneshot
+User=kbot_backup
+Group=kbot_backup
+WorkingDirectory=/opt/kbot
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/kbot/.venv/bin/python -m kbot.backup run
+TimeoutStartSec=50min
+Nice=10
+IOSchedulingClass=idle
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
+ReadWritePaths=/srv/kbot/backups
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any

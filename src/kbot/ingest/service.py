@@ -536,27 +536,30 @@ class Recorder:
         """A database call, in a worker thread. It is shielded: a step cancelled while it
         waits here (``_supervised_step``) never abandons the call half-way, and the stop
         waits for it before writing (``_settle_db``), so the connection never serves two
-        calls at once (review GR-03). ``on_success`` runs, in the event loop, as soon as
-        the call ends without error, whether or not anyone still waits for it."""
-        call = asyncio.ensure_future(asyncio.to_thread(function, *args))
-        if on_success is not None:
-            confirm = on_success
+        calls at once (review GR-03).
 
-            def succeeded(done: asyncio.Future[Any]) -> None:
-                if not done.cancelled() and done.exception() is None:
-                    confirm()
+        ``on_success`` runs in the event loop as soon as the call ends without error,
+        whether or not anyone still waits for it, inside the shielded task and before that
+        task ends: whoever sees the call done knows it has run. A callback of the task would
+        only be scheduled when it ends, and could run after someone saw it done (fourth
+        review, residual of GR-01)."""
 
-            call.add_done_callback(succeeded)
+        async def call_and_confirm() -> Any:
+            result = await asyncio.to_thread(function, *args)
+            if on_success is not None:
+                on_success()
+            return result
+
+        call = asyncio.ensure_future(call_and_confirm())
         self._db_call = call
         return await asyncio.shield(call)
 
     async def _settle_db(self) -> None:
         """Wait for the database call a cancelled step had started, up to
-        ``DB_SETTLE_SECONDS``. If it was the write of a tick and it succeeded, it has already
-        confirmed that tick to the core (``_db``, ``on_success``, whose callback runs before
-        this wait ends), so the stop adds no gap over what it wrote; if it failed, the stop
-        covers what it did not write (``RecorderCore.stop``). Raises ``TimeoutError`` if it
-        does not end."""
+        ``DB_SETTLE_SECONDS``. If it was the write of a tick and it succeeded, it confirmed
+        that tick to the core before ending (``_db``, ``on_success``), so once the call is
+        done the stop adds no gap over what it wrote; if it failed, the stop covers what it
+        did not write (``RecorderCore.stop``). Raises ``TimeoutError`` if it does not end."""
         call = self._db_call
         if call is None or call.done():
             return

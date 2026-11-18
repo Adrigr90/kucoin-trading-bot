@@ -99,6 +99,8 @@ El revisor la dio por **APROBABLE CON CORRECCIONES**. Ve adecuados el pong de 10
 - **Último residual de GR-01:** una escritura que termina bien después de cancelar su ciclo lo confirma igualmente, así que la parada no añade huecos sobre lo escrito.
 - **GR-08:** una prueba que fallaba si el vigilante detectaba un bloqueo justo antes de la parada.
 
+**Cuarta revisión (sobre `cb4c275`): APROBABLE CON CORRECCIONES.** GR-08 quedó resuelto, sin hallazgos nuevos. Quedaba un último matiz de GR-01, ya corregido: la confirmación de una escritura se hace dentro de la propia escritura, antes de darla por terminada, así que la parada nunca puede llegar antes que ella.
+
 ## Lo que queda
 
 - **Una parada que no llega a escribir lo abierto sigue perdiendo el hueco abierto.** Pasa con un proceso matado (`SIGKILL`) o un corte de luz. Los minutos escritos con la conexión caída conservan sus filas S3, y los que no tienen vela quedan `sin_explicar`.

@@ -221,14 +221,19 @@ def test_a_stop_with_a_connection_down_records_its_gap_up_to_the_stop(
 
 
 @pytest.mark.parametrize("fails", [False, True], ids=["written", "write failed"])
+@pytest.mark.parametrize("at_the_end", [False, True], ids=["while it runs", "as it ends"])
 def test_a_write_that_ends_after_its_step_was_cancelled_still_counts(
-    test_client: Factory, fails: bool
+    test_client: Factory, fails: bool, at_the_end: bool
 ) -> None:
-    """Residual of GR-01, third review: the stop is asked for while the last tick of an
-    instrument that left the universe is being written. The step is cancelled, the write
-    goes on and the stop waits for it. If it succeeds, it confirms the tick itself and the
-    stop adds no gap over what it wrote; if it fails, the stop covers what it did not write,
-    up to the moment the instrument left."""
+    """Residual of GR-01, third and fourth reviews: the stop is asked for while the last
+    tick of an instrument that left the universe is being written. The step is cancelled,
+    the write goes on and the stop waits for it. If it succeeds, it confirms the tick itself
+    and the stop adds no gap over what it wrote; if it fails, the stop covers what it did
+    not write, up to the moment the instrument left.
+
+    ``at_the_end``: the stop comes in the very turn of the event loop in which the write
+    ends, and finds it done (the order the reviewer reproduced): the confirmation must
+    already be there, not merely scheduled."""
     fake = FakeKucoin(spot=["BTC-USDT", "ETH-USDT"], futures=["XBTUSDTM"])
     sink = TestSink()
     rec = Recorder(sink, rest=test_client(fake, RestRateLimiter(pool_weight=10**6)))
@@ -247,7 +252,7 @@ def test_a_write_that_ends_after_its_step_was_cancelled_still_counts(
         eth = next(spec for spec in core.specs if spec.symbol == "ETH-USDT")
         eth_channels = eth.channels()
         assert core.apply_universe([spec for spec in core.specs if spec != eth], left)
-        sink.slow, sink.fail_next = 0.5, fails
+        sink.slow, sink.fail_next = 0.3, fails
         moment = left + timedelta(seconds=3)
         pong(core, moment)
         step = asyncio.create_task(rec.step(moment))
@@ -255,6 +260,11 @@ def test_a_write_that_ends_after_its_step_was_cancelled_still_counts(
             await asyncio.sleep(0.01)
         await _finish(step)
         assert step.cancelled()
+        if at_the_end:
+            call = rec._db_call
+            assert call is not None and not call.done()
+            while not call.done():  # one turn of the event loop at a time
+                await asyncio.sleep(0)
         with capture_logs() as logs:
             await rec._record_stop(moment + timedelta(seconds=1))
         assert rec._rest is not None

@@ -1,0 +1,109 @@
+"""The day files of the history: the columns of candles, exact values, atomic writes, the
+record with its SHA-256, and closed days that are never written again (02 §12.1, point 1;
+F3-A1)."""
+
+from __future__ import annotations
+
+from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
+from pathlib import Path
+
+import pytest
+
+from kbot.history.coverage import Request, Window
+from kbot.history.store import CANDLE_COLUMNS, paths, read_candles, read_record, write_day
+from kbot.market.last_candles import Ohlcv
+from tools.measure_archive import MIGRATION, table_specs
+
+DAY = date(2026, 11, 10)
+START = datetime(2026, 11, 10, tzinfo=UTC)
+WHOLE = Window(START, START + timedelta(days=1))
+NOW = START + timedelta(days=2)
+
+
+def candle(minute: int, price: str = "73759.123456789012345678") -> Ohlcv:
+    p = Decimal(price)
+    return Ohlcv(
+        START + timedelta(minutes=minute), p, p + 1, p - 1, p, Decimal("0.00012345"), p * 2
+    )
+
+
+def everything() -> list[Request]:
+    return [Request(START, START + timedelta(minutes=1439), True)]
+
+
+def test_the_columns_are_those_of_candles_in_the_migration() -> None:
+    spec = table_specs(MIGRATION.read_text(encoding="utf-8"))["candles"]
+    assert [(c.name, c.sql_type) for c in CANDLE_COLUMNS] == [
+        (c.name, c.sql_type) for c in spec.columns
+    ]
+
+
+def test_a_day_is_written_and_read_back_exactly(tmp_path: Path) -> None:
+    written = [candle(0), candle(1, "0.000000000000000001"), candle(1439)]
+    record = write_day(tmp_path, "SPOT", "BTC-USDT", DAY, WHOLE, written, everything(), NOW)
+    assert read_candles(tmp_path, "SPOT", "BTC-USDT", DAY) == written
+    assert record.rows == 3
+    assert read_record(tmp_path, "SPOT", "BTC-USDT", DAY) == record
+    target, record_path = paths(tmp_path, "SPOT", "BTC-USDT", DAY)
+    assert not list(target.parent.glob("*.tmp")), "no temporary file is left"
+    assert record_path.exists()
+
+
+def test_a_record_that_does_not_match_its_file_does_not_count(tmp_path: Path) -> None:
+    write_day(tmp_path, "SPOT", "BTC-USDT", DAY, WHOLE, [candle(0)], everything(), NOW)
+    target, _record = paths(tmp_path, "SPOT", "BTC-USDT", DAY)
+    target.write_bytes(target.read_bytes() + b"x")
+    assert read_record(tmp_path, "SPOT", "BTC-USDT", DAY) is None
+
+
+def test_a_closed_day_is_never_written_again(tmp_path: Path) -> None:
+    """The download is idempotent: a day that ended with every request answered is
+    closed, also without any candle (an empty correct answer, CD-14)."""
+    record = write_day(tmp_path, "SPOT", "BTC-USDT", DAY, WHOLE, [], everything(), NOW)
+    assert record.closed and record.rows == 0
+    with pytest.raises(FileExistsError, match="closed"):
+        write_day(tmp_path, "SPOT", "BTC-USDT", DAY, WHOLE, [candle(0)], everything(), NOW)
+
+
+def test_a_day_with_a_failed_request_or_not_over_stays_open(tmp_path: Path) -> None:
+    failed = [
+        Request(START, START + timedelta(minutes=99), True),
+        Request(START + timedelta(minutes=100), START + timedelta(minutes=1439), False),
+    ]
+    first = write_day(tmp_path, "SPOT", "BTC-USDT", DAY, WHOLE, [candle(0)], failed, NOW)
+    assert not first.closed
+    again = write_day(tmp_path, "SPOT", "BTC-USDT", DAY, WHOLE, [candle(0)], everything(), NOW)
+    assert again.closed, "a later download of the open day closes it"
+
+    partial = Window(START, START + timedelta(hours=10))
+    half = [Request(START, START + timedelta(hours=10) - timedelta(minutes=1), True)]
+    today = write_day(tmp_path, "FUTURES", "XBTUSDTM", DAY, partial, [], half, NOW)
+    assert not today.closed, "the window stops before the end of the day"
+
+
+def test_a_candle_outside_the_window_or_a_window_outside_the_day_is_refused(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValueError, match="outside the window"):
+        write_day(
+            tmp_path,
+            "SPOT",
+            "BTC-USDT",
+            DAY,
+            Window(START, START + timedelta(hours=1)),
+            [candle(61)],
+            everything(),
+            NOW,
+        )
+    with pytest.raises(ValueError, match="within the day"):
+        write_day(
+            tmp_path,
+            "SPOT",
+            "BTC-USDT",
+            DAY,
+            Window(START, START + timedelta(days=2)),
+            [],
+            everything(),
+            NOW,
+        )

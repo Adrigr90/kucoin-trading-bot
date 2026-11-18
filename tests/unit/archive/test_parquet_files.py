@@ -44,7 +44,8 @@ def test_a_file_read_back_holds_exactly_its_rows(tmp_path: Path) -> None:
     file = pq.ParquetFile(path)
     assert file.schema_arrow.metadata[b"kbot.table"] == b"t"
     assert file.metadata.row_group(0).column(0).compression == "ZSTD"
-    assert file.schema_arrow.field("price").type == pa.decimal128(38, 18)
+    assert file.schema_arrow.field("price").type == pa.decimal256(76, 24)
+    assert file.schema_arrow.metadata.get(b"kbot.format") is None, "the archiver adds it"
 
 
 def test_an_empty_day_is_a_file_with_its_columns_and_no_row(tmp_path: Path) -> None:
@@ -55,12 +56,41 @@ def test_an_empty_day_is_a_file_with_its_columns_and_no_row(tmp_path: Path) -> N
     assert pq.ParquetFile(path).schema_arrow.names == [c.name for c in COLUMNS]
 
 
-@pytest.mark.parametrize("value", ["1.0000000000000000001", "123456789012345678901"])
+@pytest.mark.parametrize(
+    "value",
+    ["1." + "0" * 24 + "1", "-0." + "0" * 24 + "1", "1" + "0" * 52, "-1" + "0" * 52],
+    ids=["25 decimals", "25 decimals, negative", "53 integer digits", "53, negative"],
+)
 def test_a_number_that_does_not_fit_is_refused_never_rounded(tmp_path: Path, value: str) -> None:
     with pytest.raises(pa.ArrowInvalid):
         parquet.write(
             tmp_path / "x.parquet", (Column("price", "numeric"),), [[(Decimal(value),)]], {}
         )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "7685.59829732743707761776",  # NEAR-USDT turnover, 17 Nov 12:25: 20 decimals
+        "31221.04204122215401008424",  # ZEC-USDT turnover, 17 Nov 18:01: 20 decimals
+        "33.65669128230540883166",  # its volume: 20 decimals
+        "7685.598297327437077617761",  # 21 decimals, as the WebSocket turnovers
+        "99999999999.12345678901234567890",  # 11 integer digits and 20 decimals
+        "0." + "0" * 23 + "1",  # 24 decimals, the most
+        "9" * 52 + "." + "9" * 24,  # 52 integer digits and 24 decimals, the largest
+        "-" + "9" * 52 + "." + "9" * 24,
+    ],
+)
+def test_the_real_decimals_of_kucoin_fit_exactly(tmp_path: Path, value: str) -> None:
+    """Format 2 (18 Nov 2026): the Spot volumes and turnovers KuCoin sends, with up to 21
+    decimals, that decimal128(38, 18) refused and would have stopped the archive of the
+    17th. They are read back exactly, with the same fingerprint."""
+    path = tmp_path / "x.parquet"
+    columns = (Column("turnover", "numeric"),)
+    written = parquet.write(path, columns, [[(Decimal(value),)]], {})
+    read = parquet.read_fingerprint(path, columns)
+    assert (read.rows, read.hexdigest()) == (1, written.hexdigest())
+    assert pq.read_table(path).column(0).to_pylist() == [Decimal(value)]
 
 
 def test_a_file_with_other_columns_is_refused(tmp_path: Path) -> None:

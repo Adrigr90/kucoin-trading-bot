@@ -1,9 +1,16 @@
 """Parquet files of the archive (spec 02 §3.9): exact types, zstd, written and read back.
 
-``numeric`` is ``decimal128(38, 18)``: a value that does not fit without losing digits makes
-the write fail (``pyarrow`` raises ``ArrowInvalid``), it is never rounded. Moments are UTC
-microseconds, and ``jsonb`` is stored as its JCS text, so the content fingerprint of the file
-read back is the same as that of the rows read from PostgreSQL.
+``numeric`` is ``decimal256(76, 24)``: up to 24 decimals and 52 integer digits. A value that
+does not fit without losing digits makes the write fail (``pyarrow`` raises
+``ArrowInvalid``), it is never rounded. Moments are UTC microseconds, and ``jsonb`` is stored
+as its JCS text, so the content fingerprint of the file read back is the same as that of the
+rows read from PostgreSQL.
+
+Format 2 (18 November 2026) widened ``numeric`` from the ``decimal128(38, 18)`` of format 1:
+KuCoin sends Spot volumes and turnovers with up to 21 decimals, measured in the recorder's
+data, which format 1 refused. With zstd, ``decimal256(76, 24)`` takes the same room as
+``decimal128(38, 24)``, whose 14 integer digits would leave little margin over the volumes
+seen (11). The files of both formats read back as the same exact decimals.
 """
 
 from __future__ import annotations
@@ -20,12 +27,12 @@ import pyarrow.parquet as pq
 
 from kbot.archive.canonical import Fingerprint
 
-FORMAT_VERSION = "1"
+FORMAT_VERSION = "2"
 COMPRESSION = "zstd"
 COMPRESSION_LEVEL = 3  # provisional until the measurement of point 66 (stage E3c)
 
 ARROW_TYPES: dict[str, pa.DataType] = {
-    "numeric": pa.decimal128(38, 18),
+    "numeric": pa.decimal256(76, 24),
     "timestamp with time zone": pa.timestamp("us", tz="UTC"),
     "text": pa.string(),
     "jsonb": pa.string(),

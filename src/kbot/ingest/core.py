@@ -293,6 +293,9 @@ class RecorderCore:
         self._instruments: dict[tuple[str, str], _Instrument] = {}
         self._retired: list[_Instrument] = []
         self._closed_gaps: list[DataGap] = []
+        # Gaps handed out by a tick and not yet known to be in the database (``written``):
+        # if that write fails, the stop writes them (review GR-01).
+        self._handed_out: list[DataGap] = []
         # Minutes waiting for their REST candle, per (market, symbol): kept apart from the
         # instruments, so they are decided even after their instrument left the universe.
         self._awaiting: dict[tuple[str, str], dict[datetime, _Awaiting]] = {}
@@ -513,6 +516,7 @@ class RecorderCore:
     def tick(self, now: datetime) -> TickOutput:
         now = as_utc(now, "now")
         out = TickOutput(gaps=self._closed_gaps, late_minutes=self._late_minutes)
+        self._handed_out += self._closed_gaps
         self._closed_gaps = []
         self._late_minutes = []
         for instrument in [*self._instruments.values(), *self._retired]:
@@ -525,6 +529,10 @@ class RecorderCore:
         self._retired = [i for i in self._retired if not i.finished()]
         return out
 
+    def written(self) -> None:
+        """Every tick so far is in the database: its gaps no longer wait for the stop."""
+        self._handed_out = []
+
     def stop(self, now: datetime) -> list[DataGap]:
         """The recorder stops at ``now``: the gaps it knows and has not written, so that
         nothing it could not record stays unexplained (incident of 17 November 2026, when a
@@ -532,7 +540,10 @@ class RecorderCore:
         that closed slots and minutes after a tick that could not be written would leave
         time without rows and without a gap.
 
-        * The gaps closed since the last tick, still unwritten.
+        * The gaps of the ticks not known to be written (``written``): a tick whose write
+          failed takes them with it otherwise (review GR-01). Writing one twice changes
+          nothing (``store.write_gap``).
+        * The gaps closed since the last tick.
         * A gap still open (its connection is down) closes at ``now`` with its own cause.
           The next start-up begins the gap of the stop where the gaps written cover its
           resume point up to (``gap_starts``), so after this one when it covers it.
@@ -542,7 +553,8 @@ class RecorderCore:
           ``proceso_detenido`` gap. The next start-up does not record it, so nobody else
           would explain that time."""
         now = as_utc(now, "now")
-        gaps, self._closed_gaps = self._closed_gaps, []
+        gaps = [*self._handed_out, *self._closed_gaps]
+        self._handed_out, self._closed_gaps = [], []
         for instrument in self._instruments.values():
             for tracker in instrument.gaps.values():
                 gap = tracker.up(now)  # closes the open gap, if any

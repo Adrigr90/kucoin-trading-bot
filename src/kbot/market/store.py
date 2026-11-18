@@ -400,19 +400,30 @@ def slot_states(
 
 
 def write_gap(conn: psycopg.Connection, gap: DataGap) -> None:
-    conn.execute(
-        "INSERT INTO market.data_gaps (market, channel, symbol, start_at, end_at, cause,"
-        " detail) VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
-        (
-            gap.market,
-            gap.channel,
-            gap.symbol,
-            gap.start_at,
-            gap.end_at,
-            gap.cause.value,
-            gap.detail,
-        ),
-    )
+    """Insert a gap without ever changing one already written.
+
+    If another gap of the channel already begins at the same moment (the primary key), the
+    new one is not lost: what that one does not cover is inserted from where it ends, and
+    again if that moment is taken too (review GR-04: a stop that wrote the time a retired
+    instrument never closed lost its tail this way). Writing the same gap twice changes
+    nothing."""
+    start = gap.start_at
+    while start < gap.end_at:
+        inserted = conn.execute(
+            "INSERT INTO market.data_gaps (market, channel, symbol, start_at, end_at, cause,"
+            " detail) VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING RETURNING end_at",
+            (gap.market, gap.channel, gap.symbol, start, gap.end_at, gap.cause.value, gap.detail),
+        ).fetchone()
+        if inserted is not None:
+            return
+        taken = conn.execute(
+            "SELECT end_at FROM market.data_gaps"
+            " WHERE market = %s AND channel = %s AND symbol = %s AND start_at = %s",
+            (gap.market, gap.channel, gap.symbol, start),
+        ).fetchone()
+        if taken is None:
+            return  # a connection that only records the statements (``--sink rows``)
+        start = max(start, taken[0])
 
 
 def write_universe(conn: psycopg.Connection, entries: Iterable[UniverseEntry]) -> None:

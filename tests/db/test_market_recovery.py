@@ -18,9 +18,10 @@ from typing import Any
 import psycopg
 import pytest
 
+from kbot.ingest.core import InstrumentSpec, RecorderCore, TickOutput
 from kbot.ingest.sinks import DatabaseSink
 from kbot.market.depth import DepthChannel
-from kbot.market.gaps import DataGap, GapCause, GapTracker
+from kbot.market.gaps import DataGap, GapCause, GapTracker, covered_until
 from kbot.market.store import (
     depth_channel_name,
     gaps_ending_after,
@@ -165,6 +166,72 @@ def test_the_start_up_begins_the_gap_of_a_stop_after_the_written_gaps_that_cover
         ("SPOT", symbol, "kline"): at(150),
         ("SPOT", symbol, "obu5"): None,
     }
+
+
+def test_a_stop_gap_whose_start_is_taken_keeps_its_tail(
+    ingest: psycopg.Connection, random_day: RandomDay
+) -> None:
+    """Review GR-04, against PostgreSQL as kbot_ingest. After a restart at 23:59:00, the
+    gap of the stop runs to 23:59:21; the instrument leaves the universe at midnight before
+    its minute 23:59 is closed, and the stop gives the time it never closed, from 23:59:00:
+    the same primary key. Its tail is written from 23:59:21, so every channel is covered
+    without a hole up to midnight, nothing written changes, and a rerun adds nothing."""
+    day = random_day()
+    midnight = day + timedelta(days=1)
+    minute = midnight - timedelta(minutes=1)
+    symbol = "T" + secrets.token_hex(5).upper() + "-USDT"
+    spec = InstrumentSpec("SPOT", symbol, Decimal("0.1"), Decimal(1), l50=False)
+    resume = {("SPOT", symbol, channel): minute for channel in spec.channels()}
+    recorder = RecorderCore([spec], started_at=minute + timedelta(seconds=10), resume=resume)
+    recorder.on_state("SPOT", "connected", minute + timedelta(seconds=21), "wss://...")
+    recorder.on_alive("SPOT", minute + timedelta(seconds=30))
+    sink = DatabaseSink(ingest)
+    sink.write_tick(recorder.tick(minute + timedelta(seconds=30)))
+    recorder.written()
+    assert recorder.apply_universe([], midnight)
+    stop = TickOutput(gaps=recorder.stop(midnight + timedelta(seconds=2)))
+    sink.write_tick(stop)
+    sink.write_tick(stop)
+
+    rows = ingest.execute(
+        "SELECT channel, start_at, end_at, cause FROM market.data_gaps"
+        " WHERE market = 'SPOT' AND symbol = %s ORDER BY channel, start_at",
+        (symbol,),
+    ).fetchall()
+    for channel in spec.channels():
+        spans = [(row[1], row[2]) for row in rows if row[0] == channel]
+        assert covered_until(minute, spans) == midnight, channel
+    later = minute + timedelta(seconds=21)
+    assert [(row[1], row[2], row[3]) for row in rows if row[0] == "trade"] == [
+        (minute, later, GapCause.PROCESO_DETENIDO.value),
+        (later, midnight, GapCause.PROCESO_DETENIDO.value),
+    ]
+
+
+def test_a_gap_whose_start_is_taken_again_and_again_keeps_its_tail(
+    ingest: psycopg.Connection,
+) -> None:
+    """Review GR-04: if the end of the gap that holds the start is taken too, the tail
+    begins after that one. A gap already covered adds nothing."""
+    symbol = "K" + secrets.token_hex(5).upper() + "-USDT"
+
+    def gap(start: float, end: float, cause: GapCause = GapCause.SIN_PONG) -> DataGap:
+        return DataGap("SPOT", "kline", symbol, at(start), at(end), cause, None)
+
+    write_gap(ingest, gap(0, 10))
+    write_gap(ingest, gap(10, 20))
+    write_gap(ingest, gap(0, 30, GapCause.PROCESO_DETENIDO))
+    write_gap(ingest, gap(0, 5))
+    rows = ingest.execute(
+        "SELECT start_at, end_at, cause FROM market.data_gaps"
+        " WHERE market = 'SPOT' AND symbol = %s ORDER BY start_at",
+        (symbol,),
+    ).fetchall()
+    assert rows == [
+        (at(0), at(10), "sin_pong"),
+        (at(10), at(20), "sin_pong"),
+        (at(20), at(30), "proceso_detenido"),
+    ]
 
 
 def test_a_late_book_is_kept_and_its_slots_count_as_late(ingest: psycopg.Connection) -> None:

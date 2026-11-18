@@ -342,6 +342,10 @@ def test_attempts_that_keep_failing_wait_longer_at_random_up_to_a_cap() -> None:
         delays = [reconnect_delay(failures, base=5, cap=60, rng=rng) for _ in range(200)]
         assert low <= min(delays) and max(delays) <= high, failures
         assert max(delays) - min(delays) > (high - low) / 2, "drawn at random"
+    # Review GR-02: with the real values, as floats, a long outage never overflows.
+    for failures in (1025, 10000, 10**9):
+        delays = [reconnect_delay(failures, base=5.0, cap=60.0, rng=rng) for _ in range(50)]
+        assert min(delays) >= 30.0 and max(delays) <= 60.0, failures
 
 
 @pytest.mark.parametrize(

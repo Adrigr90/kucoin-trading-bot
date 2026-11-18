@@ -60,9 +60,34 @@ Así que algo propio de Spot retrasa sus pongs. Una explicación posible es que 
    - una tarea que termina (`task_ended`);
    - lo escrito al pararse (`stop_recorded`).
 
+## Instalación y primeras medidas (18 nov 2026)
+
+**Instalada antes de su revisión, por decisión del propietario,** porque el código anterior podía volver a dejar Spot horas sin grabar.
+
+| Paso | Resultado |
+|---|---|
+| Etiqueta `v0.2.5-grabador` (`db5594f`) y `02_codigo.sh` | Correcto a las 11:03 UTC. No reinicia nada |
+| `systemctl restart svc-ingest` | Parado a las 11:03:31 y arrancado a las 11:03:53: **unos 27 s sin grabar**. Spot conectó a las 11:03:54 y Futures a las 11:03:59, los dos con la espera del pong de 10 s |
+| `04_verificar.sh` | «All checks passed.» |
+
+**En los 21 minutos siguientes, ningún corte**, frente a 2 de Spot en los 20 minutos anteriores.
+- **Pongs lentos:** 12 en Spot, de 1,1 a 6,4 s; 4 de ellos habrían sido cortes con la espera de 3 s. Ninguno en Futures.
+- **El retraso está en KuCoin, antes de enviar el pong.** Desde que KuCoin lo envía (su `ts`) hasta que llega pasan siempre unos 126 ms. Mientras tanto, desde el ping llegaron de 190 a 1.429 mensajes.
+- **No está en el grabador:** el pong se lee siempre unos 126 ms después de que KuCoin lo envía, así que no espera en una cola de mensajes por leer.
+
+## Revisión (18 nov 2026)
+
+El revisor la dio por **APROBABLE CON CORRECCIONES**. Ve adecuados el pong de 10 s, detener el grabador para que systemd lo vuelva a arrancar y la regla del hueco de la parada. Pidió cinco correcciones, ya hechas:
+
+- **GR-01:** la parada escribe también los huecos de un ciclo cuya escritura falló.
+- **GR-02:** la espera creciente nunca desborda.
+- **GR-03:** la vigilancia sigue cada segundo mientras un ciclo espera a REST o a la base de datos. El ciclo se cancela sin abandonar una escritura empezada, y la parada la espera.
+- **GR-04:** un hueco cuyo inicio ya ocupa otro conserva su cola.
+- **GR-05:** una parada pedida no se toma por un fallo.
+
 ## Lo que queda
 
 - **Una parada que no llega a escribir lo abierto sigue perdiendo el hueco abierto.** Pasa con un proceso matado (`SIGKILL`) o un corte de luz. Los minutos escritos con la conexión caída conservan sus filas S3, y los que no tienen vela quedan `sin_explicar`.
-- **No se sabe por qué KuCoin respondió HTTP 400.** No está documentado, y el código anterior no lo registraba.
-- **La espera del pong (10 s) es provisional** hasta medir los pongs lentos con el grabador corregido.
-- **Pendiente de revisión.** El despliegue (`02_codigo.sh` con la etiqueta nueva y el reinicio del grabador) lo decide el propietario.
+- **No se sabe por qué KuCoin respondió HTTP 400.** No está documentado, y el código anterior no lo registraba; ahora quedaría en el diario.
+- **La espera del pong (10 s) se sigue midiendo con más días.** En la primera media hora, el pong más lento tardó 6,4 s.
+- **Las correcciones de la revisión, pendientes de confirmar.** Su instalación necesita otra etiqueta.

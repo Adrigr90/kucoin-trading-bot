@@ -67,6 +67,8 @@ ACK_TIMEOUT_SECONDS = 10.0
 RECONNECT_DELAY_SECONDS = 5.0
 # Upper bound of the wait between attempts that keep failing; there are never fast retries.
 MAX_RECONNECT_DELAY_SECONDS = 60.0
+# 2**30 times the base wait is far beyond any upper bound: the doublings stop there.
+MAX_DOUBLINGS = 30
 # KuCoin closes every connection after 24 h; reconnecting earlier keeps the gap planned.
 MAX_SESSION_SECONDS = 23.5 * 3600
 
@@ -234,10 +236,12 @@ def reconnect_delay(failures: int, *, base: float, cap: float, rng: random.Rando
     that was connected, 1 after the first attempt that failed. Both wait ``base``. Each
     further failure doubles the upper bound, up to ``cap``, and the wait is drawn at random
     from the upper half of the range, as the REST backoff does
-    (``RestRateLimiter.overload``)."""
+    (``RestRateLimiter.overload``). The doublings stop counting at ``MAX_DOUBLINGS``, far
+    beyond any cap, so a long outage never overflows the power (review GR-02)."""
     if failures <= 1:
         return base
-    upper = max(base, min(cap, base * 2 ** (failures - 1)))
+    doublings = min(failures - 1, MAX_DOUBLINGS)
+    upper = max(base, min(cap, base * 2.0**doublings))
     return rng.uniform(max(base, upper / 2), upper)
 
 

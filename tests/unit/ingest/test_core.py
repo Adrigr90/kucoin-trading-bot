@@ -827,6 +827,28 @@ def test_a_stop_gives_the_gaps_it_knows_and_has_not_written() -> None:
     assert recorder.stop(at(111)) == [], "nothing is given twice"
 
 
+@pytest.mark.parametrize("confirmed", [False, True], ids=["write failed", "written"])
+def test_a_stop_gives_the_gaps_of_a_tick_not_known_to_be_written(confirmed: bool) -> None:
+    """Review GR-01: a disconnection from 10 to 100 s gives one gap per channel, handed out
+    by the next tick. Until the service knows that tick is in the database (``written``),
+    the stop gives them again, whole and with their cause; once it knows, never."""
+    recorder = core(SPOT)
+    connect(recorder, at(0))
+    recorder.on_state("SPOT", "disconnected", at(10), "ConnectionClosedError: no close frame")
+    recorder.on_state("SPOT", "connected", at(100), "wss://...")
+    expected = {(c, at(10), at(100), GapCause.DESCONEXION) for c in SPOT.channels()}
+    handed = tick(recorder, at(101)).gaps
+    assert {(g.channel, g.start_at, g.end_at, g.cause) for g in handed} == expected
+    if confirmed:
+        recorder.written()
+
+    gaps = recorder.stop(at(102))
+
+    assert {(g.channel, g.start_at, g.end_at, g.cause) for g in gaps} == (
+        set() if confirmed else expected
+    )
+
+
 def test_a_stop_explains_what_an_instrument_that_left_could_not_close() -> None:
     """Incident of 18 November 2026: the recorder stopped seconds after midnight, before
     the instruments that left the universe had closed their last minute, and nobody else

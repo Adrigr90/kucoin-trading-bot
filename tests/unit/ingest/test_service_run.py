@@ -14,6 +14,8 @@ the stream of each market does. These tests run on the real clock, for a few sec
 from __future__ import annotations
 
 import asyncio
+import threading
+import time
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -28,7 +30,9 @@ from kbot.ingest.sinks import MemorySink
 from kbot.kucoin.ratelimit import RestRateLimiter
 from kbot.kucoin.rest import KucoinRestClient
 from kbot.market.gaps import DataGap, GapCause
+from kbot.market.last_candles import KeptEvidence
 from tests.unit.ingest.fake_kucoin import FakeKucoin
+from tests.unit.ingest.messages import beat
 
 Factory = Callable[..., KucoinRestClient]
 SPOT_CHANNELS = {"obu5", "obu50", "trade", "kline"}  # BTC-USDT is a candidate of level 50
@@ -67,10 +71,39 @@ async def stays_up(stream: FakeStream, stop: asyncio.Event) -> None:
     await stop.wait()
 
 
+class TestSink(MemorySink):
+    """MemorySink whose tick writes can fail once or take long, as a database can, and
+    that notes whether two writes ever ran at the same time."""
+
+    __test__ = False
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail_next = False
+        self.slow = 0.0
+        self.active = 0
+        self.overlapped = False
+        self._lock = threading.Lock()
+
+    def write_tick(self, output: TickOutput) -> list[KeptEvidence]:
+        with self._lock:
+            self.active += 1
+            self.overlapped = self.overlapped or self.active > 1
+        try:
+            time.sleep(self.slow)
+            if self.fail_next:
+                self.fail_next = False
+                raise OSError("the connection was lost (simulated)")
+            return super().write_tick(output)
+        finally:
+            with self._lock:
+                self.active -= 1
+
+
 @pytest.fixture
-def recorder(test_client: Factory) -> tuple[Recorder, MemorySink]:
+def recorder(test_client: Factory) -> tuple[Recorder, TestSink]:
     fake = FakeKucoin(spot=["BTC-USDT"], futures=["XBTUSDTM"])
-    sink = MemorySink()
+    sink = TestSink()
     budget = RestRateLimiter(pool_weight=10**6)  # tests never wait for the real budget
     return Recorder(sink, rest=test_client(fake, budget)), sink
 
@@ -231,3 +264,127 @@ def test_a_watchdog_that_ended_stops_the_recorder_too() -> None:
         _supervise([], asyncio.create_task(asyncio.sleep(10)))  # all running: nothing
 
     asyncio.run(go())
+
+
+def test_a_stop_writes_the_gaps_of_a_tick_that_could_not_be_written(
+    recorder: tuple[Recorder, TestSink],
+) -> None:
+    """Review GR-01: a disconnection from 10 to 100 s gives one gap per channel. The tick
+    that hands them out cannot be written (a transient failure), so the recorder stops; the
+    stop writes them whole, with their cause, and closes nothing."""
+    rec, sink = recorder
+    start = datetime(2026, 11, 18, 12, 0, tzinfo=UTC)
+
+    def at(seconds: float) -> datetime:
+        return start + timedelta(seconds=seconds)
+
+    async def go() -> None:
+        await rec.startup(at(0))
+        core = rec.core
+        assert core is not None
+        for market in ("SPOT", "FUTURES"):
+            core.on_state(market, "connected", at(1), "wss://...")
+        await beat(rec, at(5))
+        core.on_state("SPOT", "disconnected", at(10), NO_PONG)
+        core.on_state("SPOT", "connected", at(100), "wss://...")
+        sink.fail_next = True
+        with pytest.raises(OSError, match="simulated"):
+            await beat(rec, at(101))
+        await rec._record_stop(at(102))
+        assert rec._rest is not None
+        await rec._rest.aclose()
+
+    asyncio.run(go())
+    stop_write = sink.ticks[-1]
+    assert {(g.market, g.channel, g.start_at, g.end_at, g.cause) for g in stop_write.gaps} == {
+        ("SPOT", channel, at(10), at(100), GapCause.SIN_PONG) for channel in SPOT_CHANNELS
+    }
+    assert not (stop_write.flows or stop_write.slots), "only gaps"
+
+
+def slow_steps(rec: Recorder, monkeypatch: pytest.MonkeyPatch, cancelled: list[datetime]) -> None:
+    """Every step does its work and then waits a minute, as a REST call that hangs."""
+    real_step = rec.step
+
+    async def step(now: datetime) -> None:
+        await real_step(now)
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            cancelled.append(now)
+            raise
+
+    monkeypatch.setattr(rec, "step", step)
+
+
+def test_a_stream_that_ends_during_a_long_step_is_caught_at_once(
+    recorder: tuple[Recorder, TestSink], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review GR-03: the streams are checked every second also while a step waits, so a
+    stream that ends then stops the recorder without waiting for the step, which is
+    cancelled at its wait."""
+    rec, _sink = recorder
+    cancelled: list[datetime] = []
+    slow_steps(rec, monkeypatch, cancelled)
+
+    async def fails(stream: FakeStream, _stop: asyncio.Event) -> None:
+        stream.report("connected")
+        await asyncio.sleep(0.3)
+        raise KeyError("an unexpected failure")
+
+    scripted(monkeypatch, {"SPOT": fails, "FUTURES": stays_up})
+    started = time.monotonic()
+    with capture_logs() as logs, pytest.raises(TaskEnded, match="stream SPOT ended by itself"):
+        asyncio.run(asyncio.wait_for(rec.run(asyncio.Event()), timeout=30))
+    assert time.monotonic() - started < 10, "not after the step's minute"
+    assert len(cancelled) == 1, "the step was cancelled at its wait"
+    assert [e["task"] for e in logs if e["event"] == "task_ended"] == ["stream SPOT"]
+
+
+def test_the_stop_waits_for_the_database_call_of_a_cancelled_step(
+    recorder: tuple[Recorder, TestSink], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review GR-03: the step is cancelled while its write runs (1.5 s). The write is not
+    abandoned, and the stop writes only after it ends: never two calls at once on the
+    connection. The gap still open is written."""
+    rec, sink = recorder
+    sink.slow = 1.5
+    down: list[datetime] = []
+
+    async def fails(stream: FakeStream, _stop: asyncio.Event) -> None:
+        stream.report("connected")
+        down.append(stream.report("disconnected", NO_PONG))
+        await asyncio.sleep(0.3)
+        raise KeyError("an unexpected failure")
+
+    scripted(monkeypatch, {"SPOT": fails, "FUTURES": stays_up})
+    with pytest.raises(TaskEnded):
+        asyncio.run(asyncio.wait_for(rec.run(asyncio.Event()), timeout=30))
+    assert not sink.overlapped, "the stop waited for the write of the cancelled step"
+    stop_gaps = [g for g in sink.ticks[-1].gaps if g.cause is GapCause.SIN_PONG]
+    assert {g.channel for g in stop_gaps} == SPOT_CHANNELS
+    assert {g.start_at for g in stop_gaps} == set(down)
+
+
+def test_a_stop_asked_for_during_a_step_ends_normally(
+    recorder: tuple[Recorder, TestSink], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review GR-05: a stop asked for while a step waits ends the watchdog with it, which
+    is no failure. The recorder stops at once and normally, without ``task_ended``."""
+    rec, _sink = recorder
+    cancelled: list[datetime] = []
+    slow_steps(rec, monkeypatch, cancelled)
+    scripted(monkeypatch, {"SPOT": stays_up, "FUTURES": stays_up})
+
+    async def go() -> None:
+        stop = asyncio.Event()
+        asyncio.get_running_loop().call_later(1.5, stop.set)
+        await rec.run(stop)
+
+    started = time.monotonic()
+    with capture_logs() as logs:
+        asyncio.run(asyncio.wait_for(go(), timeout=30))
+    assert time.monotonic() - started < 10
+    assert len(cancelled) == 1
+    assert not [e for e in logs if e["event"] == "task_ended"]
+    assert [e["event"] for e in logs if e["event"] == "recorder_stopped"] == ["recorder_stopped"]

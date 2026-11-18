@@ -1,16 +1,17 @@
 """Parquet files of the archive (spec 02 §3.9): exact types, zstd, written and read back.
 
-``numeric`` is ``decimal256(76, 24)``: up to 24 decimals and 52 integer digits. A value that
+``numeric`` is ``decimal128(38, 24)``: up to 24 decimals and 14 integer digits. A value that
 does not fit without losing digits makes the write fail (``pyarrow`` raises
 ``ArrowInvalid``), it is never rounded. Moments are UTC microseconds, and ``jsonb`` is stored
 as its JCS text, so the content fingerprint of the file read back is the same as that of the
 rows read from PostgreSQL.
 
-Format 2 (18 November 2026) widened ``numeric`` from the ``decimal128(38, 18)`` of format 1:
+Format 2 (18 November 2026) widened the decimals from the ``decimal128(38, 18)`` of format 1:
 KuCoin sends Spot volumes and turnovers with up to 21 decimals, measured in the recorder's
-data, which format 1 refused. With zstd, ``decimal256(76, 24)`` takes the same room as
-``decimal128(38, 24)``, whose 14 integer digits would leave little margin over the volumes
-seen (11). The files of both formats read back as the same exact decimals.
+data (and up to 11 integer digits), which format 1 refused. It stays within a precision of 38
+because DuckDB, the reader of the archive, turns a wider decimal into a ``DOUBLE`` without
+an error and loses its digits (review DC-01); ``check_duckdb`` refuses such a reading before
+anything is computed. The files of both formats read back as the same exact decimals.
 """
 
 from __future__ import annotations
@@ -32,7 +33,7 @@ COMPRESSION = "zstd"
 COMPRESSION_LEVEL = 3  # provisional until the measurement of point 66 (stage E3c)
 
 ARROW_TYPES: dict[str, pa.DataType] = {
-    "numeric": pa.decimal256(76, 24),
+    "numeric": pa.decimal128(38, 24),
     "timestamp with time zone": pa.timestamp("us", tz="UTC"),
     "text": pa.string(),
     "jsonb": pa.string(),
@@ -106,6 +107,52 @@ def read_fingerprint(path: Path, columns: Sequence[Column]) -> Fingerprint:
         for row in zip(*columns_data, strict=True):
             fingerprint.add(row)
     return fingerprint
+
+
+def check_duckdb(connection: Any, paths: Iterable[str | Path]) -> None:
+    """Before computing with Parquet files in DuckDB: every decimal they hold, also inside
+    lists and structs, must reach it as the same decimal (review DC-01). DuckDB 2.0 reads a
+    precision over 38 as a ``DOUBLE``, without an error, and the digits are lost; a later
+    ``CAST`` does not bring them back. Otherwise this raises ``ValueError`` and nothing is
+    computed. ``connection`` is a DuckDB connection; DuckDB is a development dependency, the
+    server never reads the archive with it."""
+    for name in dict.fromkeys(str(p) for p in paths):
+        relation = connection.sql("SELECT * FROM read_parquet(?)", params=[name])
+        seen = _leaves(relation.limit(0).to_arrow_table().schema)
+        lost = [
+            f"{place} is {kind} in the file and {seen.get(place)} in DuckDB"
+            for place, kind in _leaves(pq.read_schema(name)).items()
+            if pa.types.is_decimal(kind) and seen.get(place) != kind
+        ]
+        if lost:
+            raise ValueError(f"{name}: {'; '.join(lost)}, its digits would be lost")
+
+
+_LISTS = (
+    pa.types.is_list,
+    pa.types.is_large_list,
+    pa.types.is_fixed_size_list,
+    pa.types.is_list_view,
+    pa.types.is_large_list_view,
+)
+
+
+def _leaves(schema: pa.Schema) -> dict[str, pa.DataType]:
+    """The type of every value of a schema by its place: a column, a field of a struct
+    (``column.field``) or the items of a list of any kind (``column[]``), whatever name the
+    writer gave them (``item`` in ``pyarrow``, ``l`` in DuckDB)."""
+    leaves: dict[str, pa.DataType] = {}
+    pending = [(field.name, field.type) for field in schema]
+    while pending:
+        place, kind = pending.pop()
+        if pa.types.is_struct(kind):
+            fields = [kind.field(i) for i in range(kind.num_fields)]
+            pending += [(f"{place}.{field.name}", field.type) for field in fields]
+        elif any(is_list(kind) for is_list in _LISTS):
+            pending.append((f"{place}[]", kind.value_type))
+        else:
+            leaves[place] = kind
+    return leaves
 
 
 def sha256(path: Path) -> str:

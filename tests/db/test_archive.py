@@ -11,9 +11,12 @@ from __future__ import annotations
 import errno
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 
+import duckdb
 import psycopg
+import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
@@ -33,9 +36,14 @@ def midnight(day: date) -> datetime:
 
 
 def sealed_day(
-    connect: Connect, partitions: Partitions, day: date, bids: str = '[["100", "2"]]'
+    connect: Connect,
+    partitions: Partitions,
+    day: date,
+    bids: str = '[["100", "2"]]',
+    notional: tuple[str, str] = ("200", "303"),
 ) -> None:
-    """A closed day (no trade minute, no universe) with rows in four of its tables, sealed."""
+    """A closed day (no trade minute, no universe) with rows in four of its tables, sealed.
+    ``notional`` is the visible notional of the bids and of the asks of its metrics."""
     partitions(day, day)
     start = midnight(day)
     with connect("kbot_ingest") as ingest:
@@ -50,9 +58,9 @@ def sealed_day(
             " best_ask, mid, spread, bid_levels, ask_levels, bid_quantity, ask_quantity,"
             " bid_notional, ask_notional, bid_notional_10bps, ask_notional_10bps,"
             " bid_notional_50bps, ask_notional_50bps, bid_deepest_price, ask_deepest_price)"
-            " VALUES ('SPOT', %s, 5, %s, 100, 101, 100.5, 1, 1, 1, 2, 3, 200, 303,"
+            " VALUES ('SPOT', %s, 5, %s, 100, 101, 100.5, 1, 1, 1, 2, 3, %s, %s,"
             " 0, 0, 0, 0, 100, 101)",
-            (SYMBOL, start),
+            (SYMBOL, start, *map(Decimal, notional)),
         )
         ingest.execute(
             "INSERT INTO market.depth_snapshots (market, symbol, depth, minute_start, slot_start,"
@@ -213,6 +221,49 @@ def test_a_json_null_is_archived_as_json_null_and_never_as_a_missing_value(
     ((generation, _state),) = generations(connect, day)
     path = tmp_path / "market" / day.isoformat() / f"g{generation}" / "depth_snapshots.parquet"
     assert pq.read_table(path).column("bids").to_pylist() == ["null"]
+
+
+NEAR_TURNOVER = "7685.59829732743707761776"  # NEAR-USDT, 17 Nov 2026 12:25: 20 decimals
+SMALLEST_STEP = "1.000000000000000000000001"  # 24 decimals: 1.0 if read as a DOUBLE
+
+
+def test_the_real_decimals_of_kucoin_are_archived_and_duckdb_reads_them_exactly(
+    connect: Connect, partitions: Partitions, tmp_path: Path
+) -> None:
+    """Review DC-01, from PostgreSQL to the reader: format 2 archives what format 1 refused,
+    and DuckDB reads every file of the generation with each decimal as DECIMAL(38,24) and
+    all its digits."""
+    day = date(2018, 1, 10)
+    sealed_day(connect, partitions, day, notional=(NEAR_TURNOVER, SMALLEST_STEP))
+    generation = archiver.archive_day(lambda: connect("kbot_archive"), tmp_path, day)
+    folder = tmp_path / "market" / day.isoformat() / f"g{generation}"
+    query = "SELECT bid_notional, ask_notional, typeof(bid_notional) FROM read_parquet(?)"
+    with duckdb.connect() as reader:
+        parquet.check_duckdb(reader, sorted(folder.glob("*.parquet")))
+        rows = reader.sql(query, params=[str(folder / "depth_metrics.parquet")]).fetchall()
+    assert rows == [(Decimal(NEAR_TURNOVER), Decimal(SMALLEST_STEP), "DECIMAL(38,24)")]
+
+
+def test_a_value_that_does_not_fit_stops_the_day_before_publishing(
+    connect: Connect, partitions: Partitions, tmp_path: Path
+) -> None:
+    """Review DC-01: 25 decimals do not fit in format 2. The write fails and never rounds:
+    no generation is published, the row stays exact in the database, and every run fails
+    the same way until the format changes."""
+    day = date(2018, 2, 10)
+    wider = "1." + "0" * 24 + "1"
+    sealed_day(connect, partitions, day, notional=(wider, "303"))
+    for _ in range(2):
+        with pytest.raises(pa.ArrowInvalid):
+            archiver.archive_day(lambda: connect("kbot_archive"), tmp_path, day)
+    assert generations(connect, day) == []
+    with connect("kbot_archive") as archive:
+        rows = archive.execute(
+            "SELECT bid_notional FROM market.depth_metrics WHERE symbol = %s"
+            " AND slot_start >= %s AND slot_start < %s",
+            (SYMBOL, midnight(day), midnight(day) + timedelta(days=1)),
+        ).fetchall()
+    assert rows == [(Decimal(wider),)]
 
 
 def test_an_archive_root_that_does_not_exist_is_refused_before_anything(

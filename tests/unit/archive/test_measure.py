@@ -8,6 +8,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
@@ -107,6 +108,43 @@ def test_books_become_typed_lists_of_exact_decimals() -> None:
     assert typed.column("asks").to_pylist() == [
         [{"price": Decimal("73759.7"), "size": Decimal("1.46028203")}]
     ]
+
+
+def test_the_queries_refuse_files_duckdb_would_read_with_lost_digits(tmp_path: Path) -> None:
+    """Review DC-01: the files are checked before the first query, so nothing is computed
+    from a decimal DuckDB would read as a DOUBLE."""
+    for folder in ("zstd3/depth_metrics", "zstd3/depth_snapshots", "zstd3_typed/depth_snapshots"):
+        (tmp_path / folder).mkdir(parents=True)
+    mid = pa.array([Decimal("100.5")], pa.decimal256(76, 24))
+    pq.write_table(pa.table({"mid": mid}), tmp_path / "zstd3" / "depth_metrics" / "d.parquet")
+    with pytest.raises(ValueError, match="mid is decimal256"):
+        measure_archive.queries(tmp_path, "BTC-USDT", 1)
+
+
+@pytest.mark.parametrize(
+    ("size", "fits"),
+    [
+        ("1.000000000000000000000001", True),  # 24 decimals
+        ("12345678901234.5", True),  # 14 integer digits
+        ("1.0000000000000000000000009", False),  # DuckDB would cast it to ...001
+        ("123456789012345", False),
+        ("1e-8", False),
+    ],
+)
+def test_the_first_bid_size_from_the_jcs_text_is_never_rounded(
+    tmp_path: Path, size: str, fits: bool
+) -> None:
+    """Review DC-01: DuckDB rounds a text with more decimals than the scale when it casts
+    it, without an error. The query casts only a plain decimal that fits the format, and
+    fails on anything else; an empty book is no size."""
+    path = tmp_path / "s.parquet"
+    pq.write_table(pa.table({"bids": [f'[["100","{size}"]]', "[]"]}), path)
+    query = duckdb.connect().sql(measure_archive.FIRST_BID_TEXT, params=[[str(path)]])
+    if fits:  # avg is a DOUBLE, as the measurement computes it
+        assert query.fetchall() == [(pytest.approx(float(Decimal(size))),)]
+    else:
+        with pytest.raises(duckdb.InvalidInputException, match="not a decimal of the archive"):
+            query.fetchall()
 
 
 def test_minute_statuses_follow_the_trade_flows() -> None:

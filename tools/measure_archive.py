@@ -7,7 +7,8 @@ one per table and UTC day, with the columns, types and primary key order of migr
 in the format of ``kbot.archive.parquet`` (row groups of ``BATCH`` rows). Per table it
 measures the bytes without compression and with zstd 3 and 9, and for ``depth_snapshots``
 also with each book as a typed list instead of its JCS text. Then it times typical queries
-with DuckDB, over the recorded minutes and over copies of them that make 90 days.
+with DuckDB, over the recorded minutes and over copies of them that make 90 days, once it has
+checked that DuckDB reads every decimal of the files as the same decimal (review DC-01).
 
 What the recording does not hold is made up, close to its real value:
 - ``recorded_at``, the moment of the insert, which only PostgreSQL sets: the partition key
@@ -48,7 +49,7 @@ from pglast.enums import ConstrType
 
 from kbot.archive.archiver import BATCH, TABLES
 from kbot.archive.canonical import json_text
-from kbot.archive.parquet import ARROW_TYPES
+from kbot.archive.parquet import ARROW_TYPES, check_duckdb
 from kbot.ingest.rows import PROGRESS
 
 MIGRATION = Path(__file__).resolve().parents[1] / "migrations" / "versions" / "0003_particiones.sql"
@@ -73,7 +74,8 @@ SQL_TYPES = {
     "jsonb": "jsonb",
     "date": "date",
 }
-BOOK_LEVEL = pa.struct([("price", pa.decimal128(38, 18)), ("size", pa.decimal128(38, 18))])
+NUMERIC = ARROW_TYPES["numeric"]
+BOOK_LEVEL = pa.struct([("price", NUMERIC), ("size", NUMERIC)])
 
 # Bytes per row in PostgreSQL 18 (heap, TOAST, indexes), measured in the CI by
 # tests/db/test_storage_scale.py on 11 Nov 2026 (commit dafe12c), with an hour of a realistic
@@ -392,8 +394,15 @@ SERIES = (
 UNIVERSE = (
     "SELECT market, symbol, depth, count(*), avg(spread / mid) FROM read_parquet(?) GROUP BY ALL"
 )
+# DuckDB rounds a text with more decimals than the scale when it casts it, without an error
+# (review DC-01): the size is cast only if it is a plain decimal that fits the format. The
+# query takes nothing from outside but the digits of the format's decimal type.
+SIZE_FITS = f"-?[0-9]{{1,{NUMERIC.precision - NUMERIC.scale}}}([.][0-9]{{1,{NUMERIC.scale}}})?"
 FIRST_BID_TEXT = (
-    "SELECT avg(CAST(json_extract_string(bids, '$[0][1]') AS DECIMAL(38, 18))) FROM read_parquet(?)"
+    f"SELECT avg(CASE WHEN size IS NULL THEN NULL WHEN regexp_full_match(size, '{SIZE_FITS}')"  # noqa: S608
+    f" THEN CAST(size AS DECIMAL({NUMERIC.precision}, {NUMERIC.scale}))"
+    " ELSE error('not a decimal of the archive: ' || size) END)"
+    " FROM (SELECT json_extract_string(bids, '$[0][1]') AS size FROM read_parquet(?))"
 )
 FIRST_BID_TYPED = "SELECT avg(bids[1].size) FROM read_parquet(?)"
 
@@ -421,22 +430,21 @@ def queries(out: Path, symbol: str, minutes: int) -> dict[str, tuple[float, floa
         return [str(p) for p in sorted((out / folder / table).glob("*.parquet"))]
 
     metrics = files("zstd3", "depth_metrics")
+    snapshots = files("zstd3", "depth_snapshots")
+    typed = files("zstd3_typed", "depth_snapshots")
     copies = math.ceil(QUERY_DAYS * MINUTES_PER_DAY / minutes)
     # A synthetic test: the same files read again and again. The rows are those of so many
     # days, but not their files, their cache or their disk (review of E3c).
     days = f"{QUERY_DAYS} days as {copies} repetitions of the same files"
     connection = duckdb.connect()
+    check_duckdb(connection, [*metrics, *snapshots, *typed])  # before any query: DC-01
     return {
         "series, recorded": timed(connection, SERIES, metrics, symbol),
         "universe, recorded": timed(connection, UNIVERSE, metrics),
         f"series, {days}": timed(connection, SERIES, metrics * copies, symbol),
         f"universe, {days}": timed(connection, UNIVERSE, metrics * copies),
-        "first bid size, JCS text": timed(
-            connection, FIRST_BID_TEXT, files("zstd3", "depth_snapshots")
-        ),
-        "first bid size, typed lists": timed(
-            connection, FIRST_BID_TYPED, files("zstd3_typed", "depth_snapshots")
-        ),
+        "first bid size, JCS text": timed(connection, FIRST_BID_TEXT, snapshots),
+        "first bid size, typed lists": timed(connection, FIRST_BID_TYPED, typed),
     }
 
 

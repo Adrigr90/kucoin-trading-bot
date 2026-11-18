@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import errno
 import os
+import re
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 
+import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
@@ -44,7 +46,7 @@ def test_a_file_read_back_holds_exactly_its_rows(tmp_path: Path) -> None:
     file = pq.ParquetFile(path)
     assert file.schema_arrow.metadata[b"kbot.table"] == b"t"
     assert file.metadata.row_group(0).column(0).compression == "ZSTD"
-    assert file.schema_arrow.field("price").type == pa.decimal256(76, 24)
+    assert file.schema_arrow.field("price").type == pa.decimal128(38, 24)
     assert file.schema_arrow.metadata.get(b"kbot.format") is None, "the archiver adds it"
 
 
@@ -58,29 +60,32 @@ def test_an_empty_day_is_a_file_with_its_columns_and_no_row(tmp_path: Path) -> N
 
 @pytest.mark.parametrize(
     "value",
-    ["1." + "0" * 24 + "1", "-0." + "0" * 24 + "1", "1" + "0" * 52, "-1" + "0" * 52],
-    ids=["25 decimals", "25 decimals, negative", "53 integer digits", "53, negative"],
+    ["1." + "0" * 24 + "1", "-0." + "0" * 24 + "1", "1" + "0" * 14, "-1" + "0" * 14],
+    ids=["25 decimals", "25 decimals, negative", "15 integer digits", "15, negative"],
 )
 def test_a_number_that_does_not_fit_is_refused_never_rounded(tmp_path: Path, value: str) -> None:
+    """Beyond 24 decimals or 14 integer digits the write fails before any reader can
+    compute with the value: nothing is rounded and nothing is written."""
+    path = tmp_path / "x.parquet"
     with pytest.raises(pa.ArrowInvalid):
-        parquet.write(
-            tmp_path / "x.parquet", (Column("price", "numeric"),), [[(Decimal(value),)]], {}
-        )
+        parquet.write(path, (Column("price", "numeric"),), [[(Decimal(value),)]], {})
 
 
-@pytest.mark.parametrize(
-    "value",
-    [
-        "7685.59829732743707761776",  # NEAR-USDT turnover, 17 Nov 12:25: 20 decimals
-        "31221.04204122215401008424",  # ZEC-USDT turnover, 17 Nov 18:01: 20 decimals
-        "33.65669128230540883166",  # its volume: 20 decimals
-        "7685.598297327437077617761",  # 21 decimals, as the WebSocket turnovers
-        "99999999999.12345678901234567890",  # 11 integer digits and 20 decimals
-        "0." + "0" * 23 + "1",  # 24 decimals, the most
-        "9" * 52 + "." + "9" * 24,  # 52 integer digits and 24 decimals, the largest
-        "-" + "9" * 52 + "." + "9" * 24,
-    ],
-)
+# What KuCoin sends that decimal128(38, 18) refused, and the limits of the format.
+REAL_AND_LIMITS = [
+    "7685.59829732743707761776",  # NEAR-USDT turnover, 17 Nov 12:25: 20 decimals
+    "31221.04204122215401008424",  # ZEC-USDT turnover, 17 Nov 18:01: 20 decimals
+    "33.65669128230540883166",  # its volume: 20 decimals
+    "7685.598297327437077617761",  # 21 decimals, as the WebSocket turnovers
+    "99999999999.12345678901234567890",  # 11 integer digits and 20 decimals
+    "1.000000000000000000000001",  # DuckDB read it as 1.0 from decimal256 (DC-01)
+    "0." + "0" * 23 + "1",  # 24 decimals, the most
+    "9" * 14 + "." + "9" * 24,  # 14 integer digits and 24 decimals, the largest
+    "-" + "9" * 14 + "." + "9" * 24,
+]
+
+
+@pytest.mark.parametrize("value", REAL_AND_LIMITS)
 def test_the_real_decimals_of_kucoin_fit_exactly(tmp_path: Path, value: str) -> None:
     """Format 2 (18 Nov 2026): the Spot volumes and turnovers KuCoin sends, with up to 21
     decimals, that decimal128(38, 18) refused and would have stopped the archive of the
@@ -91,6 +96,49 @@ def test_the_real_decimals_of_kucoin_fit_exactly(tmp_path: Path, value: str) -> 
     read = parquet.read_fingerprint(path, columns)
     assert (read.rows, read.hexdigest()) == (1, written.hexdigest())
     assert pq.read_table(path).column(0).to_pylist() == [Decimal(value)]
+
+
+def test_duckdb_reads_the_decimals_exactly(tmp_path: Path) -> None:
+    """Review DC-01: DuckDB, the reader of the archive, must see a decimal and the exact
+    values. A precision over 38 (decimal256) it reads as a DOUBLE, without an error, and
+    7685.59829732743707761776 comes back as 7685.598297327437."""
+    path = tmp_path / "x.parquet"
+    columns = (Column("turnover", "numeric"),)
+    parquet.write(path, columns, [[(Decimal(v),) for v in REAL_AND_LIMITS]], {})
+    query = "SELECT turnover, typeof(turnover) FROM read_parquet(?)"
+    with duckdb.connect() as conn:
+        parquet.check_duckdb(conn, [path])
+        rows = conn.sql(query, params=[str(path)]).fetchall()
+    assert [kind for _, kind in rows] == ["DECIMAL(38,24)"] * len(REAL_AND_LIMITS)
+    assert [value for value, _ in rows] == [Decimal(v) for v in REAL_AND_LIMITS]
+
+
+@pytest.mark.parametrize("nested", [False, True], ids=["column", "in a list of structs"])
+def test_a_reading_that_would_lose_digits_is_refused_before_computing(
+    tmp_path: Path, nested: bool
+) -> None:
+    """Review DC-01: a decimal wider than 38 digits reaches DuckDB as a DOUBLE, also inside a
+    list of structs (as the typed books of the measurement), and 1.000000000000000000000001
+    would be 1.0. The check refuses the files before any query; the decimals of formats 1
+    and 2 pass it."""
+    value = Decimal("7685.598297327437077617")  # fits in format 1 too
+
+    def file(name: str, kind: pa.DataType) -> Path:
+        level = pa.list_(pa.struct([("price", kind)]))
+        column = pa.array([[{"price": value}]], level) if nested else pa.array([value], kind)
+        path = tmp_path / f"{name}.parquet"
+        pq.write_table(pa.table({"turnover": column}), path)
+        return path
+
+    formats = [file("format_1", pa.decimal128(38, 18)), file("format_2", pa.decimal128(38, 24))]
+    wide = file("wide", pa.decimal256(76, 24))
+    place = "turnover[].price" if nested else "turnover"
+    with duckdb.connect() as conn:
+        parquet.check_duckdb(conn, formats)
+        with pytest.raises(
+            ValueError, match=rf"wide\.parquet: {re.escape(place)} is decimal256.*double"
+        ):
+            parquet.check_duckdb(conn, [*formats, wide])
 
 
 def test_a_file_with_other_columns_is_refused(tmp_path: Path) -> None:

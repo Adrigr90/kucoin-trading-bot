@@ -1,0 +1,291 @@
+{
+ "formato": "kbot.history universo 1",
+ "fecha": "2026-11-18",
+ "origen": "market.universe_snapshots del grabador: la evaluación que rige desde el 2026-11-18 00:00 UTC (20 de Spot y 20 de Futures), con la primera vez que el grabador vio cotizar cada instrumento (market.instruments, que solo guarda cambios).",
+ "instrumentos": [
+  {
+   "mercado": "SPOT",
+   "simbolo": "BTC-USDT",
+   "rango": 1,
+   "nivel_50": true,
+   "cotizando_desde": "2026-11-17T10:56:05+00:00"
+  },
+  {
+   "mercado": "SPOT",
+   "simbolo": "ETH-USDT",
+   "rango": 2,
+   "nivel_50": true,
+   "cotizando_desde": "2026-11-17T10:56:05+00:00"
+  },
+  {
+   "mercado": "SPOT",
+   "simbolo": "XRP-USDT",
+   "rango": 3,
+   "nivel_50": true,
+   "cotizando_desde": "2026-11-17T10:56:05+00:00"
+  },
+  {
+   "mercado": "SPOT",
+   "simbolo": "XLM-USDT",
+   "rango": 4,
+   "nivel_50": true,
+   "cotizando_desde": "2026-11-17T10:56:05+00:00"
+  },
+  {
+   "mercado": "SPOT",
+   "simbolo": "XMR-USDT",
+   "rango": 5,
+   "nivel_50": true,
+   "cotizando_desde": "2026-11-17T10:56:05+00:00"
+  },
+  {
+   "mercado": "SPOT",
+   "simbolo": "SOL-USDT",
+   "rango": 6,
+   "nivel_50": true,
+   "cotizando_desde": "2026-11-17T10:56:05+00:00"
+  },
+  {
+   "mercado": "SPOT",
+   "simbolo": "ZEC-USDT",
+   "rango": 7,
+   "nivel_50": true,
+   "cotizando_desde": "2026-11-17T10:56:05+00:00"
+  },
+  {
+   "mercado": "SPOT",
+   "simbolo": "ASTER-USDT",
+   "rango": 8,
+   "nivel_50": true,
+   "cotizando_desde": "2026-11-17T10:56:05+00:00"
+  },
+  {
+   "mercado": "SPOT",
+   "simbolo": "PEPE-USDT",
+   "rango": 9,
+   "nivel_50": true,
+   "cotizando_desde": "2026-11-17T10:56:05+00:00"
+  },
+  {
+   "mercado": "SPOT",
+   "simbolo": "EVAA-USDT",
+   "rango": 10,
+   "nivel_50": true,
+   "cotizando_desde": "2026-11-17T10:56:05+00:00"
+  },
+  {
+   "mercado": "SPOT",
+   "simbolo": "NEAR-USDT",
+   "rango": 11,
+   "nivel_50": false,
+   "cotizando_desde": "2026-11-17T10:56:05+00:00"
+  },
+  {
+   "mercado": "SPOT",
+   "simbolo": "TAO-USDT",
+   "rango": 12,
+   "nivel_50": false,
+   "cotizando_desde": "2026-11-17T10:56:05+00:00"
+  },
+  {
+   "mercado": "SPOT",
+   "simbolo": "LTC-USDT",
+   "rango": 13,
+   "nivel_50": false,
+   "cotizando_desde": "2026-11-17T10:56:05+00:00"
+  },
+  {
+   "mercado": "SPOT",
+   "simbolo": "BNB-USDT",
+   "rango": 14,
+   "nivel_50": false,
+   "cotizando_desde": "2026-11-17T10:56:05+00:00"
+  },
+  {
+   "mercado": "SPOT",
+   "simbolo": "DOGE-USDT",
+   "rango": 15,
+   "nivel_50": false,
+   "cotizando_desde": "2026-11-17T10:56:05+00:00"
+  },
+  {
+   "mercado": "SPOT",
+   "simbolo": "PIEVERSE-USDT",
+   "rango": 16,
+   "nivel_50": false,
+   "cotizando_desde": "2026-11-17T10:56:05+00:00"
+  },
+  {
+   "mercado": "SPOT",
+   "simbolo": "DOT-USDT",
+   "rango": 17,
+   "nivel_50": false,
+   "cotizando_desde": "2026-11-17T10:56:05+00:00"
+  },
+  {
+   "mercado": "SPOT",
+   "simbolo": "SUI-USDT",
+   "rango": 18,
+   "nivel_50": false,
+   "cotizando_desde": "2026-11-17T10:56:05+00:00"
+  },
+  {
+   "mercado": "SPOT",
+   "simbolo": "AVAX-USDT",
+   "rango": 19,
+   "nivel_50": false,
+   "cotizando_desde": "2026-11-17T10:56:05+00:00"
+  },
+  {
+   "mercado": "SPOT",
+   "simbolo": "UNI-USDT",
+   "rango": 20,
+   "nivel_50": false,
+   "cotizando_desde": "2026-11-17T23:59:00+00:00"
+  },
+  {
+   "mercado": "FUTURES",
+   "simbolo": "ETHUSDTM",
+   "rango": 1,
+   "nivel_50": true,
+   "cotizando_desde": "2026-11-17T10:56:05+00:00"
+  },
+  {
+   "mercado": "FUTURES",
+   "simbolo": "XBTUSDTM",
+   "rango": 2,
+   "nivel_50": true,
+   "cotizando_desde": "2026-11-17T10:56:05+00:00"
+  },
+  {
+   "mercado": "FUTURES",
+   "simbolo": "EVAAUSDTM",
+   "rango": 3,
+   "nivel_50": true,
+   "cotizando_desde": "2026-11-17T10:56:05+00:00"
+  },
+  {
+   "mercado": "FUTURES",
+   "simbolo": "SOLUSDTM",
+   "rango": 4,
+   "nivel_50": true,
+   "cotizando_desde": "2026-11-17T10:56:05+00:00"
+  },
+  {
+   "mercado": "FUTURES",
+   "simbolo": "ZECUSDTM",
+   "rango": 5,
+   "nivel_50": true,
+   "cotizando_desde": "2026-11-17T10:56:05+00:00"
+  },
+  {
+   "mercado": "FUTURES",
+   "simbolo": "XRPUSDTM",
+   "rango": 6,
+   "nivel_50": true,
+   "cotizando_desde": "2026-11-17T10:56:05+00:00"
+  },
+  {
+   "mercado": "FUTURES",
+   "simbolo": "HYPEUSDTM",
+   "rango": 7,
+   "nivel_50": true,
+   "cotizando_desde": "2026-11-17T10:56:05+00:00"
+  },
+  {
+   "mercado": "FUTURES",
+   "simbolo": "PIEVERSEUSDTM",
+   "rango": 8,
+   "nivel_50": true,
+   "cotizando_desde": "2026-11-17T10:56:05+00:00"
+  },
+  {
+   "mercado": "FUTURES",
+   "simbolo": "ASTERUSDTM",
+   "rango": 9,
+   "nivel_50": true,
+   "cotizando_desde": "2026-11-17T10:56:05+00:00"
+  },
+  {
+   "mercado": "FUTURES",
+   "simbolo": "PEPEUSDTM",
+   "rango": 10,
+   "nivel_50": true,
+   "cotizando_desde": "2026-11-17T10:56:05+00:00"
+  },
+  {
+   "mercado": "FUTURES",
+   "simbolo": "BCHUSDTM",
+   "rango": 11,
+   "nivel_50": false,
+   "cotizando_desde": "2026-11-17T10:56:05+00:00"
+  },
+  {
+   "mercado": "FUTURES",
+   "simbolo": "ICPUSDTM",
+   "rango": 12,
+   "nivel_50": false,
+   "cotizando_desde": "2026-11-17T10:56:05+00:00"
+  },
+  {
+   "mercado": "FUTURES",
+   "simbolo": "SOXLUSDTM",
+   "rango": 13,
+   "nivel_50": false,
+   "cotizando_desde": "2026-11-17T10:56:05+00:00"
+  },
+  {
+   "mercado": "FUTURES",
+   "simbolo": "NIGHTUSDTM",
+   "rango": 14,
+   "nivel_50": false,
+   "cotizando_desde": "2026-11-17T10:56:05+00:00"
+  },
+  {
+   "mercado": "FUTURES",
+   "simbolo": "INJUSDTM",
+   "rango": 15,
+   "nivel_50": false,
+   "cotizando_desde": "2026-11-17T23:59:00+00:00"
+  },
+  {
+   "mercado": "FUTURES",
+   "simbolo": "UNIUSDTM",
+   "rango": 16,
+   "nivel_50": false,
+   "cotizando_desde": "2026-11-17T23:59:00+00:00"
+  },
+  {
+   "mercado": "FUTURES",
+   "simbolo": "LINKUSDTM",
+   "rango": 17,
+   "nivel_50": false,
+   "cotizando_desde": "2026-11-17T10:56:05+00:00"
+  },
+  {
+   "mercado": "FUTURES",
+   "simbolo": "AVAXUSDTM",
+   "rango": 18,
+   "nivel_50": false,
+   "cotizando_desde": "2026-11-17T10:56:05+00:00"
+  },
+  {
+   "mercado": "FUTURES",
+   "simbolo": "FHEUSDTM",
+   "rango": 19,
+   "nivel_50": false,
+   "cotizando_desde": "2026-11-17T23:59:00+00:00"
+  },
+  {
+   "mercado": "FUTURES",
+   "simbolo": "ENAUSDTM",
+   "rango": 20,
+   "nivel_50": false,
+   "cotizando_desde": "2026-11-17T10:56:05+00:00"
+  }
+ ],
+ "deslistados": [],
+ "nota_deslistados": "Sin deslistados por ahora: KuCoin deja de servir sus velas a las pocas semanas (docs/kucoin/historico.md). El sesgo de supervivencia que queda se declara en cada informe.",
+ "anuncios": [],
+ "nota_anuncios": "Fechas de alta o de retirada de anuncios oficiales, cada una con su enlace: [{mercado, simbolo, desde, hasta, elegible, enlace}]. Ninguna por ahora."
+}

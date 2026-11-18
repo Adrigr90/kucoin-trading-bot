@@ -95,6 +95,10 @@ El revisor la dio por **APROBABLE CON CORRECCIONES**. Ve adecuados el pong de 10
 - **GR-06:** `--sink rows` escribe las mismas colas que PostgreSQL.
 - **GR-07:** este informe separa lo observado de lo deducido sobre el retraso del pong.
 
+**Tercera revisión (sobre `8f304f5`): APROBABLE CON CORRECCIONES.** GR-06 y GR-07 quedaron resueltos. Pidió dos cosas más, ya hechas:
+- **Último residual de GR-01:** una escritura que termina bien después de cancelar su ciclo lo confirma igualmente, así que la parada no añade huecos sobre lo escrito.
+- **GR-08:** una prueba que fallaba si el vigilante detectaba un bloqueo justo antes de la parada.
+
 ## Lo que queda
 
 - **Una parada que no llega a escribir lo abierto sigue perdiendo el hueco abierto.** Pasa con un proceso matado (`SIGKILL`) o un corte de luz. Los minutos escritos con la conexión caída conservan sus filas S3, y los que no tienen vela quedan `sin_explicar`.

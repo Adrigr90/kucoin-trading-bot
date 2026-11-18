@@ -25,14 +25,21 @@ from structlog.testing import capture_logs
 
 from kbot.ingest import service as service_module
 from kbot.ingest.core import TickOutput
-from kbot.ingest.service import Recorder, TaskEnded, _close_streams, _Stream, _supervise
+from kbot.ingest.service import (
+    Recorder,
+    TaskEnded,
+    _close_streams,
+    _finish,
+    _Stream,
+    _supervise,
+)
 from kbot.ingest.sinks import MemorySink
 from kbot.kucoin.ratelimit import RestRateLimiter
 from kbot.kucoin.rest import KucoinRestClient
 from kbot.market.gaps import DataGap, GapCause
 from kbot.market.last_candles import KeptEvidence
 from tests.unit.ingest.fake_kucoin import FakeKucoin
-from tests.unit.ingest.messages import beat
+from tests.unit.ingest.messages import beat, pong
 
 Factory = Callable[..., KucoinRestClient]
 SPOT_CHANNELS = {"obu5", "obu50", "trade", "kline"}  # BTC-USDT is a candidate of level 50
@@ -152,12 +159,30 @@ def test_a_stream_that_ends_by_itself_stops_the_recorder_after_recording_the_sto
     assert not (sink.ticks[-1].flows or sink.ticks[-1].slots), "and closes nothing"
 
 
+class JumpingClock:
+    """Real time, plus a jump the test makes: what the watchdog sees after the event loop
+    stalled for that long."""
+
+    def __init__(self) -> None:
+        self.jump = timedelta(0)
+
+    def now(self) -> datetime:
+        return datetime.now(UTC) + self.jump
+
+
+@pytest.mark.parametrize("stall", [False, True], ids=["plain", "stall before the stop"])
 def test_a_stop_with_a_connection_down_records_its_gap_up_to_the_stop(
-    recorder: tuple[Recorder, MemorySink], monkeypatch: pytest.MonkeyPatch
+    recorder: tuple[Recorder, MemorySink], monkeypatch: pytest.MonkeyPatch, stall: bool
 ) -> None:
     """A systemctl stop (a deploy, a reboot) while Spot is down and retrying: its open gap
-    is written up to the stop with its own cause, so the stop loses nothing."""
+    is written up to the stop with its own cause, so the stop loses nothing. Futures was
+    up, so the stop gives it no gap of its own.
+
+    With ``stall``, the event loop stalls for 10 s just before the stop (review GR-08):
+    Futures gets a ``Stall`` gap, closed by the watchdog, maybe at the very moment the open
+    gap of Spot closes. It is told apart by what it is, not by when it ends."""
     rec, sink = recorder
+    clock = JumpingClock()
     down: list[datetime] = []
 
     async def retrying(stream: FakeStream, stop: asyncio.Event) -> None:
@@ -170,23 +195,84 @@ def test_a_stop_with_a_connection_down_records_its_gap_up_to_the_stop(
 
     async def go() -> datetime:
         stop = asyncio.Event()
-        asyncio.get_running_loop().call_later(1.5, stop.set)
-        await rec.run(stop)
-        return datetime.now(UTC)
+
+        def stop_now() -> None:
+            if stall:
+                clock.jump = timedelta(seconds=10)
+            stop.set()
+
+        asyncio.get_running_loop().call_later(1.5, stop_now)
+        await rec.run(stop, clock)
+        return clock.now()
 
     finished = asyncio.run(go())
     stop_gaps = [g for g in sink.ticks[-1].gaps if g.market == "SPOT" and g.start_at in down]
     assert {g.channel for g in stop_gaps} == SPOT_CHANNELS
     assert {g.cause for g in stop_gaps} == {GapCause.DESCONEXION}
     assert all(down[0] < g.end_at <= finished for g in stop_gaps)
-    # Futures was up: none of its gaps was open at the stop. (A stall of a loaded machine
-    # may still give it one, closed when the stall ended: that is the watchdog's work.)
-    stopped_at = {g.end_at for g in stop_gaps}
     futures = [g for t in sink.ticks for g in t.gaps if g.market == "FUTURES"]
-    assert not [g for g in futures if g.end_at in stopped_at], "no open gap of Futures"
-    assert all(
-        g.detail == "first connection" or (g.detail or "").startswith("Stall") for g in futures
+    stalls = [g for g in futures if (g.detail or "").startswith("Stall")]
+    assert all(g.detail == "first connection" for g in futures if g not in stalls), (
+        "no gap of Futures' own: it was up"
     )
+    assert all(g.cause is GapCause.PROCESO_DETENIDO and g.end_at <= finished for g in stalls)
+    if stall:
+        assert {g.channel for g in stalls} == {"obu5", "obu50", "trade", "kline", "mark-price"}
+
+
+@pytest.mark.parametrize("fails", [False, True], ids=["written", "write failed"])
+def test_a_write_that_ends_after_its_step_was_cancelled_still_counts(
+    test_client: Factory, fails: bool
+) -> None:
+    """Residual of GR-01, third review: the stop is asked for while the last tick of an
+    instrument that left the universe is being written. The step is cancelled, the write
+    goes on and the stop waits for it. If it succeeds, it confirms the tick itself and the
+    stop adds no gap over what it wrote; if it fails, the stop covers what it did not write,
+    up to the moment the instrument left."""
+    fake = FakeKucoin(spot=["BTC-USDT", "ETH-USDT"], futures=["XBTUSDTM"])
+    sink = TestSink()
+    rec = Recorder(sink, rest=test_client(fake, RestRateLimiter(pool_weight=10**6)))
+    start = datetime(2026, 11, 18, 12, 0, tzinfo=UTC)
+    left = start + timedelta(minutes=1)
+    eth_channels: tuple[str, ...] = ()
+
+    async def go() -> list[dict[str, Any]]:
+        nonlocal eth_channels
+        await rec.startup(start)
+        core = rec.core
+        assert core is not None
+        for market in ("SPOT", "FUTURES"):
+            core.on_state(market, "connected", start, "wss://...")
+        await beat(rec, start + timedelta(seconds=30))
+        eth = next(spec for spec in core.specs if spec.symbol == "ETH-USDT")
+        eth_channels = eth.channels()
+        assert core.apply_universe([spec for spec in core.specs if spec != eth], left)
+        sink.slow, sink.fail_next = 0.5, fails
+        moment = left + timedelta(seconds=3)
+        pong(core, moment)
+        step = asyncio.create_task(rec.step(moment))
+        while not sink.active:  # its last tick is being written
+            await asyncio.sleep(0.01)
+        await _finish(step)
+        assert step.cancelled()
+        with capture_logs() as logs:
+            await rec._record_stop(moment + timedelta(seconds=1))
+        assert rec._rest is not None
+        await rec._rest.aclose()
+        return logs
+
+    logs = asyncio.run(go())
+    eth_flows = [f for t in sink.ticks for f in t.flows if f.symbol == "ETH-USDT"]
+    recorded = [e["gaps"] for e in logs if e["event"] == "stop_recorded"]
+    if not fails:
+        assert eth_flows and max(f.minute for f in eth_flows) == start, "its last minute"
+        assert recorded == [0], "nothing over what the write stored"
+        return
+    assert not eth_flows, "the write of its last tick failed"
+    assert {(g.symbol, g.channel, g.start_at, g.end_at) for g in sink.ticks[-1].gaps} == {
+        ("ETH-USDT", c, start + timedelta(seconds=20) if c.startswith("obu") else start, left)
+        for c in eth_channels
+    }
 
 
 def test_the_start_up_begins_the_gap_of_the_stop_after_the_gaps_the_stop_wrote(

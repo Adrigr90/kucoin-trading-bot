@@ -32,7 +32,7 @@ open (incident of 17 November 2026).
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -180,11 +180,15 @@ class Recorder:
         while self._next_midnight is not None and now >= self._next_midnight:
             self._switch_day(self._next_midnight)
         output = core.tick(now)
-        if not output.is_empty():
+        if output.is_empty():
+            core.written()
+        else:
             # Late evidence is used only once the database holds it (review of E2, sixth
-            # round): a decision never rests on evidence a restart would not find.
-            core.late_kept(await self._db(self.sink.write_tick, output))
-        core.written()  # its gaps are in the database (review GR-01)
+            # round): a decision never rests on evidence a restart would not find. The write
+            # confirms the tick to the core as soon as it succeeds (review GR-01), also if
+            # this step is cancelled while it runs: what it wrote is no gap (third review).
+            kept = await self._db(self.sink.write_tick, output, on_success=core.written)
+            core.late_kept(kept)
         for rebuild in output.index_rebuilds:
             self._add_index_task(rebuild)
         for request in core.candle_requests(now):
@@ -526,20 +530,33 @@ class Recorder:
             raise RuntimeError("the recorder has not started")
         return self.core
 
-    async def _db(self, function: Any, *args: Any) -> Any:
+    async def _db(
+        self, function: Any, *args: Any, on_success: Callable[[], None] | None = None
+    ) -> Any:
         """A database call, in a worker thread. It is shielded: a step cancelled while it
         waits here (``_supervised_step``) never abandons the call half-way, and the stop
         waits for it before writing (``_settle_db``), so the connection never serves two
-        calls at once (review GR-03)."""
+        calls at once (review GR-03). ``on_success`` runs, in the event loop, as soon as
+        the call ends without error, whether or not anyone still waits for it."""
         call = asyncio.ensure_future(asyncio.to_thread(function, *args))
+        if on_success is not None:
+            confirm = on_success
+
+            def succeeded(done: asyncio.Future[Any]) -> None:
+                if not done.cancelled() and done.exception() is None:
+                    confirm()
+
+            call.add_done_callback(succeeded)
         self._db_call = call
         return await asyncio.shield(call)
 
     async def _settle_db(self) -> None:
         """Wait for the database call a cancelled step had started, up to
-        ``DB_SETTLE_SECONDS``. Its result does not matter here: what it wrote is in the
-        database, and what it did not, the next start-up recovers (or the stop rewrites:
-        ``RecorderCore.stop``). Raises ``TimeoutError`` if it does not end."""
+        ``DB_SETTLE_SECONDS``. If it was the write of a tick and it succeeded, it has already
+        confirmed that tick to the core (``_db``, ``on_success``, whose callback runs before
+        this wait ends), so the stop adds no gap over what it wrote; if it failed, the stop
+        covers what it did not write (``RecorderCore.stop``). Raises ``TimeoutError`` if it
+        does not end."""
         call = self._db_call
         if call is None or call.done():
             return

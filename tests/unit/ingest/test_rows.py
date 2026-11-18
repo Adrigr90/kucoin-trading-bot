@@ -7,15 +7,17 @@ the rows PostgreSQL stores for the same input.
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
 from psycopg.types.json import Jsonb
 
+from kbot.ingest.core import TickOutput
 from kbot.ingest.rows import PRIMARY_KEYS, FolderInUse, RowSink, insert_row
 from kbot.market import store
+from kbot.market.gaps import DataGap, GapCause
 from kbot.market.last_candles import FlowMinute
 from kbot.market.mark_candles import FlowState
 from tools.measure_archive import MIGRATION, table_specs
@@ -93,6 +95,39 @@ def test_a_row_with_the_key_of_another_is_left_out_as_postgresql_does(tmp_path: 
     lines = (tmp_path / "ws_candles.jsonl").read_text(encoding="utf-8").splitlines()
     assert [json.loads(line)["open"] for line in lines] == ["1", "3"]
     assert sink.counts == {"ws_candles": 2}
+
+
+def test_a_gap_whose_start_is_taken_keeps_its_tail_as_in_postgresql(tmp_path: Path) -> None:
+    """Review GR-06: the recording connection answers what ``store.write_gap`` asks, from
+    the gaps written, so the files keep the tails PostgreSQL keeps: starts taken one after
+    another, a gap already covered and a gap written twice add nothing."""
+    sink = RowSink(tmp_path)
+
+    def gap(start: int, end: int, cause: GapCause = GapCause.SIN_PONG) -> DataGap:
+        return DataGap(
+            "SPOT",
+            "kline",
+            "BTC-USDT",
+            T0 + timedelta(seconds=start),
+            T0 + timedelta(seconds=end),
+            cause,
+            None,
+        )
+
+    late = gap(0, 30, GapCause.PROCESO_DETENIDO)
+    for written in (gap(0, 10), gap(10, 20), late, gap(0, 5), late):
+        sink.write_tick(TickOutput(gaps=[written]))
+    sink.close()
+    lines = (tmp_path / "data_gaps.jsonl").read_text(encoding="utf-8").splitlines()
+
+    def iso(seconds: int) -> str:
+        return (T0 + timedelta(seconds=seconds)).isoformat()
+
+    assert [(row["start_at"], row["end_at"], row["cause"]) for row in map(json.loads, lines)] == [
+        (iso(0), iso(10), "sin_pong"),
+        (iso(10), iso(20), "sin_pong"),
+        (iso(20), iso(30), "proceso_detenido"),
+    ]
 
 
 def test_a_folder_used_before_is_refused_untouched(tmp_path: Path) -> None:

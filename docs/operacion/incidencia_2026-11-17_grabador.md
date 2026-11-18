@@ -72,8 +72,13 @@ Así que algo propio de Spot retrasa sus pongs. Una explicación posible es que 
 
 **En los 21 minutos siguientes, ningún corte**, frente a 2 de Spot en los 20 minutos anteriores.
 - **Pongs lentos:** 12 en Spot, de 1,1 a 6,4 s; 4 de ellos habrían sido cortes con la espera de 3 s. Ninguno en Futures.
-- **El retraso está en KuCoin, antes de enviar el pong.** Desde que KuCoin lo envía (su `ts`) hasta que llega pasan siempre unos 126 ms. Mientras tanto, desde el ping llegaron de 190 a 1.429 mensajes.
-- **No está en el grabador:** el pong se lee siempre unos 126 ms después de que KuCoin lo envía, así que no espera en una cola de mensajes por leer.
+- **Lo observado:**
+  - según el reloj del servidor y el `ts` de KuCoin, el pong se lee siempre unos 126 ms después de su `ts`, y el resto de la espera queda entre el envío del ping y ese `ts`;
+  - entre el ping y el pong llegaron de 190 a 1.429 mensajes.
+- **Lo que se deduce, sin demostrarlo:**
+  - el retraso se produce antes de que KuCoin ponga el `ts` al pong, en el camino de ida o en KuCoin;
+  - comparar dos relojes distintos tiene una incertidumbre que estas cifras no permiten separar (RFC 7679, §3.7.1), así que tampoco se descarta del todo una cola al enviar el ping;
+  - que la vuelta sea tan estable indica que el pong no espera al leerse en el grabador.
 
 ## Revisión (18 nov 2026)
 
@@ -84,6 +89,11 @@ El revisor la dio por **APROBABLE CON CORRECCIONES**. Ve adecuados el pong de 10
 - **GR-03:** la vigilancia sigue cada segundo mientras un ciclo espera a REST o a la base de datos. El ciclo se cancela sin abandonar una escritura empezada, y la parada la espera.
 - **GR-04:** un hueco cuyo inicio ya ocupa otro conserva su cola.
 - **GR-05:** una parada pedida no se toma por un fallo.
+
+**Segunda revisión (sobre `f74020e`): APROBABLE CON CORRECCIONES.** GR-02 a GR-05 quedaron resueltos. Pidió tres cosas más, ya hechas:
+- **Residual de GR-01:** si falla la escritura del último ciclo de un instrumento que salió del universo, la parada lo cubre desde donde había cerrado en lo escrito.
+- **GR-06:** `--sink rows` escribe las mismas colas que PostgreSQL.
+- **GR-07:** este informe separa lo observado de lo deducido sobre el retraso del pong.
 
 ## Lo que queda
 

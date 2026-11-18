@@ -8,6 +8,9 @@ with its table, its columns and its values, and appends the row as a JSON line t
 same code; a test in the CI compares them with the rows PostgreSQL stores. A row with the key
 of an earlier one is left out, as PostgreSQL leaves it out (review of E3c, E3c-04): the sink
 keeps a 16-byte digest of every key it wrote, some 150 MB for a day of the reference universe.
+The connection answers the two questions ``store.write_gap`` asks, from the gaps written: an
+insert ``RETURNING`` gives the row only if it was written, and the end of the gap that holds
+a start is known, so a gap whose start is taken keeps its tail here too (review GR-06).
 
 After each write it flushes every file and then appends a progress mark to ``PROGRESS``:
 the rows each file held at that moment. Each file has its own buffer, so a recording that
@@ -67,14 +70,25 @@ PROGRESS = "_progress.jsonl"
 _INSERT = re.compile(
     r"^INSERT INTO market\.(\w+) \(([^)]*)\) VALUES \((.*?)\)(?: ON CONFLICT .*)?$", re.S
 )
+_RETURNING = re.compile(r" RETURNING ([\w, ]+)$")
+# The question of ``store.write_gap`` when the start of a gap is taken.
+_GAP_HOLDING = (
+    "SELECT end_at FROM market.data_gaps"
+    " WHERE market = %s AND channel = %s AND symbol = %s AND start_at = %s"
+)
+
+Row = tuple[Any, ...]
 
 
-class _NoRows:
-    def fetchone(self) -> None:
-        return None
+class _Rows:
+    def __init__(self, rows: list[Row]) -> None:
+        self._rows = rows
 
-    def fetchall(self) -> list[Any]:
-        return []
+    def fetchone(self) -> Row | None:
+        return self._rows[0] if self._rows else None
+
+    def fetchall(self) -> list[Row]:
+        return list(self._rows)
 
 
 class FolderInUse(ValueError):
@@ -83,9 +97,10 @@ class FolderInUse(ValueError):
 
 class RecordingConnection:
     """Stands for a psycopg connection: records every statement it is given and answers
-    every query with no rows. Transactions and cursors are only names here."""
+    with the rows ``record`` gives, none for most of them. Transactions and cursors are
+    only names here."""
 
-    def __init__(self, record: Callable[[str, tuple[Any, ...]], None]) -> None:
+    def __init__(self, record: Callable[[str, tuple[Any, ...]], list[Row]]) -> None:
         self._record = record
 
     @contextmanager
@@ -96,9 +111,8 @@ class RecordingConnection:
     def cursor(self) -> Iterator[RecordingConnection]:
         yield self
 
-    def execute(self, query: object, params: Iterable[Any] = ()) -> _NoRows:
-        self._record(str(query), tuple(params))
-        return _NoRows()
+    def execute(self, query: object, params: Iterable[Any] = ()) -> _Rows:
+        return _Rows(self._record(str(query), tuple(params)))
 
     def executemany(self, query: object, params_seq: Iterable[Iterable[Any]]) -> None:
         for params in params_seq:
@@ -124,9 +138,10 @@ def _plain(value: Any) -> Any:
     return value
 
 
-def insert_row(query: str, params: tuple[Any, ...]) -> tuple[str, dict[str, Any]] | None:
-    """The table and the row of an INSERT of ``market.store``, or None for any other
-    statement. A literal of the VALUES list (``0``, ``'trade'``, ``NULL``) is its value."""
+def insert_values(query: str, params: tuple[Any, ...]) -> tuple[str, dict[str, Any]] | None:
+    """The table and the values of an INSERT of ``market.store``, as given, or None for any
+    other statement. A literal of the VALUES list (``0``, ``'trade'``, ``NULL``) is its
+    value."""
     match = _INSERT.match(" ".join(query.split()))
     if match is None:
         return None
@@ -135,12 +150,21 @@ def insert_row(query: str, params: tuple[Any, ...]) -> tuple[str, dict[str, Any]
     items = [item.strip() for item in values.split(",")]
     given = iter(params)
     row = {
-        name: _plain(next(given)) if item == "%s" else _literal(item)
+        name: next(given) if item == "%s" else _literal(item)
         for name, item in zip(names, items, strict=True)
     }
     if next(given, None) is not None:
         raise ValueError(f"{table}: more values than columns")
     return table, row
+
+
+def insert_row(query: str, params: tuple[Any, ...]) -> tuple[str, dict[str, Any]] | None:
+    """The table and the row of an INSERT of ``market.store``, as JSON keeps it."""
+    found = insert_values(query, params)
+    if found is None:
+        return None
+    table, values = found
+    return table, {name: _plain(value) for name, value in values.items()}
 
 
 class RowSink(MemorySink):
@@ -158,16 +182,23 @@ class RowSink(MemorySink):
         self.counts: Counter[str] = Counter()
         self._files: dict[str, TextIO] = {}
         self._keys: dict[str, set[bytes]] = {}  # digests of the keys written, per table
+        # The end of each gap written, by its key: what ``store.write_gap`` asks for.
+        self._gap_ends: dict[Row, Any] = {}
         self._conn = RecordingConnection(self._record)
         self._progress = (folder / PROGRESS).open("a", encoding="utf-8", newline="\n")
 
-    def _record(self, query: str, params: tuple[Any, ...]) -> None:
-        found = insert_row(query, params)
+    def _record(self, query: str, params: tuple[Any, ...]) -> list[Row]:
+        flat = " ".join(query.split())
+        if flat == _GAP_HOLDING:
+            end = self._gap_ends.get(params)
+            return [] if end is None else [(end,)]
+        found = insert_values(flat, params)
         if found is None:
-            return  # a read, answered with no rows: nothing is stored yet
-        table, row = found
+            return []  # any other read, answered with no rows: nothing is stored yet
+        table, values = found
         if table not in PRIMARY_KEYS:
             raise ValueError(f"{table}: no primary key known to --sink rows")
+        row = {name: _plain(value) for name, value in values.items()}
         key = hashlib.blake2b(
             json.dumps([row[c] for c in PRIMARY_KEYS[table]]).encode(), digest_size=16
         ).digest()
@@ -175,16 +206,23 @@ class RowSink(MemorySink):
         if key in seen:
             # The other unique constraints of these tables contain their primary key, so the
             # primary key alone decides what PostgreSQL rejects (review of E3c, E3c-04).
-            if "ON CONFLICT DO NOTHING" in " ".join(query.split()):
-                return
+            if "ON CONFLICT DO NOTHING" in flat:
+                return []
             raise ValueError(f"{table}: a second row with the key of another")
         seen.add(key)
+        if table == "data_gaps":
+            gap_key = tuple(values[c] for c in PRIMARY_KEYS["data_gaps"])
+            self._gap_ends[gap_key] = values["end_at"]
         file = self._files.get(table)
         if file is None:
             file = (self.folder / f"{table}.jsonl").open("a", encoding="utf-8", newline="\n")
             self._files[table] = file
         file.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
         self.counts[table] += 1
+        returning = _RETURNING.search(flat)
+        if returning is None:
+            return []
+        return [tuple(values[c.strip()] for c in returning.group(1).split(","))]
 
     def _mark(self) -> None:
         """Every row written so far is in the files: flushed first, then the mark."""

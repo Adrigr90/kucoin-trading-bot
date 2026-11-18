@@ -859,10 +859,12 @@ def test_a_stop_explains_what_an_instrument_that_left_could_not_close() -> None:
         recorder.on_state(market, "connected", midnight - timedelta(minutes=2), "wss://...")
     feed_minute(recorder, midnight - timedelta(minutes=2), with_marks=False)
     tick(recorder, midnight - timedelta(seconds=58))
+    recorder.written()
     assert recorder.apply_universe([SPOT], midnight)  # ETH leaves
     # The last proof of life was at 23:59:30, so ETH has closed up to 23:59:20 only.
     recorder.on_alive("SPOT", midnight - timedelta(seconds=30))
     recorder.tick(midnight + timedelta(seconds=2))
+    recorder.written()
     assert not recorder.closed_through("SPOT", "ETH-USDT", midnight)
 
     gaps = recorder.stop(midnight + timedelta(seconds=2))
@@ -873,6 +875,44 @@ def test_a_stop_explains_what_an_instrument_that_left_could_not_close() -> None:
         ("ETH-USDT", "trade", last_minute, midnight, GapCause.PROCESO_DETENIDO),
         ("ETH-USDT", "kline", last_minute, midnight, GapCause.PROCESO_DETENIDO),
     }, "BTC is up and stays in the universe: nothing of it is open"
+
+
+@pytest.mark.parametrize("confirmed", [False, True], ids=["write failed", "written"])
+def test_a_stop_covers_what_a_retired_instrument_closed_in_a_tick_not_written(
+    confirmed: bool,
+) -> None:
+    """Residual of GR-01: BTC stays and ETH leaves at midnight. The last tick known to be
+    written is at 23:59:30; the one at 00:00:03 closes the rest of ETH and finishes it. If
+    that write fails, its rows are not in the database and nobody records ETH again: the
+    stop covers it from where it had closed in what was written up to midnight. If it was
+    written, nothing more."""
+    midnight = datetime(2026, 11, 8, tzinfo=UTC)
+    recorder = RecorderCore((SPOT, SPOT_SMALL), started_at=midnight - timedelta(minutes=2))
+    for market in ("SPOT", "FUTURES"):
+        recorder.on_state(market, "connected", midnight - timedelta(minutes=2), "wss://...")
+    feed_minute(recorder, midnight - timedelta(minutes=2), with_marks=False)
+    tick(recorder, midnight - timedelta(seconds=30))
+    recorder.written()
+    assert recorder.apply_universe([SPOT], midnight)  # ETH leaves
+    tick(recorder, midnight + timedelta(seconds=3))
+    assert recorder.closed_through("SPOT", "ETH-USDT", midnight), "that tick finished ETH"
+    if confirmed:
+        recorder.written()
+
+    gaps = recorder.stop(midnight + timedelta(seconds=4))
+
+    eth = {(g.channel, g.start_at, g.end_at, g.cause) for g in gaps if g.symbol == "ETH-USDT"}
+    last_minute = midnight - timedelta(minutes=1)
+    assert eth == (
+        set()
+        if confirmed
+        else {
+            ("obu5", midnight - timedelta(seconds=40), midnight, GapCause.PROCESO_DETENIDO),
+            ("trade", last_minute, midnight, GapCause.PROCESO_DETENIDO),
+            ("kline", last_minute, midnight, GapCause.PROCESO_DETENIDO),
+        }
+    )
+    assert not [g for g in gaps if g.symbol == "BTC-USDT"], "BTC is resumed by the restart"
 
 
 @pytest.mark.parametrize("gap_start", [at(-5), None], ids=["given", "not given"])

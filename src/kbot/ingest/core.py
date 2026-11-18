@@ -296,6 +296,11 @@ class RecorderCore:
         # Gaps handed out by a tick and not yet known to be in the database (``written``):
         # if that write fails, the stop writes them (review GR-01).
         self._handed_out: list[DataGap] = []
+        # The retired instruments a tick closed for, not yet known to be in the database,
+        # with where each of their channels had closed before it: if that write fails, the
+        # stop covers their time from there, since nobody records them again (residual of
+        # GR-01). Kept even when that tick finished them.
+        self._retired_unwritten: dict[int, tuple[_Instrument, dict[str, datetime]]] = {}
         # Minutes waiting for their REST candle, per (market, symbol): kept apart from the
         # instruments, so they are decided even after their instrument left the universe.
         self._awaiting: dict[tuple[str, str], dict[datetime, _Awaiting]] = {}
@@ -525,13 +530,18 @@ class RecorderCore:
             until = self._proven(instrument.spec.market, now)
             if instrument.retired_at is not None:
                 until = min(until, instrument.retired_at + self.lateness)
+                self._retired_unwritten.setdefault(
+                    id(instrument), (instrument, _cursors(instrument))
+                )
             self._close(instrument, until, out)
         self._retired = [i for i in self._retired if not i.finished()]
         return out
 
     def written(self) -> None:
-        """Every tick so far is in the database: its gaps no longer wait for the stop."""
+        """Every tick so far is in the database: its gaps, and what it closed for the retired
+        instruments, no longer wait for the stop."""
         self._handed_out = []
+        self._retired_unwritten = {}
 
     def stop(self, now: datetime) -> list[DataGap]:
         """The recorder stops at ``now``: the gaps it knows and has not written, so that
@@ -551,7 +561,9 @@ class RecorderCore:
           never will: from where each of its channels stopped closing to the moment it left
           (the slot and the minute that hold that moment never close, ``finished``) is a
           ``proceso_detenido`` gap. The next start-up does not record it, so nobody else
-          would explain that time."""
+          would explain that time. Where it stopped closing is what the database holds: if
+          the last tick that closed for it is not known to be written, from where it had
+          closed before that tick, even if that tick finished it (residual of GR-01)."""
         now = as_utc(now, "now")
         gaps = [*self._handed_out, *self._closed_gaps]
         self._handed_out, self._closed_gaps = [], []
@@ -560,8 +572,11 @@ class RecorderCore:
                 gap = tracker.up(now)  # closes the open gap, if any
                 if gap is not None:
                     gaps.append(gap)
-        for instrument in self._retired:
-            gaps += _never_closed(instrument)
+        retired = {id(i): (i, _cursors(i)) for i in self._retired}
+        retired.update(self._retired_unwritten)
+        self._retired_unwritten = {}
+        for instrument, cursors in retired.values():
+            gaps += _never_closed(instrument, cursors)
         return gaps
 
     def _proven(self, market: str, now: datetime) -> datetime:
@@ -747,19 +762,25 @@ def _valid_trade(data: dict[str, Any]) -> bool:
     )
 
 
-def _never_closed(instrument: _Instrument) -> list[DataGap]:
-    """The time a retired instrument will never close, per channel, from its next slot or
-    minute up to the slot or minute that holds the moment it left (``RecorderCore.stop``)."""
+def _cursors(instrument: _Instrument) -> dict[str, datetime]:
+    """Where each channel of the instrument has closed up to: its next slot or minute."""
+    cursors = {f"obu{level}": d.next_slot for level, d in instrument.depth.items()}
+    cursors["trade"] = instrument.trade.next_minute
+    cursors["kline"] = instrument.kline.next_minute
+    if instrument.mark is not None:
+        cursors["mark-price"] = instrument.mark.next_minute
+    return cursors
+
+
+def _never_closed(instrument: _Instrument, cursors: Mapping[str, datetime]) -> list[DataGap]:
+    """The time a retired instrument will never have in the database, per channel, from
+    ``cursors`` up to the slot or minute that holds the moment it left
+    (``RecorderCore.stop``)."""
     at = instrument.retired_at
     if at is None:
         return []
     spec = instrument.spec
-    minute = floor_to(at, MINUTE)
-    spans = {f"obu{level}": (d.next_slot, slot_start(at)) for level, d in instrument.depth.items()}
-    spans["trade"] = (instrument.trade.next_minute, minute)
-    spans["kline"] = (instrument.kline.next_minute, minute)
-    if instrument.mark is not None:
-        spans["mark-price"] = (instrument.mark.next_minute, minute)
+    minute, slot = floor_to(at, MINUTE), slot_start(at)
     return [
         DataGap(
             spec.market,
@@ -770,8 +791,8 @@ def _never_closed(instrument: _Instrument) -> list[DataGap]:
             GapCause.PROCESO_DETENIDO,
             "stopped before closing an instrument that left the universe",
         )
-        for channel, (start, end) in spans.items()
-        if start < end
+        for channel, start in cursors.items()
+        if start < (end := slot if channel.startswith("obu") else minute)
     ]
 
 

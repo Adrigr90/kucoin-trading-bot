@@ -801,6 +801,142 @@ def test_old_resume_points_are_limited_but_the_gap_covers_the_whole_stop() -> No
     assert min(s.slot_start for s in out.slots) == at(-3600)
 
 
+def test_a_stop_gives_the_gaps_it_knows_and_has_not_written() -> None:
+    """Incident of 17 November 2026: a gap open when the recorder stops is written up to
+    the stop, with its own cause, and so is one closed since the last tick; a connection
+    that is up leaves no gap."""
+    recorder = core(SPOT, FUT)
+    connect(recorder, at(0))
+    tick(recorder, at(30))
+    detail = (
+        "ProtocolViolation: no pong in time (10 s; 412 messages received since the ping,"
+        " the last 0.0 s before)"
+    )
+    recorder.on_state("SPOT", "disconnected", at(40), detail)
+    out = recorder.tick(at(100))
+    assert not [g for g in out.gaps if g.market == "SPOT"], "still open"
+    recorder.on_state("FUTURES", "disconnected", at(101), "ConnectionClosedError: no close frame")
+    recorder.on_state("FUTURES", "connected", at(105), "wss://...")
+
+    gaps = recorder.stop(at(110))
+
+    assert {(g.market, g.channel, g.start_at, g.end_at, g.cause) for g in gaps} == {
+        ("SPOT", channel, at(40), at(110), GapCause.SIN_PONG) for channel in SPOT.channels()
+    } | {("FUTURES", channel, at(101), at(105), GapCause.DESCONEXION) for channel in FUT.channels()}
+    assert {g.detail for g in gaps if g.market == "SPOT"} == {detail}
+    assert recorder.stop(at(111)) == [], "nothing is given twice"
+
+
+@pytest.mark.parametrize("confirmed", [False, True], ids=["write failed", "written"])
+def test_a_stop_gives_the_gaps_of_a_tick_not_known_to_be_written(confirmed: bool) -> None:
+    """Review GR-01: a disconnection from 10 to 100 s gives one gap per channel, handed out
+    by the next tick. Until the service knows that tick is in the database (``written``),
+    the stop gives them again, whole and with their cause; once it knows, never."""
+    recorder = core(SPOT)
+    connect(recorder, at(0))
+    recorder.on_state("SPOT", "disconnected", at(10), "ConnectionClosedError: no close frame")
+    recorder.on_state("SPOT", "connected", at(100), "wss://...")
+    expected = {(c, at(10), at(100), GapCause.DESCONEXION) for c in SPOT.channels()}
+    handed = tick(recorder, at(101)).gaps
+    assert {(g.channel, g.start_at, g.end_at, g.cause) for g in handed} == expected
+    if confirmed:
+        recorder.written()
+
+    gaps = recorder.stop(at(102))
+
+    assert {(g.channel, g.start_at, g.end_at, g.cause) for g in gaps} == (
+        set() if confirmed else expected
+    )
+
+
+def test_a_stop_explains_what_an_instrument_that_left_could_not_close() -> None:
+    """Incident of 18 November 2026: the recorder stopped seconds after midnight, before
+    the instruments that left the universe had closed their last minute, and nobody else
+    would ever explain it: the stop does, up to the moment they left."""
+    midnight = datetime(2026, 11, 8, tzinfo=UTC)
+    recorder = RecorderCore((SPOT, SPOT_SMALL), started_at=midnight - timedelta(minutes=2))
+    for market in ("SPOT", "FUTURES"):
+        recorder.on_state(market, "connected", midnight - timedelta(minutes=2), "wss://...")
+    feed_minute(recorder, midnight - timedelta(minutes=2), with_marks=False)
+    tick(recorder, midnight - timedelta(seconds=58))
+    recorder.written()
+    assert recorder.apply_universe([SPOT], midnight)  # ETH leaves
+    # The last proof of life was at 23:59:30, so ETH has closed up to 23:59:20 only.
+    recorder.on_alive("SPOT", midnight - timedelta(seconds=30))
+    recorder.tick(midnight + timedelta(seconds=2))
+    recorder.written()
+    assert not recorder.closed_through("SPOT", "ETH-USDT", midnight)
+
+    gaps = recorder.stop(midnight + timedelta(seconds=2))
+
+    last_minute = midnight - timedelta(minutes=1)
+    assert {(g.symbol, g.channel, g.start_at, g.end_at, g.cause) for g in gaps} == {
+        ("ETH-USDT", "obu5", midnight - timedelta(seconds=40), midnight, GapCause.PROCESO_DETENIDO),
+        ("ETH-USDT", "trade", last_minute, midnight, GapCause.PROCESO_DETENIDO),
+        ("ETH-USDT", "kline", last_minute, midnight, GapCause.PROCESO_DETENIDO),
+    }, "BTC is up and stays in the universe: nothing of it is open"
+
+
+@pytest.mark.parametrize("confirmed", [False, True], ids=["write failed", "written"])
+def test_a_stop_covers_what_a_retired_instrument_closed_in_a_tick_not_written(
+    confirmed: bool,
+) -> None:
+    """Residual of GR-01: BTC stays and ETH leaves at midnight. The last tick known to be
+    written is at 23:59:30; the one at 00:00:03 closes the rest of ETH and finishes it. If
+    that write fails, its rows are not in the database and nobody records ETH again: the
+    stop covers it from where it had closed in what was written up to midnight. If it was
+    written, nothing more."""
+    midnight = datetime(2026, 11, 8, tzinfo=UTC)
+    recorder = RecorderCore((SPOT, SPOT_SMALL), started_at=midnight - timedelta(minutes=2))
+    for market in ("SPOT", "FUTURES"):
+        recorder.on_state(market, "connected", midnight - timedelta(minutes=2), "wss://...")
+    feed_minute(recorder, midnight - timedelta(minutes=2), with_marks=False)
+    tick(recorder, midnight - timedelta(seconds=30))
+    recorder.written()
+    assert recorder.apply_universe([SPOT], midnight)  # ETH leaves
+    tick(recorder, midnight + timedelta(seconds=3))
+    assert recorder.closed_through("SPOT", "ETH-USDT", midnight), "that tick finished ETH"
+    if confirmed:
+        recorder.written()
+
+    gaps = recorder.stop(midnight + timedelta(seconds=4))
+
+    eth = {(g.channel, g.start_at, g.end_at, g.cause) for g in gaps if g.symbol == "ETH-USDT"}
+    last_minute = midnight - timedelta(minutes=1)
+    assert eth == (
+        set()
+        if confirmed
+        else {
+            ("obu5", midnight - timedelta(seconds=40), midnight, GapCause.PROCESO_DETENIDO),
+            ("trade", last_minute, midnight, GapCause.PROCESO_DETENIDO),
+            ("kline", last_minute, midnight, GapCause.PROCESO_DETENIDO),
+        }
+    )
+    assert not [g for g in gaps if g.symbol == "BTC-USDT"], "BTC is resumed by the restart"
+
+
+@pytest.mark.parametrize("gap_start", [at(-5), None], ids=["given", "not given"])
+def test_the_gap_of_a_stop_begins_where_the_sink_says(gap_start: datetime | None) -> None:
+    """``gap_starts`` comes from the sink: the resume point moved past the gaps already
+    written that cover it (``Sink.stop_gap_starts``), such as the one a stop with the
+    connection down wrote up to the stop (-5 s). Without it, the resume point (-60 s). The
+    flows resume at the last minute written either way."""
+    resume = {(SPOT.market, SPOT.symbol, c): at(-60) for c in SPOT.channels()}
+    starts = (
+        None
+        if gap_start is None
+        else {(SPOT.market, SPOT.symbol, c): gap_start for c in SPOT.channels()}
+    )
+    recorder = core(SPOT, resume=resume, gap_starts=starts)
+    connect(recorder, at(2))
+    out = tick(recorder, at(10))
+    start = at(-60) if gap_start is None else gap_start
+    assert {(g.channel, g.start_at, g.end_at, g.cause) for g in out.gaps} == {
+        (channel, start, at(2), GapCause.PROCESO_DETENIDO) for channel in SPOT.channels()
+    }
+    assert next(f.minute for f in out.flows if f.channel == "trade") == at(-60)
+
+
 def test_the_universe_changes_at_midnight() -> None:
     midnight = datetime(2026, 11, 8, tzinfo=UTC)
     recorder = RecorderCore((SPOT, SPOT_SMALL), started_at=midnight - timedelta(minutes=2))

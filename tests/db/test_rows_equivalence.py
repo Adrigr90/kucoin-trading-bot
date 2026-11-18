@@ -34,6 +34,7 @@ from kbot.ingest.sinks import DatabaseSink
 from kbot.kucoin.ratelimit import RestRateLimiter
 from kbot.kucoin.rest import KucoinRestClient
 from kbot.market.depth import LateBook
+from kbot.market.gaps import DataGap, GapCause, covered_until
 from kbot.market.last_candles import CandleDecision, KeptEvidence
 from kbot.market.mark_candles import IndexMinute, OwnCandle
 from tests.unit.ingest.fake_kucoin import FakeKucoin
@@ -202,6 +203,51 @@ def test_the_rows_sink_writes_what_postgresql_stores(
         compare(conn, rows, symbols, start - timedelta(hours=1), start + timedelta(hours=1))
     expected = {"data_quality_minute", "ws_candles", "candles", "depth_slot_status"}
     assert expected | {"depth_metrics", "depth_snapshots", "depth_late_books"} <= set(rows.counts)
+
+
+def test_gaps_whose_start_is_taken_are_written_alike(
+    connect: Connect, free_day: FreeDay, tmp_path: Path
+) -> None:
+    """Review GR-06: a gap whose start is taken keeps its tail in the files as in
+    PostgreSQL. The original case of GR-04 (the gap of a restart, then the time a retired
+    instrument never closed, from the same start), starts taken one after another, and
+    everything written twice: the same rows, and the same coverage without a hole."""
+    tag = secrets.token_hex(4).upper()
+    symbols = [f"G{tag}-USDT", f"H{tag}-USDT"]
+    start = free_day() + timedelta(hours=12)
+
+    def gap(symbol: str, first: int, last: int, cause: GapCause = GapCause.SIN_PONG) -> DataGap:
+        return DataGap(
+            "SPOT",
+            "trade",
+            symbol,
+            start + timedelta(seconds=first),
+            start + timedelta(seconds=last),
+            cause,
+            None,
+        )
+
+    gaps = [
+        gap(symbols[0], 0, 21, GapCause.PROCESO_DETENIDO),
+        gap(symbols[0], 0, 60, GapCause.PROCESO_DETENIDO),
+        gap(symbols[1], 0, 10),
+        gap(symbols[1], 10, 20),
+        gap(symbols[1], 0, 30, GapCause.PROCESO_DETENIDO),
+    ]
+    rows = RowSink(tmp_path)
+    with connect("kbot_ingest") as conn:
+        database = DatabaseSink(conn)
+        for _ in range(2):
+            database.write_tick(TickOutput(gaps=gaps))
+            rows.write_tick(TickOutput(gaps=gaps))
+        rows.close()
+        compare(conn, rows, symbols, start - timedelta(hours=1), start + timedelta(hours=1))
+        for symbol, last in ((symbols[0], 60), (symbols[1], 30)):
+            spans = conn.execute(
+                "SELECT start_at, end_at FROM market.data_gaps WHERE symbol = %s", (symbol,)
+            ).fetchall()
+            assert covered_until(start, spans) == start + timedelta(seconds=last), symbol
+    assert rows.counts["data_gaps"] == 5, "[0, 21], [21, 60], [0, 10], [10, 20] and [20, 30]"
 
 
 class Both(DatabaseSink):

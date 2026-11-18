@@ -1,0 +1,11 @@
+# kbot: the hourly local backup (stage E4c-1), at minute 40 of every hour.
+[Unit]
+Description=kbot: hourly local backup of the database
+
+[Timer]
+OnCalendar=*-*-* *:40:00
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

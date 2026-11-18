@@ -11,7 +11,8 @@ KuCoin sends Spot volumes and turnovers with up to 21 decimals, measured in the 
 data (and up to 11 integer digits), which format 1 refused. It stays within a precision of 38
 because DuckDB, the reader of the archive, turns a wider decimal into a ``DOUBLE`` without
 an error and loses its digits (review DC-01); ``check_duckdb`` refuses such a reading before
-anything is computed. The files of both formats read back as the same exact decimals.
+anything is computed. The files of both formats read back as the same exact decimals, but
+never in the same DuckDB reading, which takes the types of its first file (DC-02).
 """
 
 from __future__ import annotations
@@ -110,22 +111,39 @@ def read_fingerprint(path: Path, columns: Sequence[Column]) -> Fingerprint:
 
 
 def check_duckdb(connection: Any, paths: Iterable[str | Path]) -> None:
-    """Before computing with Parquet files in DuckDB: every decimal they hold, also inside
-    lists and structs, must reach it as the same decimal (review DC-01). DuckDB 2.0 reads a
-    precision over 38 as a ``DOUBLE``, without an error, and the digits are lost; a later
-    ``CAST`` does not bring them back. Otherwise this raises ``ValueError`` and nothing is
-    computed. ``connection`` is a DuckDB connection; DuckDB is a development dependency, the
-    server never reads the archive with it."""
-    for name in dict.fromkeys(str(p) for p in paths):
-        relation = connection.sql("SELECT * FROM read_parquet(?)", params=[name])
-        seen = _leaves(relation.limit(0).to_arrow_table().schema)
-        lost = [
-            f"{place} is {kind} in the file and {seen.get(place)} in DuckDB"
-            for place, kind in _leaves(pq.read_schema(name)).items()
-            if pa.types.is_decimal(kind) and seen.get(place) != kind
+    """Before computing in DuckDB with the Parquet files that one query reads together: read
+    as the query reads them (``read_parquet`` over the same list, in its order and without
+    options), every decimal of every file, also inside lists and structs, must reach DuckDB
+    with its own type, and nothing else may become a decimal. Otherwise this raises
+    ``ValueError`` and nothing is computed.
+
+    DuckDB 2.0 changes decimals without an error. It reads a precision over 38 as a
+    ``DOUBLE`` (review DC-01). It reads several files with the types of the first one, so
+    after an empty file of format 1 the values of format 2 come back with 18 decimals, and
+    ``union_by_name`` rounds them too, in either order (DC-02). A text or a ``DOUBLE`` in a
+    file read after one with a decimal is cast to that decimal, and rounded. No later ``CAST``
+    brings the digits back. ``connection`` is a DuckDB connection; DuckDB is a development
+    dependency, the server never reads the archive with it."""
+    names = [str(path) for path in paths]
+    if not names:
+        return
+    relation = connection.sql("SELECT * FROM read_parquet(?)", params=[names])
+    read = _leaves(relation.limit(0).to_arrow_table().schema)
+    for name in dict.fromkeys(names):
+        held = _leaves(pq.read_schema(name))
+        changed = [
+            f"{place} is {held.get(place, 'missing')} in the file"
+            f" and {read.get(place, 'missing')} in DuckDB"
+            for place in sorted(held.keys() | read.keys())
+            if (_decimal(held.get(place)) or _decimal(read.get(place)))
+            and held.get(place) != read.get(place)
         ]
-        if lost:
-            raise ValueError(f"{name}: {'; '.join(lost)}, its digits would be lost")
+        if changed:
+            raise ValueError(f"{name}: {'; '.join(changed)}, so it would not be read exactly")
+
+
+def _decimal(kind: pa.DataType | None) -> bool:
+    return kind is not None and pa.types.is_decimal(kind)
 
 
 _LISTS = (

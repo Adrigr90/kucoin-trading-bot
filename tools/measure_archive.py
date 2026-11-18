@@ -8,7 +8,8 @@ in the format of ``kbot.archive.parquet`` (row groups of ``BATCH`` rows). Per ta
 measures the bytes without compression and with zstd 3 and 9, and for ``depth_snapshots``
 also with each book as a typed list instead of its JCS text. Then it times typical queries
 with DuckDB, over the recorded minutes and over copies of them that make 90 days, once it has
-checked that DuckDB reads every decimal of the files as the same decimal (review DC-01).
+checked that DuckDB reads every decimal of the files as the same decimal, with each list of
+files read together as its queries read it (reviews DC-01 and DC-02).
 
 What the recording does not hold is made up, close to its real value:
 - ``recorded_at``, the moment of the insert, which only PostgreSQL sets: the partition key
@@ -437,7 +438,9 @@ def queries(out: Path, symbol: str, minutes: int) -> dict[str, tuple[float, floa
     # days, but not their files, their cache or their disk (review of E3c).
     days = f"{QUERY_DAYS} days as {copies} repetitions of the same files"
     connection = duckdb.connect()
-    check_duckdb(connection, [*metrics, *snapshots, *typed])  # before any query: DC-01
+    # Each list of files as its queries read it, before the first query (DC-01 and DC-02).
+    for together in (metrics, metrics * copies, snapshots, typed):
+        check_duckdb(connection, together)
     return {
         "series, recorded": timed(connection, SERIES, metrics, symbol),
         "universe, recorded": timed(connection, UNIVERSE, metrics),

@@ -232,14 +232,15 @@ def test_the_real_decimals_of_kucoin_are_archived_and_duckdb_reads_them_exactly(
 ) -> None:
     """Review DC-01, from PostgreSQL to the reader: format 2 archives what format 1 refused,
     and DuckDB reads every file of the generation with each decimal as DECIMAL(38,24) and
-    all its digits."""
+    all its digits. Each file is a table of its own, so each is its own reading (DC-02)."""
     day = date(2018, 1, 10)
     sealed_day(connect, partitions, day, notional=(NEAR_TURNOVER, SMALLEST_STEP))
     generation = archiver.archive_day(lambda: connect("kbot_archive"), tmp_path, day)
     folder = tmp_path / "market" / day.isoformat() / f"g{generation}"
     query = "SELECT bid_notional, ask_notional, typeof(bid_notional) FROM read_parquet(?)"
     with duckdb.connect() as reader:
-        parquet.check_duckdb(reader, sorted(folder.glob("*.parquet")))
+        for path in sorted(folder.glob("*.parquet")):
+            parquet.check_duckdb(reader, [path])
         rows = reader.sql(query, params=[str(folder / "depth_metrics.parquet")]).fetchall()
     assert rows == [(Decimal(NEAR_TURNOVER), Decimal(SMALLEST_STEP), "DECIMAL(38,24)")]
 

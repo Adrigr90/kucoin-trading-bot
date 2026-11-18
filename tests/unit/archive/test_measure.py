@@ -110,15 +110,39 @@ def test_books_become_typed_lists_of_exact_decimals() -> None:
     ]
 
 
-def test_the_queries_refuse_files_duckdb_would_read_with_lost_digits(tmp_path: Path) -> None:
-    """Review DC-01: the files are checked before the first query, so nothing is computed
-    from a decimal DuckDB would read as a DOUBLE."""
+FORMAT_1 = pa.decimal128(38, 18)
+
+
+@pytest.mark.parametrize(
+    ("days", "refused"),
+    [
+        ({"2026-11-10": pa.decimal256(76, 24)}, r"2026-11-10\.parquet: mid is decimal256"),
+        (
+            {"2026-11-09": FORMAT_1, "2026-11-10": measure_archive.NUMERIC},
+            r"2026-11-10\.parquet: mid is decimal128\(38, 24\) in the file"
+            r" and decimal128\(38, 18\) in DuckDB",
+        ),
+    ],
+    ids=["DC-01, a decimal256", "DC-02, an empty day of format 1 first"],
+)
+def test_the_queries_refuse_files_duckdb_would_read_with_changed_decimals(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, days: dict[str, pa.DataType], refused: str
+) -> None:
+    """Reviews DC-01 and DC-02: each list of files is checked as its queries read it, before
+    the first query, so nothing is computed from a decimal DuckDB would change: a decimal256
+    it reads as a DOUBLE, or the decimals of format 2 read after an empty day of format 1."""
     for folder in ("zstd3/depth_metrics", "zstd3/depth_snapshots", "zstd3_typed/depth_snapshots"):
         (tmp_path / folder).mkdir(parents=True)
-    mid = pa.array([Decimal("100.5")], pa.decimal256(76, 24))
-    pq.write_table(pa.table({"mid": mid}), tmp_path / "zstd3" / "depth_metrics" / "d.parquet")
-    with pytest.raises(ValueError, match="mid is decimal256"):
+    for day, kind in days.items():
+        mid = pa.array([] if kind == FORMAT_1 else [Decimal("100.5")], kind)
+        pq.write_table(
+            pa.table({"mid": mid}), tmp_path / "zstd3" / "depth_metrics" / f"{day}.parquet"
+        )
+    ran: list[str] = []
+    monkeypatch.setattr(measure_archive, "timed", lambda _connection, query, *_: ran.append(query))
+    with pytest.raises(ValueError, match=refused):
         measure_archive.queries(tmp_path, "BTC-USDT", 1)
+    assert ran == [], "nothing is queried before every list of files is checked"
 
 
 @pytest.mark.parametrize(

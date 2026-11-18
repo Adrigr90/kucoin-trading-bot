@@ -119,8 +119,8 @@ def test_a_reading_that_would_lose_digits_is_refused_before_computing(
 ) -> None:
     """Review DC-01: a decimal wider than 38 digits reaches DuckDB as a DOUBLE, also inside a
     list of structs (as the typed books of the measurement), and 1.000000000000000000000001
-    would be 1.0. The check refuses the files before any query; the decimals of formats 1
-    and 2 pass it."""
+    would be 1.0. The check refuses the file before any query; the decimals of formats 1
+    and 2, each in its own reading, pass it."""
     value = Decimal("7685.598297327437077617")  # fits in format 1 too
 
     def file(name: str, kind: pa.DataType) -> Path:
@@ -134,11 +134,64 @@ def test_a_reading_that_would_lose_digits_is_refused_before_computing(
     wide = file("wide", pa.decimal256(76, 24))
     place = "turnover[].price" if nested else "turnover"
     with duckdb.connect() as conn:
-        parquet.check_duckdb(conn, formats)
+        for path in formats:
+            parquet.check_duckdb(conn, [path])
         with pytest.raises(
             ValueError, match=rf"wide\.parquet: {re.escape(place)} is decimal256.*double"
         ):
-            parquet.check_duckdb(conn, [*formats, wide])
+            parquet.check_duckdb(conn, [wide])
+
+
+DC_01 = ["7685.59829732743707761776", "1.000000000000000000000001"]
+
+
+@pytest.mark.parametrize("empty_first", [True, False], ids=["empty file first", "empty last"])
+def test_files_are_checked_as_the_query_reads_them_together(
+    tmp_path: Path, empty_first: bool
+) -> None:
+    """Review DC-02: DuckDB reads several files with the types of the first one. After an
+    empty file of format 1, the values of DC-01 in a file of format 2 would come back with
+    18 decimals (1.000000000000000000000001 as 1.000000000000000000). The check reads the
+    files as the query does, together and in its order: an empty file of format 1 and one of
+    format 2 are refused in either order, before computing, and the file whose type would
+    change is named; an empty file of format 2 and the full one are read exactly."""
+    numeric = (Column("turnover", "numeric"),)
+    full, empty_2 = tmp_path / "format_2.parquet", tmp_path / "empty_2.parquet"
+    parquet.write(full, numeric, [[(Decimal(v),) for v in DC_01]], {})
+    parquet.write(empty_2, numeric, [], {})
+    empty_1 = tmp_path / "empty_1.parquet"
+    pq.write_table(pa.table({"turnover": pa.array([], pa.decimal128(38, 18))}), empty_1)
+
+    def together(empty: Path) -> list[str]:
+        return [str(path) for path in ([empty, full] if empty_first else [full, empty])]
+
+    changed, held, read = ("format_2", 24, 18) if empty_first else ("empty_1", 18, 24)
+    refused = (
+        rf"{changed}\.parquet: turnover is decimal128\(38, {held}\) in the file"
+        rf" and decimal128\(38, {read}\) in DuckDB"
+    )
+    query = "SELECT turnover, typeof(turnover) FROM read_parquet(?)"
+    with duckdb.connect() as conn:
+        with pytest.raises(ValueError, match=refused):
+            parquet.check_duckdb(conn, together(empty_1))
+        parquet.check_duckdb(conn, together(empty_2))
+        rows = conn.sql(query, params=[together(empty_2)]).fetchall()
+    assert rows == [(Decimal(v), "DECIMAL(38,24)") for v in DC_01]
+
+
+@pytest.mark.parametrize(
+    "later", [pa.array(["1.0000000000000000000000009"]), pa.array([0.1])], ids=["text", "double"]
+)
+def test_nothing_read_after_a_decimal_may_become_one(tmp_path: Path, later: pa.Array) -> None:
+    """Found while fixing DC-02: in a file read after one with a decimal, DuckDB casts the
+    text or the DOUBLE of the same column to that decimal without an error, and rounds it
+    (the text comes back as 1.000000000000000000000001). The check refuses it."""
+    first, other = tmp_path / "first.parquet", tmp_path / "later.parquet"
+    parquet.write(first, (Column("turnover", "numeric"),), [[(Decimal(DC_01[0]),)]], {})
+    pq.write_table(pa.table({"turnover": later}), other)
+    refused = rf"later\.parquet: turnover is {later.type} in the file and decimal128\(38, 24\)"
+    with duckdb.connect() as conn, pytest.raises(ValueError, match=refused):
+        parquet.check_duckdb(conn, [first, other])
 
 
 def test_a_file_with_other_columns_is_refused(tmp_path: Path) -> None:

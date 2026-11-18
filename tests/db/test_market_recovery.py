@@ -18,13 +18,12 @@ from typing import Any
 import psycopg
 import pytest
 
-from kbot.ingest.core import InstrumentSpec
 from kbot.ingest.sinks import DatabaseSink
 from kbot.market.depth import DepthChannel
 from kbot.market.gaps import DataGap, GapCause, GapTracker
 from kbot.market.store import (
     depth_channel_name,
-    gap_end,
+    gaps_ending_after,
     resume_point,
     slot_states,
     write_depth,
@@ -140,25 +139,31 @@ def test_f2_a5_a_stop_and_a_restart(ingest: psycopg.Connection) -> None:
     assert snapshots == [(at(0), at(50), 1)]
 
 
-def test_the_start_up_reads_where_the_last_gap_of_each_channel_ends(
+def test_the_start_up_begins_the_gap_of_a_stop_after_the_written_gaps_that_cover_it(
     ingest: psycopg.Connection,
 ) -> None:
     """Incident of 17 November 2026: a stop recorded with a connection down writes its open
     gap up to the stop, after the last minute written, and the next start-up begins the gap
-    of the stop there. It reads it as kbot_ingest, channel by channel."""
+    of the stop after it. It reads the gaps as kbot_ingest, channel by channel, and moves
+    only past time they cover without a hole."""
     symbol = "G" + secrets.token_hex(5).upper() + "-USDT"
-    assert gap_end(ingest, "SPOT", symbol, "trade") is None
-    for start, end in ((at(0), at(30)), (at(100), at(400)), (at(500), at(520))):
+    assert gaps_ending_after(ingest, "SPOT", symbol, "trade", at(0)) == []
+    for start, end in ((at(0), at(30)), (at(100), at(400)), (at(400), at(520))):
         write_gap(ingest, DataGap("SPOT", "trade", symbol, start, end, GapCause.SIN_PONG, None))
-    write_gap(ingest, DataGap("SPOT", "kline", symbol, at(0), at(900), GapCause.SIN_PONG, None))
-    assert gap_end(ingest, "SPOT", symbol, "trade") == at(520)
-    assert gap_end(ingest, "SPOT", symbol, "kline") == at(900)
-    assert gap_end(ingest, "FUTURES", symbol, "trade") is None
-    spec = InstrumentSpec("SPOT", symbol, Decimal("0.1"), Decimal(1), l50=False)
-    assert DatabaseSink(ingest).gap_ends([spec]) == {
+    write_gap(ingest, DataGap("SPOT", "kline", symbol, at(200), at(900), GapCause.SIN_PONG, None))
+    assert sorted(gaps_ending_after(ingest, "SPOT", symbol, "trade", at(30))) == [
+        (at(100), at(400)),
+        (at(400), at(520)),
+    ]
+    resume = {
+        ("SPOT", symbol, "trade"): at(150),  # covered from 100 to 400 and from 400 to 520
+        ("SPOT", symbol, "kline"): at(150),  # its gap begins at 200: not covered at 150
         ("SPOT", symbol, "obu5"): None,
+    }
+    assert DatabaseSink(ingest).stop_gap_starts(resume) == {
         ("SPOT", symbol, "trade"): at(520),
-        ("SPOT", symbol, "kline"): at(900),
+        ("SPOT", symbol, "kline"): at(150),
+        ("SPOT", symbol, "obu5"): None,
     }
 
 

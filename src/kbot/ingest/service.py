@@ -49,6 +49,7 @@ from kbot.ingest.core import (
     IndexRebuild,
     InstrumentSpec,
     RecorderCore,
+    TickOutput,
 )
 from kbot.ingest.sinks import Sink
 from kbot.kucoin.rest import KucoinApiError, KucoinRestClient
@@ -128,8 +129,8 @@ class Recorder:
             await self._db(self.sink.write_universe, entries)
         specs = await self._reference(entries, listings, now)
         resume = await self._db(self.sink.resume_points, specs)
-        gap_ends = await self._db(self.sink.gap_ends, specs)
-        core = RecorderCore(specs, started_at=now, resume=resume, gap_ends=gap_ends)
+        gap_starts = await self._db(self.sink.stop_gap_starts, resume)
+        core = RecorderCore(specs, started_at=now, resume=resume, gap_starts=gap_starts)
         self.core = core
         # The two days before, and any earlier day the database shows recorded but not closed
         # (for example kept open by a candle that could no longer be recovered).
@@ -590,10 +591,13 @@ class Recorder:
             log.info("recorder_stopped")
 
     async def _record_stop(self, now: datetime) -> None:
-        """Write what the recorder leaves open, so that the next start-up and the day close
-        find it explained (incident of 17 November 2026): a last tick, the gaps still open,
-        closed at this moment, and what the instruments that left the universe can no longer
-        close (``RecorderCore.stop``). The next start-up begins its own gap where these end.
+        """Write the gaps the recorder leaves unwritten, so that the next start-up and the
+        day close find them (incident of 17 November 2026): those closed since the last
+        tick, those still open, closed at this moment, and what the instruments that left
+        the universe can no longer close (``RecorderCore.stop``). Only gaps: no slot or
+        minute is closed here, because after a tick that could not be written that would
+        leave time without rows and without a gap. The next start-up begins its own gap
+        after these when they cover its resume point (``Sink.stop_gap_starts``).
 
         It is the last thing the recorder writes and only a best effort: if it fails, the
         failure is logged and never hides why the recorder stopped. A stop that does not get
@@ -605,15 +609,13 @@ class Recorder:
             return
         try:
             self._check_stall(now)
-            output = core.tick(now)
-            left_open = core.stop(now)
-            output.gaps += left_open
-            if not output.is_empty():
-                await self._db(self.sink.write_tick, output)
+            gaps = core.stop(now)
+            if gaps:
+                await self._db(self.sink.write_tick, TickOutput(gaps=gaps))
         except Exception as exc:  # the reason for stopping must not be hidden
             log.error("stop_not_recorded", error=f"{type(exc).__name__}: {exc}"[:300])
             return
-        log.info("stop_recorded", gaps=len(left_open))
+        log.info("stop_recorded", gaps=len(gaps))
 
     def _open_streams(self, pacer: ConnectionPacer) -> list[_Stream]:
         core = self._require_core()

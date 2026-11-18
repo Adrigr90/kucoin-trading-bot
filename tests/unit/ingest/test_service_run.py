@@ -22,11 +22,12 @@ import pytest
 from structlog.testing import capture_logs
 
 from kbot.ingest import service as service_module
+from kbot.ingest.core import TickOutput
 from kbot.ingest.service import Recorder, TaskEnded, _close_streams, _Stream, _supervise
 from kbot.ingest.sinks import MemorySink
 from kbot.kucoin.ratelimit import RestRateLimiter
 from kbot.kucoin.rest import KucoinRestClient
-from kbot.market.gaps import GapCause
+from kbot.market.gaps import DataGap, GapCause
 from tests.unit.ingest.fake_kucoin import FakeKucoin
 
 Factory = Callable[..., KucoinRestClient]
@@ -113,7 +114,9 @@ def test_a_stream_that_ends_by_itself_stops_the_recorder_after_recording_the_sto
     }
     assert {g.start_at for g in stop_gaps} == set(down)
     assert all(g.end_at > g.start_at for g in stop_gaps)
-    assert [e["gaps"] for e in logs if e["event"] == "stop_recorded"] == [len(SPOT_CHANNELS)]
+    recorded = [e["gaps"] for e in logs if e["event"] == "stop_recorded"]
+    assert recorded == [len(sink.ticks[-1].gaps)], "the stop writes only gaps, in one go"
+    assert not (sink.ticks[-1].flows or sink.ticks[-1].slots), "and closes nothing"
 
 
 def test_a_stop_with_a_connection_down_records_its_gap_up_to_the_stop(
@@ -147,17 +150,27 @@ def test_a_stop_with_a_connection_down_records_its_gap_up_to_the_stop(
     assert {g.detail for g in futures} == {"first connection"}, "Futures was up: no stop gap"
 
 
-def test_the_start_up_begins_the_gap_of_the_stop_where_the_written_gap_ends(
+def test_the_start_up_begins_the_gap_of_the_stop_after_the_gaps_the_stop_wrote(
     recorder: tuple[Recorder, MemorySink],
 ) -> None:
-    """The gap written by the stop (up to 00:00:05) ends after the last minute written
-    (00:00:00): the gap of the stop begins at 00:00:05, without overlapping it."""
+    """Spot was down from 17:45:07 and the stop wrote that gap up to 00:00:05, after the
+    last minute written (00:00:00): the gap of the stop begins at 00:00:05, without
+    overlapping it. Kline had reconnected at 23:59:58 and gone down again at 00:00:02, so
+    its last gap leaves 00:00:00 to 00:00:02 uncovered: its gap of the stop begins at
+    00:00:00, the resume point, and no instant is left unexplained."""
     rec, sink = recorder
     now = datetime(2026, 11, 18, 0, 0, 15, tzinfo=UTC)
+    resumed = datetime(2026, 11, 18, tzinfo=UTC)
+    down = datetime(2026, 11, 17, 17, 45, 7, tzinfo=UTC)
     stopped = now - timedelta(seconds=10)
-    keys = [("SPOT", "BTC-USDT", channel) for channel in SPOT_CHANNELS]
-    sink.resume = dict.fromkeys(keys, now - timedelta(seconds=15))
-    sink.gap_end = dict.fromkeys(keys, stopped)
+    sink.resume = {("SPOT", "BTC-USDT", channel): resumed for channel in SPOT_CHANNELS}
+
+    def gap(channel: str, start: datetime) -> DataGap:
+        return DataGap("SPOT", channel, "BTC-USDT", start, stopped, GapCause.SIN_PONG, NO_PONG)
+
+    written = [gap(c, down) for c in SPOT_CHANNELS - {"kline"}]
+    written.append(gap("kline", resumed + timedelta(seconds=2)))
+    sink.ticks.append(TickOutput(gaps=written))
 
     async def go() -> None:
         await rec.startup(now)
@@ -167,8 +180,8 @@ def test_the_start_up_begins_the_gap_of_the_stop_where_the_written_gap_ends(
         core.on_alive("SPOT", now + timedelta(seconds=5))
         gaps = core.tick(now + timedelta(seconds=5)).gaps
         assert {(g.channel, g.start_at, g.cause) for g in gaps if g.market == "SPOT"} == {
-            (channel, stopped, GapCause.PROCESO_DETENIDO) for channel in SPOT_CHANNELS
-        }
+            (c, stopped, GapCause.PROCESO_DETENIDO) for c in SPOT_CHANNELS - {"kline"}
+        } | {("kline", resumed, GapCause.PROCESO_DETENIDO)}
         assert rec._rest is not None
         await rec._rest.aclose()
 

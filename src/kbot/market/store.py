@@ -736,18 +736,17 @@ def flow_resume_point(
     return row[0] + timedelta(minutes=1)
 
 
-def gap_end(conn: psycopg.Connection, market: str, symbol: str, channel: str) -> datetime | None:
-    """End of the last gap written for this channel, or None. A stop recorded with the
-    connection down writes its open gap up to the stop, after the last minute written; the
-    gap of the stop begins there (incident of 17 November 2026)."""
-    row = conn.execute(
-        "SELECT max(end_at) FROM market.data_gaps"
-        " WHERE market = %s AND channel = %s AND symbol = %s",
-        (market, channel, symbol),
-    ).fetchone()
-    if row is None or row[0] is None:
-        return None
-    return row[0]
+def gaps_ending_after(
+    conn: psycopg.Connection, market: str, symbol: str, channel: str, since: datetime
+) -> list[tuple[datetime, datetime]]:
+    """Start and end of the gaps written for this channel that end after ``since``: the
+    ones that can cover the time after a resume point (``gaps.covered_until``)."""
+    rows = conn.execute(
+        "SELECT start_at, end_at FROM market.data_gaps"
+        " WHERE market = %s AND channel = %s AND symbol = %s AND end_at > %s",
+        (market, channel, symbol, since),
+    ).fetchall()
+    return [(row[0], row[1]) for row in rows]
 
 
 def pending_candles(conn: psycopg.Connection, since: datetime) -> list[PendingCandle]:

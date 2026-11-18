@@ -41,11 +41,14 @@ Así que algo propio de Spot retrasa sus pongs. Una explicación posible es que 
    - Cada intento fallido seguido duplica la espera máxima, hasta 60 s, y la espera se elige al azar en su mitad superior. Nunca hay reintentos rápidos.
 2. **El grabador vigila sus streams y su vigilante** (`kbot.ingest.service`). Si uno termina por sí solo, ya solo puede ser por un error del propio código: el grabador escribe lo que deja abierto, se detiene con error y systemd lo vuelve a arrancar. **Nunca sigue grabando sin uno de sus mercados.**
 3. **Cerrar los streams nunca falla por uno que ya había fallado:** queda en el diario y los demás se cierran.
-4. **Al pararse, el grabador escribe lo que deja abierto** (`RecorderCore.stop`):
+4. **Al pararse, el grabador escribe los huecos que conoce y no ha escrito** (`RecorderCore.stop`):
+   - los cerrados desde el último ciclo;
    - cada hueco abierto, cerrado en ese instante y con su causa;
    - el tiempo que un instrumento que salió del universo ya no podrá cerrar.
 
-   Al arrancar, el hueco de la parada empieza donde acaba el último hueco escrito, si es posterior al último minuto o intervalo escrito, así que nunca se solapan.
+   Solo escribe huecos: no cierra intervalos ni minutos, porque tras un ciclo que no se pudo escribir eso dejaría tiempo sin filas y sin hueco.
+
+   Al arrancar, el hueco de la parada empieza en el punto de reanudación, adelantado sobre los huecos ya escritos que lo cubren uno tras otro (`gaps.covered_until`), como el que escribió la parada. **Nunca pasa por un instante que ningún hueco explique.** Si un hueco escrito empieza después del punto de reanudación, el de la parada empieza en el punto y se solapa con él.
 5. **Pong: 10 s en lugar de 3.** KuCoin da los 3 s solo como ejemplo («such as 3 second»). Nunca se espera menos que el `pingTimeout` del welcome, si KuCoin lo envía. Para fijar la espera con datos:
    - cada pong de más de 1 s queda en el diario con el tiempo hasta que KuCoin lo envió (su `ts`), el tiempo desde entonces y los mensajes recibidos antes que él;
    - un corte por falta de pong dice cuántos mensajes llegaron desde el ping y hace cuánto llegó el último.

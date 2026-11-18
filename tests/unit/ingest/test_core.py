@@ -801,9 +801,10 @@ def test_old_resume_points_are_limited_but_the_gap_covers_the_whole_stop() -> No
     assert min(s.slot_start for s in out.slots) == at(-3600)
 
 
-def test_a_stop_closes_the_open_gaps_where_it_stops() -> None:
+def test_a_stop_gives_the_gaps_it_knows_and_has_not_written() -> None:
     """Incident of 17 November 2026: a gap open when the recorder stops is written up to
-    the stop, with its own cause; a connection that is up leaves no gap."""
+    the stop, with its own cause, and so is one closed since the last tick; a connection
+    that is up leaves no gap."""
     recorder = core(SPOT, FUT)
     connect(recorder, at(0))
     tick(recorder, at(30))
@@ -814,13 +815,16 @@ def test_a_stop_closes_the_open_gaps_where_it_stops() -> None:
     recorder.on_state("SPOT", "disconnected", at(40), detail)
     out = recorder.tick(at(100))
     assert not [g for g in out.gaps if g.market == "SPOT"], "still open"
+    recorder.on_state("FUTURES", "disconnected", at(101), "ConnectionClosedError: no close frame")
+    recorder.on_state("FUTURES", "connected", at(105), "wss://...")
 
-    gaps = recorder.stop(at(100))
+    gaps = recorder.stop(at(110))
 
     assert {(g.market, g.channel, g.start_at, g.end_at, g.cause) for g in gaps} == {
-        ("SPOT", channel, at(40), at(100), GapCause.SIN_PONG) for channel in SPOT.channels()
-    }
-    assert {g.detail for g in gaps} == {detail}
+        ("SPOT", channel, at(40), at(110), GapCause.SIN_PONG) for channel in SPOT.channels()
+    } | {("FUTURES", channel, at(101), at(105), GapCause.DESCONEXION) for channel in FUT.channels()}
+    assert {g.detail for g in gaps if g.market == "SPOT"} == {detail}
+    assert recorder.stop(at(111)) == [], "nothing is given twice"
 
 
 def test_a_stop_explains_what_an_instrument_that_left_could_not_close() -> None:
@@ -849,23 +853,22 @@ def test_a_stop_explains_what_an_instrument_that_left_could_not_close() -> None:
     }, "BTC is up and stays in the universe: nothing of it is open"
 
 
-@pytest.mark.parametrize(
-    ("gap_end", "start"),
-    [(at(-5), at(-5)), (at(-200), at(-60)), (None, at(-60))],
-    ids=["after the last minute written", "older", "none"],
-)
-def test_the_gap_of_a_stop_begins_where_the_last_written_gap_ends(
-    gap_end: datetime | None, start: datetime
-) -> None:
-    """A stop recorded with the connection down wrote its gap up to the stop (-5 s), after
-    the last minute written (-60 s). The gap of the stop begins there, so the two never
-    overlap; an older gap changes nothing. The flows still resume at the last minute
-    written."""
+@pytest.mark.parametrize("gap_start", [at(-5), None], ids=["given", "not given"])
+def test_the_gap_of_a_stop_begins_where_the_sink_says(gap_start: datetime | None) -> None:
+    """``gap_starts`` comes from the sink: the resume point moved past the gaps already
+    written that cover it (``Sink.stop_gap_starts``), such as the one a stop with the
+    connection down wrote up to the stop (-5 s). Without it, the resume point (-60 s). The
+    flows resume at the last minute written either way."""
     resume = {(SPOT.market, SPOT.symbol, c): at(-60) for c in SPOT.channels()}
-    ends = {(SPOT.market, SPOT.symbol, c): gap_end for c in SPOT.channels()}
-    recorder = core(SPOT, resume=resume, gap_ends=ends)
+    starts = (
+        None
+        if gap_start is None
+        else {(SPOT.market, SPOT.symbol, c): gap_start for c in SPOT.channels()}
+    )
+    recorder = core(SPOT, resume=resume, gap_starts=starts)
     connect(recorder, at(2))
     out = tick(recorder, at(10))
+    start = at(-60) if gap_start is None else gap_start
     assert {(g.channel, g.start_at, g.end_at, g.cause) for g in out.gaps} == {
         (channel, start, at(2), GapCause.PROCESO_DETENIDO) for channel in SPOT.channels()
     }

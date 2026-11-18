@@ -3,11 +3,13 @@
 A gap opens when the connection stops being healthy and is written to ``data_gaps`` once it
 closes, with its cause. When the process restarts after a stop, the time since the last
 slot it recorded is a gap with cause ``proceso_detenido``; the depth channel resumes at the
-same moment, so every slot of that period is closed as ``desconectado``.
+same moment, so every slot of that period is closed as ``desconectado``. The gap of the stop
+begins after the gaps already written that cover that moment (``covered_until``).
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -33,6 +35,22 @@ class DataGap:
     end_at: datetime
     cause: GapCause
     detail: str | None
+
+
+def covered_until(point: datetime, gaps: Iterable[tuple[datetime, datetime]]) -> datetime:
+    """How far the ``gaps`` (start and end, in any order) cover the time from ``point`` on,
+    one after another without leaving any instant out: ``point`` itself if none covers it.
+
+    The gap of a stop begins there (incident of 17 November 2026): after the gaps that a
+    stop already wrote up to the moment it stopped, never past an instant that no gap
+    explains. A gap that begins after ``point`` does not move it, so the gap of the stop may
+    overlap it, but no time is ever left unexplained."""
+    reached = point
+    for start, end in sorted(gaps):
+        if start > reached:
+            break
+        reached = max(reached, end)
+    return reached
 
 
 def cause_from_state_detail(detail: str) -> GapCause:

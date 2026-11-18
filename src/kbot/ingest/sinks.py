@@ -20,6 +20,7 @@ import psycopg
 
 from kbot.ingest.core import InstrumentSpec, ResumePoints, TickOutput
 from kbot.market import store
+from kbot.market.gaps import covered_until
 from kbot.market.last_candles import (
     CandleDecision,
     FlowMinute,
@@ -42,7 +43,7 @@ from kbot.market.universe import UniverseEntry
 
 class Sink(Protocol):
     def resume_points(self, specs: Iterable[InstrumentSpec]) -> ResumePoints: ...
-    def gap_ends(self, specs: Iterable[InstrumentSpec]) -> ResumePoints: ...
+    def stop_gap_starts(self, resume: ResumePoints) -> ResumePoints: ...
     def pending_candles(self, since: datetime) -> list[PendingCandle]: ...
     def pending_index_rebuilds(self, since: datetime) -> list[IndexMinute]: ...
     def unclosed_days(self, since: datetime, before: datetime) -> list[datetime]: ...
@@ -94,13 +95,14 @@ class DatabaseSink:
                 points[(spec.market, spec.symbol, channel)] = value
         return points
 
-    def gap_ends(self, specs: Iterable[InstrumentSpec]) -> ResumePoints:
+    def stop_gap_starts(self, resume: ResumePoints) -> ResumePoints:
+        """Per channel, where the gap of the stop begins: its resume point, moved past the
+        gaps already written that cover it (``gaps.covered_until``)."""
         return {
-            (spec.market, spec.symbol, channel): store.gap_end(
-                self.conn, spec.market, spec.symbol, channel
-            )
-            for spec in specs
-            for channel in spec.channels()
+            key: None
+            if point is None
+            else covered_until(point, store.gaps_ending_after(self.conn, *key, point))
+            for key, point in resume.items()
         }
 
     def pending_candles(self, since: datetime) -> list[PendingCandle]:
@@ -157,7 +159,6 @@ class MemorySink:
 
     def __init__(self) -> None:
         self.resume: dict[tuple[str, str, str], datetime | None] = {}
-        self.gap_end: dict[tuple[str, str, str], datetime | None] = {}
         self.universe: list[UniverseEntry] = []
         self.instruments: list[InstrumentRow] = []
         self.risk_tiers: dict[str, list[RiskTierRow]] = {}
@@ -177,8 +178,22 @@ class MemorySink:
     def resume_points(self, specs: Iterable[InstrumentSpec]) -> ResumePoints:
         return dict(self.resume)
 
-    def gap_ends(self, specs: Iterable[InstrumentSpec]) -> ResumePoints:
-        return dict(self.gap_end)
+    def stop_gap_starts(self, resume: ResumePoints) -> ResumePoints:
+        """As the database answers, with the gaps written to this sink."""
+        written = [g for tick in self.ticks for g in tick.gaps]
+        return {
+            key: None
+            if point is None
+            else covered_until(
+                point,
+                [
+                    (g.start_at, g.end_at)
+                    for g in written
+                    if (g.market, g.symbol, g.channel) == key and g.end_at > point
+                ],
+            )
+            for key, point in resume.items()
+        }
 
     def _trade_flow(self, market: str, symbol: str, minute: datetime) -> FlowMinute | None:
         for tick in self.ticks:

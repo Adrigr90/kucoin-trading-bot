@@ -23,6 +23,10 @@ the universe of the day already started is evaluated as soon as it runs again (E
 Every database write runs in a worker thread, so a slow write never stops the WebSocket
 connections from answering their pings. Every REST call goes through the guarded client
 of E1, inside the machine-wide budget.
+
+A stream or the watchdog that ends by itself stops the recorder, and systemd starts it
+again; whatever the reason for stopping, the recorder first writes the gaps it leaves
+open (incident of 17 November 2026).
 """
 
 from __future__ import annotations
@@ -124,7 +128,8 @@ class Recorder:
             await self._db(self.sink.write_universe, entries)
         specs = await self._reference(entries, listings, now)
         resume = await self._db(self.sink.resume_points, specs)
-        core = RecorderCore(specs, started_at=now, resume=resume)
+        gap_ends = await self._db(self.sink.gap_ends, specs)
+        core = RecorderCore(specs, started_at=now, resume=resume, gap_ends=gap_ends)
         self.core = core
         # The two days before, and any earlier day the database shows recorded but not closed
         # (for example kept open by a candle that could no longer be recovered).
@@ -546,6 +551,14 @@ class Recorder:
             self._check_stall(clock.now())
 
     async def run(self, stop: asyncio.Event, clock: Clock | None = None) -> None:
+        """Record until ``stop`` is set.
+
+        Each second it also checks that both streams and the watchdog are still running. One
+        that ended by itself stops the recorder with ``TaskEnded``, and systemd starts it
+        again (``Restart=on-failure``): a recorder never goes on without one of its markets
+        (incident of 17 November 2026: the Spot stream ended in silence at 17:45 and nothing
+        noticed until midnight). However it stops, it first records what it leaves open
+        (``_record_stop``)."""
         clock = clock or SystemClock()
         await self.startup(clock.now())
         self._last_beat = clock.now()
@@ -555,6 +568,7 @@ class Recorder:
         try:
             while not stop.is_set():
                 await self.step(clock.now())
+                _supervise(streams, watchdog)
                 if self.restart_streams:
                     await _close_streams(streams)
                     moment = clock.now()
@@ -570,13 +584,38 @@ class Recorder:
         finally:
             watchdog.cancel()
             await _close_streams(streams)
+            await self._record_stop(clock.now())
             if self._rest is not None:
                 await self._rest.aclose()
             log.info("recorder_stopped")
 
-    def _open_streams(
-        self, pacer: ConnectionPacer
-    ) -> list[tuple[asyncio.Event, asyncio.Task[None]]]:
+    async def _record_stop(self, now: datetime) -> None:
+        """Write what the recorder leaves open, so that the next start-up and the day close
+        find it explained (incident of 17 November 2026): a last tick, the gaps still open,
+        closed at this moment, and what the instruments that left the universe can no longer
+        close (``RecorderCore.stop``). The next start-up begins its own gap where these end.
+
+        It is the last thing the recorder writes and only a best effort: if it fails, the
+        failure is logged and never hides why the recorder stopped. A stop that does not get
+        this far (a killed process, a power cut) leaves what was open as before: the minutes
+        written while a connection was down keep their S3 rows, and those without a candle
+        stay ``sin_explicar``."""
+        core = self.core
+        if core is None:
+            return
+        try:
+            self._check_stall(now)
+            output = core.tick(now)
+            left_open = core.stop(now)
+            output.gaps += left_open
+            if not output.is_empty():
+                await self._db(self.sink.write_tick, output)
+        except Exception as exc:  # the reason for stopping must not be hidden
+            log.error("stop_not_recorded", error=f"{type(exc).__name__}: {exc}"[:300])
+            return
+        log.info("stop_recorded", gaps=len(left_open))
+
+    def _open_streams(self, pacer: ConnectionPacer) -> list[_Stream]:
         core = self._require_core()
         streams = []
         for market in MARKETS:
@@ -593,8 +632,19 @@ class Recorder:
                 on_control=lambda _message, at, m=market: core.on_alive(m, at),
                 pacer=pacer,
             )
-            streams.append((stop, asyncio.create_task(stream.run(stop))))
+            streams.append(_Stream(market, stop, asyncio.create_task(stream.run(stop))))
         return streams
+
+
+@dataclass(frozen=True)
+class _Stream:
+    market: str
+    stop: asyncio.Event
+    task: asyncio.Task[None]
+
+
+class TaskEnded(RuntimeError):
+    """A stream or the watchdog ended by itself: the recorder cannot go on without it."""
 
 
 def _open_stream(market: str, subscriptions: Any, **callbacks: Any) -> PublicStream:
@@ -602,14 +652,47 @@ def _open_stream(market: str, subscriptions: Any, **callbacks: Any) -> PublicStr
     return PublicStream(market, subscriptions, **callbacks)
 
 
-async def _close_streams(streams: list[tuple[asyncio.Event, asyncio.Task[None]]]) -> None:
-    for stop, _task in streams:
-        stop.set()
-    for _stop, task in streams:
+def _supervise(streams: list[_Stream], watchdog: asyncio.Task[None]) -> None:
+    """Raise ``TaskEnded`` if a stream or the watchdog is no longer running.
+
+    A stream recovers from every connection failure by itself (``PublicStream.run``), so one
+    that ended met something else, such as an error in the recorder's own code; the
+    watchdog only ends when the recorder stops."""
+    tasks = [(f"stream {s.market}", s.task) for s in streams] + [("watchdog", watchdog)]
+    for name, task in tasks:
+        if not task.done():
+            continue
+        error = None if task.cancelled() else task.exception()
+        if task.cancelled():
+            reason = "cancelled"
+        elif error is None:
+            reason = "returned"
+        else:
+            reason = f"{type(error).__name__}: {error}"
+        log.error("task_ended", task=name, reason=reason[:300])
+        raise TaskEnded(f"{name} ended by itself: {reason}") from error
+
+
+async def _close_streams(streams: list[_Stream]) -> None:
+    """Stop every stream and wait for it. It never raises for a stream: one that already
+    failed is logged and the others are still closed (incident of 17 November 2026, when a
+    stream that had failed six hours before made the change of universe crash the
+    recorder). Only the cancellation of the recorder itself goes through."""
+    for stream in streams:
+        stream.stop.set()
+    for stream in streams:
         try:
-            await asyncio.wait_for(task, timeout=10)
+            await asyncio.wait_for(stream.task, timeout=10)
         except TimeoutError:
-            task.cancel()
+            log.warning("stream_not_closed_in_time", market=stream.market)  # it was cancelled
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                raise
+        except Exception as exc:  # the stream failed: logged, the others are still closed
+            log.error(
+                "stream_failed", market=stream.market, error=f"{type(exc).__name__}: {exc}"[:300]
+            )
 
 
 def _list_of(data: Any) -> list[Any]:

@@ -7,6 +7,15 @@ channels, order channels and any other message are refused before they leave the
 Protocol facts confirmed against the live endpoints on 6 November 2026: the welcome
 message carries ``pingInterval`` in ms (18000 that day), ``{"id", "type": "ping"}`` is
 answered with ``{"type": "pong", ...}``, and acknowledgements are ``{"id", "result": true}``.
+KuCoin announced on 25 August 2026 that the welcome would say ``"data": "welcome"`` instead
+of ``"message": "welcome"`` and carry ``pingTimeout``, and postponed the change on 27 August
+without a new date: both forms are accepted.
+
+Every failure of a connection, from the handshake on, is a disconnection that the stream
+reports and recovers from by itself (incident of 17 November 2026: an HTTP 400 on a
+reconnection ended the Spot stream in silence for six hours). Attempts that fail in a row
+wait longer each time, never less than ``RECONNECT_DELAY_SECONDS``. Anything else, such as
+an error in a handler, ends the stream with that error, so that its owner sees it.
 """
 
 from __future__ import annotations
@@ -15,20 +24,24 @@ import asyncio
 import itertools
 import json
 import math
+import random
 import re
 import time
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import structlog
 from websockets.asyncio.client import connect as websocket_connect
-from websockets.exceptions import ConnectionClosed
+from websockets.exceptions import ConnectionClosed, InvalidHandshake
 
 from kbot.core.clock import Clock, SystemClock
 from kbot.kucoin.jsonparse import loads
+
+log = structlog.get_logger("kbot.kucoin.ws")
 
 PUBLIC_ENDPOINTS: Mapping[str, str] = {
     "SPOT": "wss://x-push-spot.kucoin.com",
@@ -44,9 +57,16 @@ MIN_SECONDS_BETWEEN_CONNECTIONS = 5.0
 # The documented ceiling is 300 client messages every 10 s; the same page recommends 100.
 MAX_MESSAGES_PER_WINDOW = 100
 MESSAGE_WINDOW_SECONDS = 10.0
-PONG_TIMEOUT_SECONDS = 3.0
+# KuCoin gives 3 s only as an example ("such as 3 second"). With 3 s the Spot connection
+# was dropped 30 times in under 7 hours on the server (17 November 2026), so the client
+# waits longer, and never less than a pingTimeout the welcome may carry.
+PONG_TIMEOUT_SECONDS = 10.0
+# Slower pongs are logged with where the time went, to measure the wait with real data.
+SLOW_PONG_SECONDS = 1.0
 ACK_TIMEOUT_SECONDS = 10.0
 RECONNECT_DELAY_SECONDS = 5.0
+# Upper bound of the wait between attempts that keep failing; there are never fast retries.
+MAX_RECONNECT_DELAY_SECONDS = 60.0
 # KuCoin closes every connection after 24 h; reconnecting earlier keeps the gap planned.
 MAX_SESSION_SECONDS = 23.5 * 3600
 
@@ -207,13 +227,28 @@ class SessionRotation(Exception):
     """The connection reached its planned lifetime and is reopened."""
 
 
+def reconnect_delay(failures: int, *, base: float, cap: float, rng: random.Random) -> float:
+    """Seconds to wait before the next connection attempt.
+
+    ``failures`` counts the attempts in a row that never got connected: 0 after a session
+    that was connected, 1 after the first attempt that failed. Both wait ``base``. Each
+    further failure doubles the upper bound, up to ``cap``, and the wait is drawn at random
+    from the upper half of the range, as the REST backoff does
+    (``RestRateLimiter.overload``)."""
+    if failures <= 1:
+        return base
+    upper = max(base, min(cap, base * 2 ** (failures - 1)))
+    return rng.uniform(max(base, upper / 2), upper)
+
+
 class PublicStream:
     """One public connection: subscriptions, keep-alive and reconnection.
 
     ``on_state`` receives ``connected`` and ``disconnected`` with the time, so that the
     data layer can record every gap (02 §3.5 and §3.7). ``on_control`` receives the
     server's welcome, acknowledgements and pongs. KuCoin closes connections after 24 h, so
-    the stream reopens its connection itself before then.
+    the stream reopens its connection itself before then. Every disconnection and every
+    reconnection goes to the log as well.
     """
 
     def __init__(
@@ -231,7 +266,9 @@ class PublicStream:
         pong_timeout: float = PONG_TIMEOUT_SECONDS,
         ack_timeout: float = ACK_TIMEOUT_SECONDS,
         reconnect_delay: float = RECONNECT_DELAY_SECONDS,
+        max_reconnect_delay: float = MAX_RECONNECT_DELAY_SECONDS,
         max_session_seconds: float = MAX_SESSION_SECONDS,
+        rng: random.Random | None = None,
     ) -> None:
         self._subscriptions = tuple(subscriptions)
         if not self._subscriptions:
@@ -259,18 +296,27 @@ class PublicStream:
         self._pong_timeout = pong_timeout
         self._ack_timeout = ack_timeout
         self._reconnect_delay = reconnect_delay
+        self._max_reconnect_delay = max_reconnect_delay
         self._max_session = max_session_seconds
+        self._rng = rng or random.SystemRandom()
         self._ids = itertools.count(1)
         # Wall time of the last message received in the current session: the last proof
         # that the connection was alive.
         self._last_alive: datetime | None = None
+        # Whether the current attempt got every subscription confirmed.
+        self._connected = False
 
     async def run(self, stop: asyncio.Event) -> None:
+        failures = 0  # attempts in a row that never got connected
         while not stop.is_set():
+            self._connected = False
             try:
                 await self._session(stop)
             except (
                 ConnectionClosed,
+                # The server refused the handshake: HTTP 400 on a reconnection to Spot ended
+                # the stream on 17 November 2026; it is one more failed attempt.
+                InvalidHandshake,
                 OSError,
                 TimeoutError,
                 ProtocolViolation,
@@ -280,11 +326,27 @@ class PublicStream:
                 # moment the failure was noticed: nothing in between may count as healthy.
                 down_since = self._last_alive or self._wall.now()
                 self._last_alive = None
-                self._on_state("disconnected", down_since, f"{type(exc).__name__}: {exc}")
-            if stop.is_set():
-                break
-            with suppress(TimeoutError):
-                await asyncio.wait_for(stop.wait(), timeout=self._reconnect_delay)
+                detail = f"{type(exc).__name__}: {exc}"
+                self._on_state("disconnected", down_since, detail)
+                failures = 0 if self._connected else failures + 1
+                delay = reconnect_delay(
+                    failures,
+                    base=self._reconnect_delay,
+                    cap=self._max_reconnect_delay,
+                    rng=self._rng,
+                )
+                log.warning(
+                    "ws_disconnected",
+                    trade_type=self._trade_type,
+                    detail=detail[:200],
+                    down_since=down_since.isoformat(),
+                    failed_attempts=failures,
+                    retry_in_s=round(delay, 1),
+                )
+                if stop.is_set():
+                    break
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(stop.wait(), timeout=delay)
 
     async def _session(self, stop: asyncio.Event) -> None:
         async with (
@@ -299,10 +361,13 @@ class PublicStream:
         ):
             opened_at = self._clock()
             welcome = _decode(await asyncio.wait_for(socket.recv(), self._ack_timeout))
-            if welcome.get("message") != "welcome":
+            if not _is_welcome(welcome):
                 raise ProtocolViolation(f"unexpected first message: {str(welcome)[:200]}")
             ping_interval = _ping_interval_seconds(welcome)
+            # Never shorter than what KuCoin says a pong may take, when it says it.
+            pong_timeout = max(self._pong_timeout, _ping_timeout_seconds(welcome) or 0.0)
             self._last_alive = self._wall.now()
+            last_received = self._clock()
             self._on_control(welcome, self._last_alive)
             budget = MessageBudget(clock=self._clock, sleep=self._sleep)
             pending_acks: set[str] = set()
@@ -313,6 +378,10 @@ class PublicStream:
             ack_deadline = self._clock() + self._ack_timeout
             next_ping = self._clock() + ping_interval
             pong_deadline: float | None = None
+            ping_sent: tuple[float, datetime] | None = None  # monotonic and wall time
+            # Messages read since the last ping: a pong arrives after everything KuCoin
+            # pushed before it on the same connection.
+            since_ping = 0
             announced = False
 
             while not stop.is_set():
@@ -322,11 +391,17 @@ class PublicStream:
                 if pending_acks and now >= ack_deadline:
                     raise ProtocolViolation(f"no acknowledgement for {sorted(pending_acks)}")
                 if pong_deadline is not None and now >= pong_deadline:
-                    raise ProtocolViolation("no pong in time")
+                    # Whether data kept arriving tells a late pong from a silent connection.
+                    raise ProtocolViolation(
+                        f"no pong in time ({pong_timeout:g} s; {since_ping} messages received"
+                        f" since the ping, the last {now - last_received:.1f} s before)"
+                    )
                 if pong_deadline is None and now >= next_ping:
                     await self._send(socket, budget, {"id": f"p{next(self._ids)}", "type": "ping"})
-                    pong_deadline = now + self._pong_timeout
+                    pong_deadline = now + pong_timeout
                     next_ping = now + ping_interval
+                    ping_sent = (now, self._wall.now())
+                    since_ping = 0
                 deadlines = [next_ping if pong_deadline is None else pong_deadline]
                 if pending_acks:
                     deadlines.append(ack_deadline)
@@ -337,10 +412,15 @@ class PublicStream:
                 except TimeoutError:
                     continue
                 received_at = self._wall.now()
+                last_received = self._clock()
                 self._last_alive = received_at
                 message = _decode(raw)
                 if message.get("type") == "pong":
+                    if ping_sent is not None:
+                        waited = last_received - ping_sent[0]
+                        self._measure_pong(message, waited, ping_sent[1], since_ping)
                     pong_deadline = None
+                    ping_sent = None
                     self._on_control(message, received_at)
                 elif "result" in message:
                     if message.get("result") is not True:
@@ -351,9 +431,39 @@ class PublicStream:
                     self._on_message(message, received_at)
                 else:
                     self._on_state("unexpected_message", received_at, str(message)[:200])
+                since_ping += 1
                 if not announced and not pending_acks:
                     announced = True
+                    self._connected = True
                     self._on_state("connected", received_at, self._url)
+                    log.info(
+                        "ws_connected",
+                        trade_type=self._trade_type,
+                        ping_interval_s=ping_interval,
+                        pong_timeout_s=pong_timeout,
+                    )
+
+    def _measure_pong(
+        self, pong: Mapping[str, Any], waited: float, sent_at: datetime, messages: int
+    ) -> None:
+        """A pong slower than ``SLOW_PONG_SECONDS`` goes to the log, with the messages read
+        before it since the ping and, when its ``ts`` (when KuCoin sent it, in ns [H]) is
+        plausible, where the time went: until KuCoin sent it, and from then until it was
+        read here (the network, and the messages queued before it)."""
+        if waited < SLOW_PONG_SECONDS:
+            return
+        fields: dict[str, Any] = {
+            "trade_type": self._trade_type,
+            "waited_ms": round(waited * 1000),
+            "messages_before": messages,
+        }
+        ts = pong.get("ts")
+        if isinstance(ts, int) and not isinstance(ts, bool) and ts >= _PLAUSIBLE_NS:
+            sent_by_server = _EPOCH + timedelta(microseconds=ts // 1000)
+            read_at = sent_at + timedelta(seconds=waited)
+            fields["until_sent_ms"] = round((sent_by_server - sent_at) / timedelta(milliseconds=1))
+            fields["after_sent_ms"] = round((read_at - sent_by_server) / timedelta(milliseconds=1))
+        log.info("ws_slow_pong", **fields)
 
     async def _send(self, socket: Any, budget: MessageBudget, message: dict[str, str]) -> None:
         check_outgoing(message)
@@ -375,8 +485,27 @@ def _decode(raw: str | bytes) -> dict[str, Any]:
     return message
 
 
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+_PLAUSIBLE_NS = 10**18  # a time in ns after 2001: anything smaller is not one
+
+
+def _is_welcome(message: Mapping[str, Any]) -> bool:
+    """The welcome as KuCoin sends it today, or as it announced it will (25 August 2026)."""
+    return message.get("message") == "welcome" or message.get("data") == "welcome"
+
+
 def _ping_interval_seconds(welcome: Mapping[str, Any]) -> float:
     value = welcome.get("pingInterval")
     if not isinstance(value, int) or isinstance(value, bool) or not 1000 <= value <= 120_000:
         raise ProtocolViolation(f"unusable pingInterval in the welcome: {value!r}")
+    return value / 1000
+
+
+def _ping_timeout_seconds(welcome: Mapping[str, Any]) -> float | None:
+    """The announced ``pingTimeout``: how long a pong may take, in ms. None if absent."""
+    if "pingTimeout" not in welcome:
+        return None
+    value = welcome["pingTimeout"]
+    if not isinstance(value, int) or isinstance(value, bool) or not 1000 <= value <= 120_000:
+        raise ProtocolViolation(f"unusable pingTimeout in the welcome: {value!r}")
     return value / 1000

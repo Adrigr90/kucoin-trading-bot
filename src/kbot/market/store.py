@@ -736,6 +736,20 @@ def flow_resume_point(
     return row[0] + timedelta(minutes=1)
 
 
+def gap_end(conn: psycopg.Connection, market: str, symbol: str, channel: str) -> datetime | None:
+    """End of the last gap written for this channel, or None. A stop recorded with the
+    connection down writes its open gap up to the stop, after the last minute written; the
+    gap of the stop begins there (incident of 17 November 2026)."""
+    row = conn.execute(
+        "SELECT max(end_at) FROM market.data_gaps"
+        " WHERE market = %s AND channel = %s AND symbol = %s",
+        (market, channel, symbol),
+    ).fetchone()
+    if row is None or row[0] is None:
+        return None
+    return row[0]
+
+
 def pending_candles(conn: psycopg.Connection, since: datetime) -> list[PendingCandle]:
     """Minutes of the last series that still wait for their REST candle (audit E2-01): a
     trade flow row since ``since`` with neither a candle nor a terminal status, with its

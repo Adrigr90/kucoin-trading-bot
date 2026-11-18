@@ -18,13 +18,17 @@ from typing import Any
 import psycopg
 import pytest
 
+from kbot.ingest.core import InstrumentSpec
+from kbot.ingest.sinks import DatabaseSink
 from kbot.market.depth import DepthChannel
-from kbot.market.gaps import GapCause, GapTracker
+from kbot.market.gaps import DataGap, GapCause, GapTracker
 from kbot.market.store import (
     depth_channel_name,
+    gap_end,
     resume_point,
     slot_states,
     write_depth,
+    write_gap,
     write_late_books,
 )
 
@@ -134,6 +138,28 @@ def test_f2_a5_a_stop_and_a_restart(ingest: psycopg.Connection) -> None:
         (symbol,),
     ).fetchall()
     assert snapshots == [(at(0), at(50), 1)]
+
+
+def test_the_start_up_reads_where_the_last_gap_of_each_channel_ends(
+    ingest: psycopg.Connection,
+) -> None:
+    """Incident of 17 November 2026: a stop recorded with a connection down writes its open
+    gap up to the stop, after the last minute written, and the next start-up begins the gap
+    of the stop there. It reads it as kbot_ingest, channel by channel."""
+    symbol = "G" + secrets.token_hex(5).upper() + "-USDT"
+    assert gap_end(ingest, "SPOT", symbol, "trade") is None
+    for start, end in ((at(0), at(30)), (at(100), at(400)), (at(500), at(520))):
+        write_gap(ingest, DataGap("SPOT", "trade", symbol, start, end, GapCause.SIN_PONG, None))
+    write_gap(ingest, DataGap("SPOT", "kline", symbol, at(0), at(900), GapCause.SIN_PONG, None))
+    assert gap_end(ingest, "SPOT", symbol, "trade") == at(520)
+    assert gap_end(ingest, "SPOT", symbol, "kline") == at(900)
+    assert gap_end(ingest, "FUTURES", symbol, "trade") is None
+    spec = InstrumentSpec("SPOT", symbol, Decimal("0.1"), Decimal(1), l50=False)
+    assert DatabaseSink(ingest).gap_ends([spec]) == {
+        ("SPOT", symbol, "obu5"): None,
+        ("SPOT", symbol, "trade"): at(520),
+        ("SPOT", symbol, "kline"): at(900),
+    }
 
 
 def test_a_late_book_is_kept_and_its_slots_count_as_late(ingest: psycopg.Connection) -> None:

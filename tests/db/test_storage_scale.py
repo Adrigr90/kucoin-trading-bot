@@ -117,6 +117,10 @@ def test_planning_and_maintenance_with_the_partitions_of_production(
             "SELECT max(minute_start) FROM market.data_quality_minute"
             " WHERE market = 'SPOT' AND symbol = 'BTC-USDT' AND channel = 'trade'"
         ),
+        "gap_end (every day)": sql.SQL(
+            "SELECT max(end_at) FROM market.data_gaps"
+            " WHERE market = 'SPOT' AND channel = 'trade' AND symbol = 'BTC-USDT'"
+        ),
         "one day of depth_metrics": sql.SQL(
             "SELECT * FROM market.depth_metrics WHERE market = 'SPOT' AND symbol = 'BTC-USDT'"
             " AND depth = 5 AND slot_start >= {start} AND slot_start < {start} + interval '1 day'"

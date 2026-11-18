@@ -28,6 +28,10 @@ Cada comando que Claude ejecuta en el servidor por SSH (respuesta P-E4-1) aparec
 | *(en la consola web de Oracle, no en el servidor)* | **Cuando cambia la IP doméstica:** *Networking → Virtual cloud networks → `kbot-vcn` → Security Lists → la lista por defecto → Ingress Rules*, editar la regla de SSH y poner como origen `<IP nueva>/32` (`oracle_instancia.md` §4). Se puede hacer también desde el móvil. El servidor no guarda la IP, así que no hace falta entrar en él (decisión del propietario del 17 nov 2026) |
 | `sudo systemctl status svc-ingest` | Estado del grabador |
 | `sudo journalctl -u svc-ingest --since "1 hour ago"` | Registro del grabador de la última hora |
+| `sudo journalctl -u svc-ingest -o cat --since today \| grep -E 'ws_disconnected\|task_ended\|stop_'` | Desconexiones y paradas del grabador de hoy, con su causa y la espera hasta el siguiente intento (desde la corrección del 18 nov 2026) |
+| `sudo journalctl -u svc-ingest -o cat --since today \| grep ws_slow_pong` | Los pongs que tardaron más de 1 s: cuánto tardó KuCoin en enviarlos, cuánto desde entonces y cuántos mensajes llegaron antes |
+| `systemctl show svc-ingest -p NRestarts` | Cuántas veces ha vuelto a arrancar systemd el grabador tras un fallo |
+| `sudo -u postgres psql -d kbot -c "SELECT market, cause, count(DISTINCT start_at) FROM market.data_gaps WHERE start_at > now() - interval '1 day' GROUP BY 1, 2"` | Cortes de las últimas 24 h por mercado y causa (solo lectura) |
 | `sudo systemctl enable --now kbot-archive-daily.timer svc-ingest` | Arranca el grabador y el archivo diario (al final de E4b, con PostgreSQL ya instalado) |
 | `sudo systemctl stop svc-ingest` | Para el grabador |
 | `sudo reboot` | Reinicia el servidor. Solo lo decide el propietario (las actualizaciones nunca reinician solas) |

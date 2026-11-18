@@ -42,6 +42,7 @@ from kbot.market.universe import UniverseEntry
 
 class Sink(Protocol):
     def resume_points(self, specs: Iterable[InstrumentSpec]) -> ResumePoints: ...
+    def gap_ends(self, specs: Iterable[InstrumentSpec]) -> ResumePoints: ...
     def pending_candles(self, since: datetime) -> list[PendingCandle]: ...
     def pending_index_rebuilds(self, since: datetime) -> list[IndexMinute]: ...
     def unclosed_days(self, since: datetime, before: datetime) -> list[datetime]: ...
@@ -92,6 +93,15 @@ class DatabaseSink:
                     value = store.flow_resume_point(self.conn, spec.market, spec.symbol, channel)
                 points[(spec.market, spec.symbol, channel)] = value
         return points
+
+    def gap_ends(self, specs: Iterable[InstrumentSpec]) -> ResumePoints:
+        return {
+            (spec.market, spec.symbol, channel): store.gap_end(
+                self.conn, spec.market, spec.symbol, channel
+            )
+            for spec in specs
+            for channel in spec.channels()
+        }
 
     def pending_candles(self, since: datetime) -> list[PendingCandle]:
         return store.pending_candles(self.conn, since)
@@ -147,6 +157,7 @@ class MemorySink:
 
     def __init__(self) -> None:
         self.resume: dict[tuple[str, str, str], datetime | None] = {}
+        self.gap_end: dict[tuple[str, str, str], datetime | None] = {}
         self.universe: list[UniverseEntry] = []
         self.instruments: list[InstrumentRow] = []
         self.risk_tiers: dict[str, list[RiskTierRow]] = {}
@@ -165,6 +176,9 @@ class MemorySink:
 
     def resume_points(self, specs: Iterable[InstrumentSpec]) -> ResumePoints:
         return dict(self.resume)
+
+    def gap_ends(self, specs: Iterable[InstrumentSpec]) -> ResumePoints:
+        return dict(self.gap_end)
 
     def _trade_flow(self, market: str, symbol: str, minute: datetime) -> FlowMinute | None:
         for tick in self.ticks:

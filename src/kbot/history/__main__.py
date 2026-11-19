@@ -8,8 +8,9 @@
 ``descargar`` asks KuCoin, with the read-only client of E1, for the 1-minute candles of the
 last ``--dias`` days (730 by default) of each instrument, day by day, and keeps the opening
 dates of the Futures contracts (``contratos_futures.json``) as evidence of eligibility.
-Repeating it resumes: a closed day is never asked again. ``informe`` writes the coverage
-report from the files alone (``informe_cobertura.md`` and ``cobertura.json``).
+What it asks for goes first to ``solicitado.json`` of each instrument. Repeating it
+resumes: a closed day is never asked again. ``informe`` writes the coverage report from the
+files alone, walking what was asked (``informe_cobertura.md`` and ``cobertura.json``).
 ``--solo MERCADO:SÍMBOLO`` (repeatable) limits either to some instruments.
 """
 

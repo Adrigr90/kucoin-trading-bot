@@ -18,7 +18,11 @@ from kbot.history.store import (
     Conflict,
     paths,
     read_candles,
+    read_day,
     read_record,
+    record_request,
+    requested,
+    stored_days,
     write_day,
 )
 from kbot.market.last_candles import Ohlcv
@@ -168,6 +172,41 @@ def test_a_conflict_is_two_different_candles_of_an_answered_minute_without_a_can
             [Conflict(late.open_time, (late, candle(61, "2")))],
         )
     assert not paths(tmp_path, "SPOT", "BTC-USDT", DAY)[0].exists(), "nothing written"
+
+
+def test_what_was_asked_is_kept_merged_and_apart_from_the_days(tmp_path: Path) -> None:
+    """F3E1-02: each download adds its window before asking anything. Overlapping or
+    touching windows merge; a separate one stays apart; nothing asked, nothing kept."""
+    hour = timedelta(hours=1)
+    assert requested(tmp_path, "SPOT", "BTC-USDT") == []
+    record_request(tmp_path, "SPOT", "BTC-USDT", Window(START, START + 2 * hour))
+    record_request(tmp_path, "SPOT", "BTC-USDT", Window(START + 5 * hour, START + 6 * hour))
+    record_request(tmp_path, "SPOT", "BTC-USDT", Window(START + hour, START + 3 * hour))
+    asked = record_request(tmp_path, "SPOT", "BTC-USDT", Window(START + 3 * hour, START + 4 * hour))
+    assert asked == [
+        Window(START, START + 4 * hour),
+        Window(START + 5 * hour, START + 6 * hour),
+    ]
+    assert requested(tmp_path, "SPOT", "BTC-USDT") == asked
+    assert stored_days(tmp_path, "SPOT", "BTC-USDT") == [], "solicitado.json is not a day"
+
+
+def test_a_day_is_valid_only_with_its_two_files_matching(tmp_path: Path) -> None:
+    """Why a day has no valid record: never downloaded (no file), a write stopped halfway
+    or damage (one file without the other, or a SHA-256 that does not match)."""
+    assert read_day(tmp_path, "SPOT", "BTC-USDT", DAY) == (None, "")
+    record = write_day(tmp_path, "SPOT", "BTC-USDT", DAY, WHOLE, [candle(0)], everything(), NOW)
+    assert read_day(tmp_path, "SPOT", "BTC-USDT", DAY) == (record, "")
+    assert stored_days(tmp_path, "SPOT", "BTC-USDT") == [DAY]
+    target, record_path = paths(tmp_path, "SPOT", "BTC-USDT", DAY)
+    kept = target.read_bytes()
+    target.write_bytes(kept + b"x")
+    assert read_day(tmp_path, "SPOT", "BTC-USDT", DAY) == (None, "la huella no coincide")
+    target.unlink()
+    assert read_day(tmp_path, "SPOT", "BTC-USDT", DAY) == (None, "sin archivo Parquet")
+    target.write_bytes(kept)
+    record_path.unlink()
+    assert read_day(tmp_path, "SPOT", "BTC-USDT", DAY) == (None, "sin registro")
 
 
 def test_a_candle_outside_the_window_or_a_window_outside_the_day_is_refused(

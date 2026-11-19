@@ -26,10 +26,12 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from enum import StrEnum
 
 from kbot.market.timeutil import MINUTE, as_utc, floor_to
+
+DAY = timedelta(days=1)
 
 
 class Presence(StrEnum):
@@ -71,6 +73,28 @@ class Window:
 
     def __len__(self) -> int:
         return (self.end - self.start) // MINUTE
+
+
+def day_windows(window: Window) -> Iterator[tuple[date, Window]]:
+    """The window split by UTC day."""
+    start = window.start
+    while start < window.end:
+        end = min(floor_to(start, DAY) + DAY, window.end)
+        yield start.date(), Window(start, end)
+        start = end
+
+
+def merged(windows: Iterable[Window]) -> list[Window]:
+    """The windows in order, joining those that overlap or touch, without empty ones."""
+    result: list[Window] = []
+    for window in sorted(windows, key=lambda w: (w.start, w.end)):
+        if window.start == window.end:
+            continue
+        if result and window.start <= result[-1].end:
+            result[-1] = Window(result[-1].start, max(result[-1].end, window.end))
+        else:
+            result.append(window)
+    return result
 
 
 @dataclass(frozen=True)

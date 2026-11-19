@@ -1,12 +1,15 @@
 """Higher timeframes from the minutes: the cases of the data contract (02 §12.1, point 8)
-that this part answers for (F3-A2): CD-01, CD-06 to CD-10 and CD-17."""
+that this part answers for (F3-A2): CD-01, CD-06 to CD-10 and CD-17; and exact sums
+(F3E1-01)."""
 
 from __future__ import annotations
 
+import json
 import random
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import Context, Decimal, Inexact, localcontext
+from pathlib import Path
 
 import pytest
 
@@ -23,6 +26,11 @@ from kbot.history.timeframes import (
 from kbot.market.last_candles import CandleEvidence, Ohlcv
 
 DAY = datetime(2026, 11, 10, tzinfo=UTC)
+FIXTURES = Path(__file__).resolve().parents[2] / "fixtures" / "history"
+# The largest and the smallest positive values of format 2, decimal128(38, 24), and zero.
+LARGEST = Decimal("99999999999999.999999999999999999999999")
+SMALLEST = Decimal("0.000000000000000000000001")
+ZERO = Decimal("0.000000000000000000000000")
 
 
 def minute(
@@ -57,6 +65,69 @@ def test_a_complete_candle_is_made_from_its_minutes() -> None:
     assert bar.volume == Decimal(10)
     assert bar.turnover == sum(Decimal(2) * (100 + i) for i in range(5))  # exact decimals
     assert bar.complete and bar.minutes_present == 5
+
+
+def day_of(start: datetime, volumes: list[Decimal], turnovers: list[Decimal]) -> list[Bar]:
+    one = Decimal(1)
+    candles = [
+        historical_minute(
+            "SPOT", "ZEC-USDT", Ohlcv(start + timedelta(minutes=i), one, one, one, one, v, t)
+        )
+        for i, (v, t) in enumerate(zip(volumes, turnovers, strict=True))
+    ]
+    return aggregate(candles, "1d", downloaded_until=start + timedelta(days=1))
+
+
+def by_integers(values: list[Decimal]) -> Decimal:
+    """The sum of values of 24 decimals with integers alone, with no decimal context."""
+    total = 0
+    for value in values:
+        sign, digits, exponent = value.as_tuple()
+        assert exponent == -24
+        coefficient = int("".join(map(str, digits)))
+        total += -coefficient if sign else coefficient
+    return Decimal(f"{total}E-24")
+
+
+@pytest.mark.parametrize("precision", [3, 28, 200])
+def test_volume_and_turnover_are_exact_whatever_the_ambient_context(precision: int) -> None:
+    """F3E1-01, with the real case: the daily candle of Spot ZEC-USDT of 7 November 2025,
+    read from the history. With the ambient context (28 digits) its turnover came out as
+    287386854.5583713212601414940."""
+    data = json.loads((FIXTURES / "zec_usdt_2025-11-07.json").read_text(encoding="utf-8"))
+    volumes = [Decimal(v) for v in data["volumen"]]
+    turnovers = [Decimal(t) for t in data["turnover"]]
+    start = datetime(2025, 11, 7, tzinfo=UTC)
+    with localcontext(Context(prec=precision)):
+        (bar,) = day_of(start, volumes, turnovers)
+    assert bar.complete
+    assert str(bar.turnover) == "287386854.558371321260141494040000"
+    assert str(bar.volume) == "440345.663926703542127382560000"
+    assert (bar.volume, bar.turnover) == (by_integers(volumes), by_integers(turnovers))
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        [LARGEST] * 1440,
+        [SMALLEST] * 1440,
+        [LARGEST, SMALLEST] * 720,
+        [ZERO] * 1439 + [SMALLEST],
+    ],
+    ids=["largest", "smallest", "both", "zeros"],
+)
+def test_the_sums_of_a_day_at_the_limits_of_format_2_are_exact(values: list[Decimal]) -> None:
+    """F3E1-01: 1440 values at the limits of format 2, 14 integer digits and 24 decimals
+    (02 §3.9), give their exact sum with the ambient context of 28 digits."""
+    (bar,) = day_of(DAY, values, values)
+    assert bar.volume == bar.turnover == by_integers(values)
+
+
+def test_a_sum_that_does_not_fit_raises_instead_of_rounding() -> None:
+    """Beyond the 80 digits of the accounting context: ``Inexact``, never a rounded sum."""
+    values = [Decimal("1E+60"), SMALLEST]
+    with pytest.raises(Inexact):
+        day_of(DAY, values, values)
 
 
 def test_the_same_minutes_in_another_order_and_repeated_give_the_same_candles() -> None:

@@ -13,6 +13,10 @@
   conflict stopped the download, so it has none.
 * **Both are written atomically:** a temporary name, synced, then renamed, the Parquet file
   first. A record whose SHA-256 does not match its file does not count.
+* **What was asked, apart from the days:** ``<root>/<market>/<symbol>/solicitado.json``
+  keeps the windows asked for the instrument, merged, and the download writes it before
+  any request. The report walks those windows, not the files: a day without files is
+  ``no_descargado``, and one whose files are not a valid pair too, named (F3E1-02).
 * **A day is closed** when it has ended, none of its minutes is left undownloaded and it was
   downloaded at least ``SETTLING`` (48 h) after its end: KuCoin may still change a recent
   day, as it did on 19 November 2026 (CD-19 and CD-20). Until then each download writes
@@ -34,12 +38,14 @@ import pyarrow.parquet as pq
 
 from kbot.archive import parquet
 from kbot.archive.parquet import Column
-from kbot.history.coverage import Presence, Request, Window, presence
+from kbot.history.coverage import Presence, Request, Window, merged, presence
 from kbot.market.last_candles import CandleEvidence, CandleState, Ohlcv
 from kbot.market.mark_candles import FlowState
 from kbot.market.timeutil import as_utc
 
 FORMAT = "kbot.history 1"
+REQUESTED = "solicitado.json"
+REQUESTED_FORMAT = "kbot.history solicitado 1"
 DAY = timedelta(days=1)
 # A day closes only if downloaded this long after its end: the 48 h during which the
 # recorder still asks for its REST candles (02 §3.8 and §12.1, point 1; CD-20).
@@ -167,13 +173,67 @@ def write_day(
 
 def read_record(root: Path, market: str, symbol: str, day: date) -> DayRecord | None:
     """The record of a day, or None if there is none or it does not match its file."""
+    return read_day(root, market, symbol, day)[0]
+
+
+def read_day(root: Path, market: str, symbol: str, day: date) -> tuple[DayRecord | None, str]:
+    """The record of a day and ``""`` if its two files are a valid pair; else None and why
+    not: ``""`` too if the day has no file at all (never downloaded), and a reason if its
+    files do not make a valid day (a write stopped halfway, or damage)."""
     target, record_path = paths(root, market, symbol, day)
-    if not (target.exists() and record_path.exists()):
-        return None
+    if not target.exists() and not record_path.exists():
+        return None, ""
+    if not record_path.exists():
+        return None, "sin registro"
+    if not target.exists():
+        return None, "sin archivo Parquet"
     record = _decode(json.loads(record_path.read_text(encoding="utf-8")))
     if record.sha256 != parquet.sha256(target):
-        return None
-    return record
+        return None, "la huella no coincide"
+    return record, ""
+
+
+def record_request(root: Path, market: str, symbol: str, window: Window) -> list[Window]:
+    """Add ``window`` to what was asked for the instrument, before asking anything, and
+    return all of it, merged (F3E1-02)."""
+    asked = merged([*requested(root, market, symbol), window])
+    path = root / market / symbol / REQUESTED
+    path.parent.mkdir(parents=True, exist_ok=True)
+    content = {
+        "formato": REQUESTED_FORMAT,
+        "mercado": market,
+        "simbolo": symbol,
+        "ventanas": [[w.start.isoformat(), w.end.isoformat()] for w in asked],
+    }
+    _write_json(path, content)
+    return asked
+
+
+def requested(root: Path, market: str, symbol: str) -> list[Window]:
+    """The windows asked for the instrument, merged; none if it was never asked for."""
+    path = root / market / symbol / REQUESTED
+    if not path.exists():
+        return []
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if data.get("formato") != REQUESTED_FORMAT:
+        raise ValueError(f"unknown format of {path}: {data.get('formato')!r}")
+    windows = [
+        Window(datetime.fromisoformat(s), datetime.fromisoformat(e)) for s, e in data["ventanas"]
+    ]
+    if merged(windows) != windows:
+        raise ValueError(f"{path}: the windows are not merged and in order")
+    return windows
+
+
+def stored_days(root: Path, market: str, symbol: str) -> list[date]:
+    """The days with some file of the instrument, valid or not."""
+    folder = root / market / symbol
+    days = set()
+    for path in folder.iterdir() if folder.exists() else []:
+        name = path.name.split(".", 1)[0]
+        if path.suffix in (".parquet", ".json") and path.name != REQUESTED:
+            days.add(date.fromisoformat(name))
+    return sorted(days)
 
 
 def read_candles(root: Path, market: str, symbol: str, day: date) -> list[Ohlcv]:

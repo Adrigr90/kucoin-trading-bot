@@ -5,6 +5,11 @@ Per instrument and day: the minutes of the window by presence and eligibility, t
 stretches, the contradictions and the coverage, with the numerator and the denominator
 apart. Every candle of the history is only REST, so the share of results based only on REST
 is 100 %; and the survivorship bias that remains is declared.
+
+The report walks the windows asked for each instrument (``solicitado.json``), never the
+files found (F3E1-02): a day never downloaded counts its minutes as ``no_descargado``, and so
+does a day whose files are not a valid pair, listed with the reason. Days with files outside
+what was asked are listed apart and count nowhere.
 """
 
 from __future__ import annotations
@@ -22,13 +27,18 @@ from kbot.history.coverage import (
     EligibilitySpan,
     Presence,
     coverage,
+    day_windows,
     presence,
 )
-from kbot.history.store import read_candles, read_record
+from kbot.history.store import read_candles, read_day, requested, stored_days
 
 HEADER = (
     "- **Todas las velas son solo REST** (`vela_rest_suficiente`): el porcentaje de "
     "resultados basados solo en REST es del 100 %.",
+    "- **Ventana:** la solicitada a KuCoin para cada instrumento (`solicitado.json`), que la "
+    "descarga guarda antes de pedir nada. Un día sin archivos cuenta sus minutos como "
+    "`no_descargado`; uno con archivos que no forman un par válido, también, y se cuenta "
+    "en «Días sin registro válido».",
     "- **Cobertura** = minutos presentes de E / minutos de E, con E los minutos de la "
     "ventana cuya elegibilidad no es `no_elegible`; «no aplicable» si E está vacío.",
     "- **En conflicto:** minutos para los que una respuesta de KuCoin trajo dos velas "
@@ -49,6 +59,7 @@ COLUMNS = (
     "Elegibilidad desconocida",
     "No elegibles",
     "Contradicciones",
+    "Días sin registro válido",
     "Cobertura",
 )
 
@@ -58,7 +69,9 @@ class InstrumentReport:
     market: str
     symbol: str
     days: list[tuple[date, Coverage]] = field(default_factory=list)
-    missing_records: list[date] = field(default_factory=list)  # files without a valid record
+    # Days of the window whose files are not a valid pair, with the reason: no_descargado.
+    invalid: list[tuple[date, str]] = field(default_factory=list)
+    outside: list[date] = field(default_factory=list)  # files outside what was asked
 
     @property
     def total(self) -> Coverage:
@@ -76,16 +89,25 @@ def instrument_report(
     root: Path, market: str, symbol: str, evidence: Sequence[EligibilitySpan]
 ) -> InstrumentReport:
     report = InstrumentReport(market, symbol)
-    folder = root / market / symbol
-    for parquet_file in sorted(folder.glob("*.parquet")) if folder.exists() else []:
-        day = date.fromisoformat(parquet_file.stem)
-        record = read_record(root, market, symbol, day)
-        if record is None:
-            report.missing_records.append(day)
-            continue
-        present = [c.open_time for c in read_candles(root, market, symbol, day)]
-        states = presence(record.window, record.requests, present, record.in_conflict)
-        report.days.append((day, coverage(states, evidence)))
+    asked = requested(root, market, symbol)
+    walked = set()
+    for window in asked:
+        for day, part in day_windows(window):
+            walked.add(day)
+            record, problem = read_day(root, market, symbol, day)
+            if record is not None and not (
+                part.start <= record.window.start and record.window.end <= part.end
+            ):
+                record, problem = None, "su ventana sale de lo solicitado"
+            if problem:
+                report.invalid.append((day, problem))
+            if record is None:
+                states = presence(part, [], [])  # nothing valid: every minute no_descargado
+            else:
+                present = [c.open_time for c in read_candles(root, market, symbol, day)]
+                states = presence(part, record.requests, present, record.in_conflict)
+            report.days.append((day, coverage(states, evidence)))
+    report.outside = [day for day in stored_days(root, market, symbol) if day not in walked]
     return report
 
 
@@ -121,7 +143,7 @@ def write(
             f"| {total.total(Presence.PRESENTE)} | {total.total(Presence.AUSENTE)} "
             f"| {total.total(Presence.EN_CONFLICTO)} "
             f"| {total.total(Presence.NO_DESCARGADO)} | {unknown} | {not_eligible} "
-            f"| {len(total.contradictions)} | {shown} |"
+            f"| {len(total.contradictions)} | {len(report.invalid)} | {shown} |"
         )
         out.append(
             {
@@ -133,7 +155,10 @@ def write(
                 "contradicciones": [m.isoformat() for m in total.contradictions],
                 "en_conflicto": [m.isoformat() for m in total.in_conflict],
                 "tramos_fallidos": [[s.isoformat(), e.isoformat()] for s, e in total.failed],
-                "sin_registro_valido": [d.isoformat() for d in report.missing_records],
+                "sin_registro_valido": [
+                    {"dia": d.isoformat(), "motivo": reason} for d, reason in report.invalid
+                ],
+                "fuera_de_lo_solicitado": [d.isoformat() for d in report.outside],
                 "por_dia": [
                     {
                         "dia": day.isoformat(),

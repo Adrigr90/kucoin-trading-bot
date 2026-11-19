@@ -16,6 +16,9 @@
   came with two candles for 2026-11-18 09:03 UTC, a full one and a partial one, while a
   narrower request gave one; by 22:10 UTC KuCoin gave only the full one (CD-20). Two
   identical candles are one.
+* **What is asked is written first:** the window of each instrument goes to its
+  ``solicitado.json`` before any request (``store.record_request``), and the report walks
+  it, so a day never downloaded still counts, as ``no_descargado``.
 * **Day by day:** a closed day is skipped, any other is downloaded whole and written
   (``store``). A day closes only if downloaded at least 48 h after its end, so a recent
   day, conflicts included, is asked again until then. Repeating the download changes no
@@ -36,8 +39,8 @@ from typing import Any
 import httpx
 import structlog
 
-from kbot.history.coverage import Request, Window
-from kbot.history.store import Conflict, DayRecord, read_record, write_day
+from kbot.history.coverage import Request, Window, day_windows
+from kbot.history.store import Conflict, DayRecord, read_record, record_request, write_day
 from kbot.kucoin.rest import KucoinApiError, KucoinRestClient
 from kbot.market.last_candles import STABILIZATION, Ohlcv, rest_kline
 from kbot.market.timeutil import MINUTE, as_utc, floor_to, to_milliseconds
@@ -82,15 +85,6 @@ def chunks(window: Window, size: int) -> Iterator[tuple[datetime, datetime]]:
         first = last + MINUTE
 
 
-def day_windows(window: Window) -> Iterator[tuple[date, Window]]:
-    """The window split by UTC day."""
-    start = window.start
-    while start < window.end:
-        end = min(floor_to(start, DAY) + DAY, window.end)
-        yield start.date(), Window(start, end)
-        start = end
-
-
 Sleep = Callable[[float], Awaitable[None]]
 
 
@@ -111,7 +105,10 @@ class Downloader:
     async def instrument(
         self, instrument: Instrument, window: Window, now: datetime
     ) -> list[DayRecord]:
-        """Download every day of the window that is not closed yet."""
+        """Download every day of the window that is not closed yet. The window is added to
+        what was asked for the instrument before asking anything, so that the report counts
+        every minute of it even if the download stops halfway (F3E1-02)."""
+        record_request(self.root, instrument.market, instrument.symbol, window)
         records = []
         for day, part in day_windows(window):
             held = read_record(self.root, instrument.market, instrument.symbol, day)

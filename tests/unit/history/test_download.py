@@ -24,7 +24,8 @@ from kbot.history.download import (
     closed_until,
     window_for,
 )
-from kbot.history.store import SETTLING, DayRecord, read_candles, read_record
+from kbot.history.report import instrument_report
+from kbot.history.store import SETTLING, DayRecord, read_candles, read_record, requested
 from kbot.kucoin.ratelimit import RestRateLimiter
 from kbot.kucoin.rest import KucoinRestClient
 
@@ -44,6 +45,10 @@ def row(moment: datetime) -> list[object]:
     return [int(moment.timestamp()), "100", "101", "99", "100.5", "2", "201"]
 
 
+class Interrupted(BaseException):
+    """The process stops in the middle of a download, as with Ctrl+C or a power cut."""
+
+
 @dataclass
 class FakeKlines(httpx.AsyncBaseTransport):
     """KuCoin's candles of 1 minute: rows by (market, symbol), newest first. A request can
@@ -54,6 +59,7 @@ class FakeKlines(httpx.AsyncBaseTransport):
     repeated: dict[tuple[str, str], list[list[object]]] = field(default_factory=dict)
     failures: dict[tuple[str, int], int] = field(default_factory=dict)
     unreadable: set[tuple[str, int]] = field(default_factory=set)
+    interrupt: set[tuple[str, int]] = field(default_factory=set)  # the process stops there
     asked: list[tuple[str, int, int]] = field(default_factory=list)
 
     def add(self, market: str, symbol: str, start: datetime, minutes: int, skip: set[int]) -> None:
@@ -69,6 +75,8 @@ class FakeKlines(httpx.AsyncBaseTransport):
         start, end = int(q["startAt"]), int(q["endAt"])
         key = (q["symbol"], start)
         self.asked.append((q["symbol"], start, end))
+        if key in self.interrupt:
+            raise Interrupted
         if self.failures.get(key, 0) > 0:
             self.failures[key] -= 1
             raise httpx.ConnectError("unreachable (simulated)", request=request)
@@ -171,6 +179,32 @@ def test_a_request_that_keeps_failing_leaves_its_minutes_for_the_next_run(
     assert first_again == first, "the closed day is not touched"
     new = fake.asked[asked_before:]
     assert all(start >= int(START.timestamp()) - 60 for _s, start, _e in new), "only the open day"
+
+
+def test_an_interrupted_download_leaves_its_window_whole_in_the_report(
+    test_client: Factory, tmp_path: Path
+) -> None:
+    """F3E1-02 through the download: the process stops while asking for the second of
+    three days. The window was written before asking anything, so the report counts the
+    three days: the first present and the other two no_descargado, never 1440/1440. The
+    next run fills them."""
+    fake = FakeKlines()
+    fake.add("SPOT", "BTC-USDT", START, 3 * 1440, set())
+    window = Window(START, START + timedelta(days=3))
+    fake.interrupt.add(("BTC-USDT", int((START + timedelta(days=1)).timestamp()) - 60))
+    with pytest.raises(Interrupted):
+        run(test_client, fake, tmp_path, Instrument("SPOT", "BTC-USDT"), window)
+    assert requested(tmp_path, "SPOT", "BTC-USDT") == [window]
+    report = instrument_report(tmp_path, "SPOT", "BTC-USDT", [])
+    assert (report.total.numerator, report.total.denominator) == (1440, 3 * 1440)
+    day = timedelta(days=1)
+    assert report.total.failed == [(START + day, START + 2 * day), (START + 2 * day, END + 2 * day)]
+    assert len(report.days) == 3 and report.invalid == []
+
+    fake.interrupt.clear()
+    run(test_client, fake, tmp_path, Instrument("SPOT", "BTC-USDT"), window)
+    report = instrument_report(tmp_path, "SPOT", "BTC-USDT", [])
+    assert (report.total.numerator, report.total.denominator) == (3 * 1440, 3 * 1440)
 
 
 def test_two_different_candles_for_a_minute_leave_it_in_conflict(

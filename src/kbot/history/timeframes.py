@@ -11,6 +11,9 @@ points 3 to 5; F3-E1).
   how many of its N minutes there are. It is **complete** with all N, **incomplete** with
   fewer (kept for the reports, never used by an indicator), and with none there is no
   candle: that is an absence.
+* **The sums are exact:** they run in the accounting context (precision 80, ``Inexact``
+  trapped), never in the ambient one, whose 28 digits rounded the daily turnover of
+  ZEC-USDT (F3E1-01). A sum that does not fit raises; it is never rounded.
 * **It only exists closed:** an interval that has not ended within what was downloaded
   gives no candle. A complete candle is **available** when the last of its minutes is
   (CD-R02); before that it does not exist for anybody.
@@ -29,6 +32,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from enum import IntEnum
 
+from kbot.core.decimal import accounting
 from kbot.market.last_candles import STABILIZATION, CandleEvidence, Ohlcv
 from kbot.market.timeutil import MINUTE, as_utc, floor_to
 
@@ -164,8 +168,8 @@ def aggregate(
                 high=max(c.high for c in candles),
                 low=min(c.low for c in candles),
                 close=candles[-1].close,
-                volume=sum((c.volume for c in candles), Decimal(0)),
-                turnover=sum((c.turnover for c in candles), Decimal(0)),
+                volume=exact_sum(c.volume for c in candles),
+                turnover=exact_sum(c.turnover for c in candles),
                 minutes_present=len(members),
                 minutes=length,
                 price=max(m.price for m in members),
@@ -176,6 +180,14 @@ def aggregate(
             )
         )
     return bars
+
+
+def exact_sum(values: Iterable[Decimal]) -> Decimal:
+    """The exact sum, whatever the ambient decimal context. Format 2 holds at most 14
+    integer digits and 24 decimals, so the 1440 minutes of a day add up to at most 42
+    digits, far below the 80 of the accounting context; beyond them ``Inexact`` is raised."""
+    with accounting():
+        return sum(values, Decimal(0))
 
 
 def consecutive(first: Bar, second: Bar) -> bool:

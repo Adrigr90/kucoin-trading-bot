@@ -1445,7 +1445,7 @@ Fija qué datos ve un indicador y cuándo puede dar un valor. Vale para el hist�
 - **Serie:** las velas de 1 minuto de `last` (operaciones) de cada instrumento. `mark` e `index` no alimentan indicadores en la F3.
 - **Histórico (F3-E1):** solo REST, con el cliente de la E1 (solo `GET`, lista blanca, el único presupuesto REST de la máquina, sin claves). Cada vela descargada es `cerrada_rest` con evidencia `vela_rest_suficiente`. No hay flujo grabado: su flujo cuenta como S3 y **nunca** se infiere `ausencia_sin_trades_probable` (§3.4 [H12]).
 - **Universo:** los 20 + 20 instrumentos del último `universe_snapshots` del grabador en la fecha de la descarga, guardados como lista versionada en el repositorio con esa fecha, más los deslistados que KuCoin aún sirva [P: `docs/kucoin/historico.md`]. El sesgo de supervivencia que quede se declara en cada informe.
-- **Archivo:** Parquet (zstd) con las columnas y los tipos de `candles` de E3 (§3.8 y §3.9, punto 6: decimales en `decimal128(38, 18)`, horas en UTC con µs). Un archivo por mercado, símbolo y día UTC, escrito de forma atómica (temporal y renombrado), con su SHA-256 en un manifiesto. La descarga es **reanudable e idempotente**: repetirla no cambia ningún archivo cerrado.
+- **Archivo:** Parquet (zstd) con las columnas y los tipos de `candles` de E3 (§3.8 y §3.9, punto 6: decimales en `decimal128(38, 24)` desde el formato 2 del 18 nov 2026, horas en UTC con µs). Un archivo por mercado, símbolo y día UTC, escrito de forma atómica (temporal y renombrado), con su SHA-256 en un manifiesto. La descarga es **reanudable e idempotente**: repetirla no cambia ningún archivo cerrado.
 
 **2. Ventana, elegibilidad y presencia de cada minuto** (punto 1; CD-R01)
 

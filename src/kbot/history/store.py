@@ -1,10 +1,10 @@
 """The day files of the history on the PC (``02`` §12.1, point 1; F3-E1).
 
 * **One Parquet file per market, symbol and UTC day,** zstd, with the columns and types of
-  ``candles`` (E3: decimals in ``decimal128(38, 18)``, moments in UTC microseconds), in
-  ``<root>/<market>/<symbol>/<day>.parquet``. Each row is a candle of ``last`` that KuCoin
-  returned: ``cerrada_rest``, ``vela_rest_suficiente``, and flow S3, because there is no
-  recorded flow (§3.4 [H12]). A minute without a candle has no row.
+  ``candles`` (E3, format 2: decimals in ``decimal128(38, 24)``, moments in UTC
+  microseconds), in ``<root>/<market>/<symbol>/<day>.parquet``. Each row is a candle of
+  ``last`` that KuCoin returned: ``cerrada_rest``, ``vela_rest_suficiente``, and flow S3,
+  because there is no recorded flow (§3.4 [H12]). A minute without a candle has no row.
 * **Next to it, its record** (``<day>.json``): the SHA-256 and the rows of the Parquet file,
   the window of the day and every request with its outcome. With them the coverage report
   is rebuilt from the files alone (``coverage``).

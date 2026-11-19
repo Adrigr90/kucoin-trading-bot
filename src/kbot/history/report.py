@@ -31,6 +31,9 @@ HEADER = (
     "resultados basados solo en REST es del 100 %.",
     "- **Cobertura** = minutos presentes de E / minutos de E, con E los minutos de la "
     "ventana cuya elegibilidad no es `no_elegible`; «no aplicable» si E está vacío.",
+    "- **En conflicto:** minutos para los que una respuesta de KuCoin trajo dos velas "
+    "distintas. No se usa ninguna; cuentan en E y nunca como presentes, y sus velas quedan "
+    "en el registro del día.",
     "- **Sesgo de supervivencia:** el universo es el del grabador en esa fecha; los "
     "instrumentos que ya no cotizan y cuyas velas KuCoin no sirve no están.",
 )
@@ -41,6 +44,7 @@ COLUMNS = (
     "Minutos",
     "Presentes",
     "Ausentes",
+    "En conflicto",
     "No descargados",
     "Elegibilidad desconocida",
     "No elegibles",
@@ -63,6 +67,7 @@ class InstrumentReport:
             for key, count in part.counts.items():
                 total.counts[key] = total.counts.get(key, 0) + count
             total.contradictions += part.contradictions
+            total.in_conflict += part.in_conflict
             total.failed += part.failed
         return total
 
@@ -79,9 +84,8 @@ def instrument_report(
             report.missing_records.append(day)
             continue
         present = [c.open_time for c in read_candles(root, market, symbol, day)]
-        report.days.append(
-            (day, coverage(presence(record.window, record.requests, present), evidence))
-        )
+        states = presence(record.window, record.requests, present, record.in_conflict)
+        report.days.append((day, coverage(states, evidence)))
     return report
 
 
@@ -115,6 +119,7 @@ def write(
         lines.append(
             f"| {report.market} | {report.symbol} | {len(report.days)} | {minutes} "
             f"| {total.total(Presence.PRESENTE)} | {total.total(Presence.AUSENTE)} "
+            f"| {total.total(Presence.EN_CONFLICTO)} "
             f"| {total.total(Presence.NO_DESCARGADO)} | {unknown} | {not_eligible} "
             f"| {len(total.contradictions)} | {shown} |"
         )
@@ -126,6 +131,7 @@ def write(
                 "denominador": total.denominator,
                 "cobertura": ratio,
                 "contradicciones": [m.isoformat() for m in total.contradictions],
+                "en_conflicto": [m.isoformat() for m in total.in_conflict],
                 "tramos_fallidos": [[s.isoformat(), e.isoformat()] for s, e in total.failed],
                 "sin_registro_valido": [d.isoformat() for d in report.missing_records],
                 "por_dia": [

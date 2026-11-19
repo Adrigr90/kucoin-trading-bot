@@ -11,7 +11,7 @@ from pathlib import Path
 from kbot.history.__main__ import main, save_contracts
 from kbot.history.coverage import Eligibility, Request, Window
 from kbot.history.report import instrument_report
-from kbot.history.store import write_day
+from kbot.history.store import Conflict, write_day
 from kbot.history.universe import evidence, first_open_dates, load
 from kbot.market.last_candles import Ohlcv
 from kbot.market.timeutil import EPOCH
@@ -85,6 +85,39 @@ def test_the_report_is_built_from_the_files_and_matches_them(tmp_path: Path) -> 
     assert (total.numerator, total.denominator) == (1439, 2880)
     assert total.failed == [(second, second + timedelta(minutes=100))]
     assert {e for (_p, e) in total.counts} == {Eligibility.DESCONOCIDA}
+
+
+def test_the_report_counts_and_lists_the_minutes_in_conflict(tmp_path: Path) -> None:
+    """CD-19 in the report: a column of its own and the list in the data, in the
+    denominator and not in the numerator."""
+    whole = Window(START, START + timedelta(days=1))
+    everything = [Request(START, START + timedelta(minutes=1439), True)]
+    seven = candle(7)
+    partial = Ohlcv(
+        seven.open_time, seven.open, seven.high, seven.low, seven.close, Decimal(2), seven.turnover
+    )
+    write_day(
+        tmp_path,
+        "SPOT",
+        "DOT-USDT",
+        START.date(),
+        whole,
+        [candle(m) for m in range(1440) if m != 7],
+        everything,
+        NOW,
+        [Conflict(seven.open_time, (seven, partial))],
+    )
+    save_contracts(tmp_path, {})
+    arguments = ["--universo", str(UNIVERSE), "--carpeta", str(tmp_path)]
+    assert main(["informe", *arguments, "--solo", "SPOT:DOT-USDT"]) == 0
+    data = json.loads((tmp_path / "cobertura.json").read_text(encoding="utf-8"))
+    (dot,) = data["instrumentos"]
+    assert dot["en_conflicto"] == [seven.open_time.isoformat()]
+    assert (dot["numerador"], dot["denominador"]) == (1439, 1440)
+    assert dot["por_dia"][0]["presencia"]["en_conflicto/desconocida"] == 1
+    markdown = (tmp_path / "informe_cobertura.md").read_text(encoding="utf-8")
+    assert "| Presentes | Ausentes | En conflicto | No descargados |" in markdown
+    assert "| SPOT | DOT-USDT | 1 | 1440 | 1439 | 0 | 1 | 0 |" in markdown
 
 
 def test_the_report_command_writes_its_files(tmp_path: Path) -> None:

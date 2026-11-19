@@ -6,8 +6,11 @@
   ``last`` that KuCoin returned: ``cerrada_rest``, ``vela_rest_suficiente``, and flow S3,
   because there is no recorded flow (§3.4 [H12]). A minute without a candle has no row.
 * **Next to it, its record** (``<day>.json``): the SHA-256 and the rows of the Parquet file,
-  the window of the day and every request with its outcome. With them the coverage report
-  is rebuilt from the files alone (``coverage``).
+  the window of the day, every request with its outcome and the minutes in conflict, each
+  with the different candles that KuCoin gave for it, none of which is in the Parquet
+  file. With them the coverage report is rebuilt from the files alone (``coverage``). A
+  record without the minutes in conflict was written before 19 November 2026, when a
+  conflict stopped the download, so it has none.
 * **Both are written atomically:** a temporary name, synced, then renamed, the Parquet file
   first. A record whose SHA-256 does not match its file does not count.
 * **A day is closed** when it has ended and none of its minutes is left undownloaded. A
@@ -21,6 +24,7 @@ import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -60,6 +64,15 @@ CANDLE_COLUMNS: tuple[Column, ...] = (
 
 
 @dataclass(frozen=True)
+class Conflict:
+    """A minute for which one answer of KuCoin brought two or more different candles: none
+    is used, and all of them are kept, as KuCoin gave them."""
+
+    minute: datetime
+    candles: tuple[Ohlcv, ...]
+
+
+@dataclass(frozen=True)
 class DayRecord:
     market: str
     symbol: str
@@ -69,13 +82,19 @@ class DayRecord:
     rows: int
     sha256: str
     downloaded_at: datetime
+    conflicts: tuple[Conflict, ...] = ()
+
+    @property
+    def in_conflict(self) -> list[datetime]:
+        return [conflict.minute for conflict in self.conflicts]
 
     @property
     def closed(self) -> bool:
-        """Ended, and none of its minutes left undownloaded."""
+        """Ended, and none of its minutes left undownloaded. A minute in conflict was
+        answered, so it does not keep its day open."""
         if self.window.end < datetime.combine(self.day, datetime.min.time(), UTC) + DAY:
             return False  # the window stops before the end of the day: not over yet
-        states = presence(self.window, self.requests, ())
+        states = presence(self.window, self.requests, (), self.in_conflict)
         return Presence.NO_DESCARGADO not in states.values()
 
 
@@ -93,6 +112,7 @@ def write_day(
     candles: Sequence[Ohlcv],
     requests: Sequence[Request],
     downloaded_at: datetime,
+    conflicts: Sequence[Conflict] = (),
 ) -> DayRecord:
     """Write the candles of a day and its record. Refuses to write over a closed day."""
     held = read_record(root, market, symbol, day)
@@ -104,6 +124,14 @@ def write_day(
     for candle in candles:
         if not (window.start <= as_utc(candle.open_time, "open_time") < window.end):
             raise ValueError(f"{day}: a candle outside the window: {candle.open_time}")
+    for conflict in conflicts:
+        if not (window.start <= as_utc(conflict.minute, "minute") < window.end):
+            raise ValueError(f"{day}: a conflict outside the window: {conflict.minute}")
+        different = len(set(conflict.candles)) == len(conflict.candles) >= 2
+        if not different or any(c.open_time != conflict.minute for c in conflict.candles):
+            raise ValueError(f"{day}: a conflict needs two different candles of its minute")
+    # Present and in conflict at once, or a conflict no answer covers: refused here.
+    presence(window, requests, [c.open_time for c in candles], [c.minute for c in conflicts])
     target, record_path = paths(root, market, symbol, day)
     target.parent.mkdir(parents=True, exist_ok=True)
     recorded = as_utc(downloaded_at, "downloaded_at")
@@ -114,7 +142,15 @@ def write_day(
     os.replace(temporary, target)
     parquet.sync(target.parent)
     record = DayRecord(
-        market, symbol, day, window, tuple(requests), len(rows), parquet.sha256(target), recorded
+        market,
+        symbol,
+        day,
+        window,
+        tuple(requests),
+        len(rows),
+        parquet.sha256(target),
+        recorded,
+        tuple(sorted(conflicts, key=_minute)),
     )
     _write_json(record_path, _encode(record))
     return record
@@ -157,6 +193,10 @@ def _open(candle: Ohlcv) -> datetime:
     return candle.open_time
 
 
+def _minute(conflict: Conflict) -> datetime:
+    return conflict.minute
+
+
 def _row(market: str, symbol: str, candle: Ohlcv, recorded: datetime) -> list[Any]:
     return [
         "last",
@@ -194,7 +234,19 @@ def _encode(record: DayRecord) -> dict[str, Any]:
         "filas": record.rows,
         "sha256": record.sha256,
         "descargado": record.downloaded_at.isoformat(),
+        "en_conflicto": [
+            {
+                "apertura": conflict.minute.isoformat(),
+                "velas": [[format(v, "f") for v in _values(c)] for c in conflict.candles],
+            }
+            for conflict in record.conflicts
+        ],
     }
+
+
+def _values(candle: Ohlcv) -> tuple[Decimal, ...]:
+    """Open, high, low, close, volume and turnover: a REST row without its time."""
+    return candle.open, candle.high, candle.low, candle.close, candle.volume, candle.turnover
 
 
 def _decode(data: dict[str, Any]) -> DayRecord:
@@ -217,7 +269,14 @@ def _decode(data: dict[str, Any]) -> DayRecord:
         rows=int(data["filas"]),
         sha256=str(data["sha256"]),
         downloaded_at=datetime.fromisoformat(data["descargado"]),
+        conflicts=tuple(_conflict(c) for c in data.get("en_conflicto", [])),
     )
+
+
+def _conflict(data: dict[str, Any]) -> Conflict:
+    minute = datetime.fromisoformat(data["apertura"])
+    candles = tuple(Ohlcv(minute, *(Decimal(v) for v in values)) for values in data["velas"])
+    return Conflict(minute, candles)
 
 
 def _write_json(path: Path, content: dict[str, Any]) -> None:

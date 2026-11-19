@@ -9,6 +9,12 @@
   minutes: present or absent. A failure (network, a KuCoin error, an unreadable row, which
   spoils the whole answer) is asked again a few times; if it still fails, its minutes stay
   ``no_descargado``, and the next run asks for them again.
+* **Two different candles for one minute in an answer:** that minute is ``en_conflicto``.
+  Neither candle is used or chosen, both go to the record of the day, and the rest of the
+  answer counts. It is settled, like an absence: asking again gives the same answer. KuCoin
+  does this: on 19 November 2026 a whole day of Spot DOT-USDT came with two candles for
+  2026-11-18 09:03 UTC, a full one and a partial one, while a narrower request gave one.
+  Two identical candles are one.
 * **Day by day:** a closed day is skipped, any other is downloaded whole and written
   (``store``). Repeating the download changes no closed file.
 * **Only closed minutes:** the window ends at the last minute whose stabilization margin has
@@ -28,7 +34,7 @@ import httpx
 import structlog
 
 from kbot.history.coverage import Request, Window
-from kbot.history.store import DayRecord, read_record, write_day
+from kbot.history.store import Conflict, DayRecord, read_record, write_day
 from kbot.kucoin.rest import KucoinApiError, KucoinRestClient
 from kbot.market.last_candles import STABILIZATION, Ohlcv, rest_kline
 from kbot.market.timeutil import MINUTE, as_utc, floor_to, to_milliseconds
@@ -117,23 +123,33 @@ class Downloader:
     ) -> DayRecord:
         size = PER_REQUEST[instrument.market] - 2  # one minute more on each side
         requests: list[Request] = []
-        candles: dict[datetime, Ohlcv] = {}
+        candles: dict[datetime, list[Ohlcv]] = {}  # the different candles of each minute
         for first, last in chunks(window, size):
             got = await self._ask(instrument, first, last)
             requests.append(Request(first, last, got is not None))
             for candle in got or []:
-                held = candles.setdefault(candle.open_time, candle)
-                if held != candle:
-                    raise ValueError(f"{instrument}: two different candles at {candle.open_time}")
+                held = candles.setdefault(candle.open_time, [])
+                if candle not in held:
+                    held.append(candle)
+        conflicts = [Conflict(m, tuple(c)) for m, c in sorted(candles.items()) if len(c) > 1]
+        for conflict in conflicts:
+            log.warning(
+                "history_conflict",
+                market=instrument.market,
+                symbol=instrument.symbol,
+                minute=conflict.minute.isoformat(),
+                candles=len(conflict.candles),
+            )
         record = write_day(
             self.root,
             instrument.market,
             instrument.symbol,
             day,
             window,
-            list(candles.values()),
+            [c[0] for c in candles.values() if len(c) == 1],
             requests,
             now,
+            conflicts,
         )
         failed = sum(1 for r in requests if not r.succeeded)
         log.info(
@@ -142,6 +158,7 @@ class Downloader:
             symbol=instrument.symbol,
             day=day.isoformat(),
             candles=record.rows,
+            in_conflict=len(record.conflicts),
             failed_requests=failed,
             closed=record.closed,
         )

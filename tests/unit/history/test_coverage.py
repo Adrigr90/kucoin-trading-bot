@@ -1,5 +1,5 @@
 """Window, eligibility, presence and coverage: the cases of the data contract (02 §12.1,
-point 8) that this part answers for (F3-A1): CD-11 and CD-13 to CD-16."""
+point 8) that this part answers for (F3-A1): CD-11, CD-13 to CD-16 and CD-19."""
 
 from __future__ import annotations
 
@@ -105,6 +105,34 @@ def test_only_independent_evidence_makes_a_minute_not_eligible() -> None:
     whole = coverage(presence(Window(at(0), at(3)), [Request(at(0), at(2), True)], []), [withdrawn])
     assert whole.denominator == 0
     assert whole.ratio is None, "a window entirely not eligible: not applicable"
+
+
+def test_a_minute_in_conflict_counts_in_e_but_is_never_present() -> None:
+    """CD-19: of five minutes answered, one came with two different candles. It is in
+    conflict, listed apart, in the denominator and never in the numerator; it is no failed
+    stretch. If it is not eligible, it is a contradiction too, since KuCoin gave candles
+    for it, and it counts neither above nor below."""
+    window = Window(at(0), at(5))
+    answered = [Request(at(0), at(4), True)]
+    states = presence(window, answered, [at(0), at(1), at(3), at(4)], [at(2)])
+    assert states[at(2)] is Presence.EN_CONFLICTO
+    report = coverage(states, [])
+    assert report.in_conflict == [at(2)] and report.failed == [] and not report.contradictions
+    assert report.total(Presence.EN_CONFLICTO) == 1
+    assert (report.numerator, report.denominator) == (4, 5)
+    withdrawn = EligibilitySpan(at(2), at(3), eligible=False, source="anuncio https://...")
+    apart = coverage(states, [withdrawn])
+    assert apart.contradictions == [at(2)] and apart.in_conflict == [at(2)]
+    assert (apart.numerator, apart.denominator) == (4, 4)
+
+
+def test_presence_refuses_a_record_that_contradicts_itself() -> None:
+    """A minute in conflict has no candle, and an answer covers it."""
+    window = Window(at(0), at(5))
+    with pytest.raises(ValueError, match="present and in conflict"):
+        presence(window, [Request(at(0), at(4), True)], [at(2)], [at(2)])
+    with pytest.raises(ValueError, match="without an answer"):
+        presence(window, [Request(at(0), at(4), False)], [], [at(2)])
 
 
 def test_a_minute_covered_by_a_failed_and_a_successful_request_was_downloaded() -> None:

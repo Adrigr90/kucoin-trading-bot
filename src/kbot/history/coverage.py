@@ -11,11 +11,13 @@ Three different things, none deduced from another:
   minute of unknown eligibility counts in the denominator.
 * **The presence** of each minute: ``presente`` if KuCoin returned its candle; ``ausente``
   if the request that covers it succeeded without it, also when the answer came empty or
-  with gaps at its ends; ``no_descargado`` if that request failed or was never made.
+  with gaps at its ends; ``en_conflicto`` if that answer brought two different candles for
+  it, so that none is used; ``no_descargado`` if that request failed or was never made.
 
 The coverage of a set of minutes is the share of those with eligibility other than
 ``no_elegible`` (the set E) that are present; with E empty it is not applicable, never 0 or
-100 %. A candle in a ``no_elegible`` minute is a **contradiction**: it is still present, it
+100 %. A minute in conflict counts in E but is never present. A candle in a ``no_elegible``
+minute, one or two different ones, is a **contradiction**: the minute keeps its presence, it
 is reported apart and it counts neither above nor below.
 """
 
@@ -32,7 +34,12 @@ from kbot.market.timeutil import MINUTE, as_utc, floor_to
 class Presence(StrEnum):
     PRESENTE = "presente"
     AUSENTE = "ausente"
+    EN_CONFLICTO = "en_conflicto"
     NO_DESCARGADO = "no_descargado"
+
+
+# A no_elegible minute with any of these had a candle from KuCoin: a contradiction.
+WITH_CANDLES = (Presence.PRESENTE, Presence.EN_CONFLICTO)
 
 
 class Eligibility(StrEnum):
@@ -94,12 +101,22 @@ class EligibilitySpan:
 
 
 def presence(
-    window: Window, requests: Iterable[Request], present: Iterable[datetime]
+    window: Window,
+    requests: Iterable[Request],
+    present: Iterable[datetime],
+    in_conflict: Iterable[datetime] = (),
 ) -> dict[datetime, Presence]:
     """The presence of every minute of the window. A minute covered by a request that
     succeeded is never ``no_descargado``, whatever other requests for it did. The ranges
-    of the requests that succeeded are merged and walked once, in order."""
+    of the requests that succeeded are merged and walked once, in order.
+
+    A minute in conflict came in an answer, so a request that succeeded covers it, and it
+    has no candle: otherwise its record contradicts itself, and this raises ``ValueError``.
+    """
     have = {as_utc(moment, "present") for moment in present}
+    clash = {as_utc(moment, "in_conflict") for moment in in_conflict}
+    if have & clash:
+        raise ValueError(f"present and in conflict at once: {sorted(have & clash)[0]}")
     merged: list[tuple[datetime, datetime]] = []
     for first, last in sorted((r.first, r.last) for r in requests if r.succeeded):
         if merged and first <= merged[-1][1] + MINUTE:
@@ -111,9 +128,14 @@ def presence(
     for moment in window.minutes():
         while index < len(merged) and merged[index][1] < moment:
             index += 1
+        answered = index < len(merged) and merged[index][0] <= moment
         if moment in have:
             result[moment] = Presence.PRESENTE
-        elif index < len(merged) and merged[index][0] <= moment:
+        elif moment in clash:
+            if not answered:
+                raise ValueError(f"in conflict without an answer that covers it: {moment}")
+            result[moment] = Presence.EN_CONFLICTO
+        elif answered:
             result[moment] = Presence.AUSENTE
         else:
             result[moment] = Presence.NO_DESCARGADO
@@ -137,6 +159,7 @@ class Coverage:
 
     counts: dict[tuple[Presence, Eligibility], int] = field(default_factory=dict)
     contradictions: list[datetime] = field(default_factory=list)  # no_elegible with a candle
+    in_conflict: list[datetime] = field(default_factory=list)  # two different candles
     failed: list[tuple[datetime, datetime]] = field(default_factory=list)  # [start, end)
 
     @property
@@ -170,8 +193,10 @@ def coverage(states: dict[datetime, Presence], evidence: Iterable[EligibilitySpa
         state = states[moment]
         elig = eligibility(moment, spans)
         result.counts[(state, elig)] = result.counts.get((state, elig), 0) + 1
-        if state is Presence.PRESENTE and elig is Eligibility.NO_ELEGIBLE:
+        if state in WITH_CANDLES and elig is Eligibility.NO_ELEGIBLE:
             result.contradictions.append(moment)
+        if state is Presence.EN_CONFLICTO:
+            result.in_conflict.append(moment)
         contiguous = previous is not None and moment - previous == MINUTE
         ends = state is not Presence.NO_DESCARGADO or not contiguous
         if failed_from is not None and previous is not None and ends:

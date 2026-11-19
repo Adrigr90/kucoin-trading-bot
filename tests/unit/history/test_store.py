@@ -4,6 +4,7 @@ F3-A1)."""
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -11,7 +12,14 @@ from pathlib import Path
 import pytest
 
 from kbot.history.coverage import Request, Window
-from kbot.history.store import CANDLE_COLUMNS, paths, read_candles, read_record, write_day
+from kbot.history.store import (
+    CANDLE_COLUMNS,
+    Conflict,
+    paths,
+    read_candles,
+    read_record,
+    write_day,
+)
 from kbot.market.last_candles import Ohlcv
 from tools.measure_archive import MIGRATION, table_specs
 
@@ -80,6 +88,68 @@ def test_a_day_with_a_failed_request_or_not_over_stays_open(tmp_path: Path) -> N
     half = [Request(START, START + timedelta(hours=10) - timedelta(minutes=1), True)]
     today = write_day(tmp_path, "FUTURES", "XBTUSDTM", DAY, partial, [], half, NOW)
     assert not today.closed, "the window stops before the end of the day"
+
+
+def test_the_minutes_in_conflict_go_to_the_record_with_their_exact_candles(
+    tmp_path: Path,
+) -> None:
+    """CD-19: none of the candles of a minute in conflict is in the Parquet file; all of
+    them are in the record, exact, and the day still closes."""
+    full, partial = candle(543, "0.7314"), candle(543, "0.000000000000000000000001")
+    conflict = Conflict(full.open_time, (full, partial))
+    record = write_day(
+        tmp_path, "SPOT", "DOT-USDT", DAY, WHOLE, [candle(0)], everything(), NOW, [conflict]
+    )
+    assert record.closed, "a minute in conflict was answered: it keeps no day open"
+    assert record.conflicts == (conflict,) and record.in_conflict == [full.open_time]
+    assert read_record(tmp_path, "SPOT", "DOT-USDT", DAY) == record
+    assert [c.open_time for c in read_candles(tmp_path, "SPOT", "DOT-USDT", DAY)] == [START]
+    _target, record_path = paths(tmp_path, "SPOT", "DOT-USDT", DAY)
+    (kept,) = json.loads(record_path.read_text(encoding="utf-8"))["en_conflicto"]
+    assert kept["velas"][1][3] == "0.000000000000000000000001", "as text, exact"
+
+
+def test_a_record_written_before_the_conflicts_has_none(tmp_path: Path) -> None:
+    """Records written before 19 November 2026 lack the field: a conflict then stopped the
+    download, so they have none."""
+    record = write_day(tmp_path, "SPOT", "BTC-USDT", DAY, WHOLE, [candle(0)], everything(), NOW)
+    _target, record_path = paths(tmp_path, "SPOT", "BTC-USDT", DAY)
+    data = json.loads(record_path.read_text(encoding="utf-8"))
+    assert data.pop("en_conflicto") == []
+    record_path.write_text(json.dumps(data), encoding="utf-8")
+    assert read_record(tmp_path, "SPOT", "BTC-USDT", DAY) == record
+    assert record.conflicts == ()
+
+
+def test_a_conflict_is_two_different_candles_of_an_answered_minute_without_a_candle(
+    tmp_path: Path,
+) -> None:
+    one = candle(10)
+    other = candle(10, "1.5")
+    wrong = [
+        ("two different candles", [], [Conflict(one.open_time, (one,))], everything()),
+        ("two different candles", [], [Conflict(one.open_time, (one, one))], everything()),
+        ("two different candles", [], [Conflict(START, (one, other))], everything()),
+        ("present and in conflict", [one], [Conflict(one.open_time, (one, other))], everything()),
+        ("without an answer", [], [Conflict(one.open_time, (one, other))], []),
+    ]
+    for message, candles, conflicts, requests in wrong:
+        with pytest.raises(ValueError, match=message):
+            write_day(tmp_path, "SPOT", "BTC-USDT", DAY, WHOLE, candles, requests, NOW, conflicts)
+    late = candle(61)
+    with pytest.raises(ValueError, match="conflict outside the window"):
+        write_day(
+            tmp_path,
+            "SPOT",
+            "BTC-USDT",
+            DAY,
+            Window(START, START + timedelta(hours=1)),
+            [],
+            everything(),
+            NOW,
+            [Conflict(late.open_time, (late, candle(61, "2")))],
+        )
+    assert not paths(tmp_path, "SPOT", "BTC-USDT", DAY)[0].exists(), "nothing written"
 
 
 def test_a_candle_outside_the_window_or_a_window_outside_the_day_is_refused(

@@ -9,6 +9,7 @@ import itertools
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 
 import httpx
@@ -43,6 +44,8 @@ class FakeKlines(httpx.AsyncBaseTransport):
     be made to fail, a number of times, by (symbol, first second asked)."""
 
     rows: dict[tuple[str, str], dict[int, list[object]]] = field(default_factory=dict)
+    # More rows for a minute that already has one, after it, as KuCoin sometimes sends.
+    repeated: dict[tuple[str, str], list[list[object]]] = field(default_factory=dict)
     failures: dict[tuple[str, int], int] = field(default_factory=dict)
     unreadable: set[tuple[str, int]] = field(default_factory=set)
     asked: list[tuple[str, int, int]] = field(default_factory=list)
@@ -63,12 +66,10 @@ class FakeKlines(httpx.AsyncBaseTransport):
         if self.failures.get(key, 0) > 0:
             self.failures[key] -= 1
             raise httpx.ConnectError("unreachable (simulated)", request=request)
-        rows = [
-            r
-            for s, r in self.rows.get((q["tradeType"], q["symbol"]), {}).items()
-            if start <= s <= end
-        ]
-        rows.sort(key=lambda r: -int(r[0]))  # type: ignore[call-overload]
+        key_rows = (q["tradeType"], q["symbol"])
+        rows = [r for s, r in self.rows.get(key_rows, {}).items() if start <= s <= end]
+        rows += [r for r in self.repeated.get(key_rows, []) if start <= int(r[0]) <= end]  # type: ignore[call-overload]
+        rows.sort(key=lambda r: -int(r[0]))  # type: ignore[call-overload]  # stable: repeats after
         if key in self.unreadable:
             rows.append(["not", "a", "row"])
         data = {"tradeType": q["tradeType"], "symbol": q["symbol"], "list": rows}
@@ -159,6 +160,49 @@ def test_a_request_that_keeps_failing_leaves_its_minutes_for_the_next_run(
     assert first_again == first, "the closed day is not touched"
     new = fake.asked[asked_before:]
     assert all(start >= int(START.timestamp()) - 60 for _s, start, _e in new), "only the open day"
+
+
+def test_two_different_candles_for_a_minute_leave_it_in_conflict(
+    test_client: Factory, tmp_path: Path
+) -> None:
+    """CD-19, with what KuCoin answered on 19 November 2026 for a whole day of Spot
+    DOT-USDT: two candles for 09:03 UTC, the full one and then a partial one. Neither is
+    used or chosen, both go to the record exactly, the rest of the day counts, the day
+    closes and the download goes on; the next run asks nothing. Two identical candles,
+    also sent twice, are one."""
+    fake = FakeKlines()
+    fake.add("SPOT", "DOT-USDT", START, 1440, set())
+    nine = START + timedelta(hours=9, minutes=3)
+    second = int(nine.timestamp())
+    full = [second, "0.7317", "0.7317", "0.7309", "0.7314", "5281.1148", "3862.5702601"]
+    partial = [second, "0.7317", "0.7317", "0.7316", "0.7316", "108.8588", "79.6482513"]
+    fake.rows[("SPOT", "DOT-USDT")][second] = full
+    fake.repeated[("SPOT", "DOT-USDT")] = [partial, row(START + timedelta(minutes=5))]
+    whole = Window(START, START + timedelta(days=1))
+    (day,) = run(test_client, fake, tmp_path, Instrument("SPOT", "DOT-USDT"), whole)
+
+    assert day.closed  # type: ignore[attr-defined]
+    (conflict,) = day.conflicts  # type: ignore[attr-defined]
+    assert conflict.minute == nine
+    assert [[c.open, c.high, c.low, c.close, c.volume, c.turnover] for c in conflict.candles] == [
+        [Decimal(str(v)) for v in kucoin[1:]] for kucoin in (full, partial)
+    ], "both, as KuCoin sent them and in its order"
+    held = read_candles(tmp_path, "SPOT", "DOT-USDT", DAY)
+    assert len(held) == 1439 and nine not in {c.open_time for c in held}
+    assert read_record(tmp_path, "SPOT", "DOT-USDT", DAY) == day, "exact through the record"
+    states = presence(
+        day.window,  # type: ignore[attr-defined]
+        day.requests,  # type: ignore[attr-defined]
+        [c.open_time for c in held],
+        day.in_conflict,  # type: ignore[attr-defined]
+    )
+    assert states[nine] is Presence.EN_CONFLICTO
+    report = coverage(states, [])
+    assert report.in_conflict == [nine] and report.failed == []
+    assert (report.numerator, report.denominator) == (1439, 1440)
+    asked = len(fake.asked)
+    run(test_client, fake, tmp_path, Instrument("SPOT", "DOT-USDT"), whole)
+    assert len(fake.asked) == asked, "settled: the closed day is not asked again"
 
 
 def test_a_failure_then_an_answer_and_an_unreadable_answer_are_retried(

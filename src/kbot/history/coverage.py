@@ -7,8 +7,9 @@ Three different things, none deduced from another:
   denominator of the coverage; neither the first nor the last candle obtained trims it.
 * **The eligibility** of a minute: ``no_elegible`` only with evidence independent of the
   candles (the opening date of a Futures contract, an official announcement, what the
-  recorder observed), ``elegible`` with such evidence, and ``desconocida`` without any. A
-  minute of unknown eligibility counts in the denominator.
+  recorder observed) that covers the whole minute, ``elegible`` with such evidence for
+  part of it, and ``desconocida`` without any. A minute of unknown eligibility counts in
+  the denominator.
 * **The presence** of each minute: ``presente`` if KuCoin returned its candle; ``ausente``
   if the request that covers it succeeded without it, also when the answer came empty or
   with gaps at its ends; ``en_conflicto`` if that answer brought two different candles for
@@ -96,8 +97,14 @@ class EligibilitySpan:
     eligible: bool
     source: str
 
-    def covers(self, moment: datetime) -> bool:
-        return self.start <= moment < self.end
+    def speaks_of(self, minute: datetime) -> bool:
+        """Whether it says something of the minute ``[minute, minute + 1 min)``: that it was
+        eligible if it touches the minute, that it was not only if it covers all of it. The
+        minute in which an instrument starts or stops trading is not outside its dates
+        (CD-16): KuCoin opened ASTERUSDTM at 12:19:20, and 12:19 had its candle."""
+        if self.eligible:
+            return self.start < minute + MINUTE and minute < self.end
+        return self.start <= minute and minute + MINUTE <= self.end
 
 
 def presence(
@@ -142,13 +149,13 @@ def presence(
     return result
 
 
-def eligibility(moment: datetime, evidence: Iterable[EligibilitySpan]) -> Eligibility:
-    """``no_elegible`` if some evidence says so, else ``elegible`` if some says so, else
-    ``desconocida``: without evidence nothing is assumed."""
-    covering = [span for span in evidence if span.covers(moment)]
-    if any(not span.eligible for span in covering):
+def eligibility(minute: datetime, evidence: Iterable[EligibilitySpan]) -> Eligibility:
+    """``no_elegible`` if some evidence says so for the whole minute, else ``elegible`` if
+    some says so for part of it, else ``desconocida``: without evidence nothing is assumed."""
+    speaking = [span for span in evidence if span.speaks_of(minute)]
+    if any(not span.eligible for span in speaking):
         return Eligibility.NO_ELEGIBLE
-    if covering:
+    if speaking:
         return Eligibility.ELEGIBLE
     return Eligibility.DESCONOCIDA
 

@@ -107,6 +107,30 @@ def test_only_independent_evidence_makes_a_minute_not_eligible() -> None:
     assert whole.ratio is None, "a window entirely not eligible: not applicable"
 
 
+def test_the_minute_in_which_trading_starts_or_stops_is_not_outside_the_dates() -> None:
+    """CD-16 at the edge, as KuCoin gave it: ASTERUSDTM opened at 12:19:20 (firstOpenDate)
+    and the minute of 12:19 had its candle. Not all of that minute is before the opening:
+    it is eligible and its candle is no contradiction; the minute before is not eligible.
+    Evidence against a minute must cover all of it, as with a withdrawal at 12:07:30."""
+    one = timedelta(minutes=1)
+    opened = datetime(2025, 9, 19, 12, 19, 20, tzinfo=UTC)
+    nineteen = datetime(2025, 9, 19, 12, 19, tzinfo=UTC)
+    before = EligibilitySpan(nineteen - 10 * one, opened, eligible=False, source="firstOpenDate")
+    since = EligibilitySpan(opened, nineteen + 10 * one, eligible=True, source="firstOpenDate")
+    assert eligibility(nineteen - one, [before, since]) is Eligibility.NO_ELEGIBLE
+    assert eligibility(nineteen, [before, since]) is Eligibility.ELEGIBLE
+    window = Window(nineteen - one, nineteen + one)
+    states = presence(window, [Request(nineteen - one, nineteen, True)], [nineteen])
+    report = coverage(states, [before, since])
+    assert report.contradictions == []
+    assert (report.numerator, report.denominator) == (1, 1)
+
+    withdrawal = at(7) + timedelta(seconds=30)
+    gone = EligibilitySpan(withdrawal, at(20), eligible=False, source="anuncio https://...")
+    assert eligibility(at(7), [gone]) is Eligibility.DESCONOCIDA, "12:07 is not all after it"
+    assert eligibility(at(8), [gone]) is Eligibility.NO_ELEGIBLE
+
+
 def test_a_minute_in_conflict_counts_in_e_but_is_never_present() -> None:
     """CD-19: of five minutes answered, one came with two different candles. It is in
     conflict, listed apart, in the denominator and never in the numerator; it is no failed

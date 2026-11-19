@@ -24,14 +24,20 @@ from kbot.history.download import (
     closed_until,
     window_for,
 )
-from kbot.history.store import read_candles, read_record
+from kbot.history.store import SETTLING, DayRecord, read_candles, read_record
 from kbot.kucoin.ratelimit import RestRateLimiter
 from kbot.kucoin.rest import KucoinRestClient
 
 Factory = Callable[..., KucoinRestClient]
 DAY = date(2026, 11, 10)
 START = datetime(2026, 11, 10, tzinfo=UTC)
-NOW = START + timedelta(days=1, hours=3)
+END = START + timedelta(days=1)
+NOW = END + SETTLING + timedelta(hours=3)  # the days of the tests can close
+# What KuCoin answered on 19 November 2026 for a whole day of Spot DOT-USDT: two candles
+# for 09:03 UTC, the full one and then a partial one (here, on the day of the tests).
+NINE = START + timedelta(hours=9, minutes=3)
+FULL = [int(NINE.timestamp()), "0.7317", "0.7317", "0.7309", "0.7314", "5281.1148", "3862.5702601"]
+PARTIAL = [int(NINE.timestamp()), "0.7317", "0.7317", "0.7316", "0.7316", "108.8588", "79.6482513"]
 
 
 def row(moment: datetime) -> list[object]:
@@ -81,13 +87,18 @@ async def no_wait(_seconds: float) -> None:
 
 
 def run(
-    test_client: Factory, fake: FakeKlines, root: Path, instrument: Instrument, window: Window
-) -> list[object]:
-    async def go() -> list[object]:
+    test_client: Factory,
+    fake: FakeKlines,
+    root: Path,
+    instrument: Instrument,
+    window: Window,
+    now: datetime = NOW,
+) -> list[DayRecord]:
+    async def go() -> list[DayRecord]:
         client = test_client(fake, RestRateLimiter(pool_weight=10**6))
         try:
             downloader = Downloader(client, root, sleep=no_wait)
-            return list(await downloader.instrument(instrument, window, NOW))
+            return await downloader.instrument(instrument, window, now)
         finally:
             await client.aclose()
 
@@ -111,7 +122,7 @@ def test_a_spot_day_is_one_request_and_a_futures_day_eight(
     assert len(asked["BTC-USDT"]) == 1 and len(asked["XBTUSDTM"]) == 8
     for _symbol, start, end in fake.asked:
         assert (end - start) // 60 + 1 <= {"BTC-USDT": 1500, "XBTUSDTM": 200}[_symbol]
-    assert spot.closed and futures.closed  # type: ignore[attr-defined]
+    assert spot.closed and futures.closed
     assert len(read_candles(tmp_path, "FUTURES", "XBTUSDTM", DAY)) == 1440
 
 
@@ -145,18 +156,18 @@ def test_a_request_that_keeps_failing_leaves_its_minutes_for_the_next_run(
     third = int((START + timedelta(minutes=2 * 198) - timedelta(minutes=1)).timestamp())
     fake.failures[("XBTUSDTM", third)] = 3
     first, second = run(test_client, fake, tmp_path, Instrument("FUTURES", "XBTUSDTM"), window)
-    assert first.closed and not second.closed  # type: ignore[attr-defined]
+    assert first.closed and not second.closed
     states = presence(
         second.window,
         second.requests,
         [c.open_time for c in read_candles(tmp_path, "FUTURES", "XBTUSDTM", DAY)],
-    )  # type: ignore[attr-defined]
+    )
     assert list(states.values()).count(Presence.NO_DESCARGADO) == 198
     asked_before = len(fake.asked)
     first_again, second_again = run(
         test_client, fake, tmp_path, Instrument("FUTURES", "XBTUSDTM"), window
     )
-    assert second_again.closed  # type: ignore[attr-defined]
+    assert second_again.closed
     assert first_again == first, "the closed day is not touched"
     new = fake.asked[asked_before:]
     assert all(start >= int(START.timestamp()) - 60 for _s, start, _e in new), "only the open day"
@@ -168,41 +179,61 @@ def test_two_different_candles_for_a_minute_leave_it_in_conflict(
     """CD-19, with what KuCoin answered on 19 November 2026 for a whole day of Spot
     DOT-USDT: two candles for 09:03 UTC, the full one and then a partial one. Neither is
     used or chosen, both go to the record exactly, the rest of the day counts, the day
-    closes and the download goes on; the next run asks nothing. Two identical candles,
-    also sent twice, are one."""
+    closes (downloaded 48 h after its end) and the download goes on; the next run asks
+    nothing. Two identical candles, also sent twice, are one."""
     fake = FakeKlines()
     fake.add("SPOT", "DOT-USDT", START, 1440, set())
-    nine = START + timedelta(hours=9, minutes=3)
-    second = int(nine.timestamp())
-    full = [second, "0.7317", "0.7317", "0.7309", "0.7314", "5281.1148", "3862.5702601"]
-    partial = [second, "0.7317", "0.7317", "0.7316", "0.7316", "108.8588", "79.6482513"]
-    fake.rows[("SPOT", "DOT-USDT")][second] = full
-    fake.repeated[("SPOT", "DOT-USDT")] = [partial, row(START + timedelta(minutes=5))]
+    fake.rows[("SPOT", "DOT-USDT")][int(NINE.timestamp())] = FULL
+    fake.repeated[("SPOT", "DOT-USDT")] = [PARTIAL, row(START + timedelta(minutes=5))]
     whole = Window(START, START + timedelta(days=1))
     (day,) = run(test_client, fake, tmp_path, Instrument("SPOT", "DOT-USDT"), whole)
 
-    assert day.closed  # type: ignore[attr-defined]
-    (conflict,) = day.conflicts  # type: ignore[attr-defined]
-    assert conflict.minute == nine
+    assert day.closed
+    (conflict,) = day.conflicts
+    assert conflict.minute == NINE
     assert [[c.open, c.high, c.low, c.close, c.volume, c.turnover] for c in conflict.candles] == [
-        [Decimal(str(v)) for v in kucoin[1:]] for kucoin in (full, partial)
+        [Decimal(str(v)) for v in kucoin[1:]] for kucoin in (FULL, PARTIAL)
     ], "both, as KuCoin sent them and in its order"
     held = read_candles(tmp_path, "SPOT", "DOT-USDT", DAY)
-    assert len(held) == 1439 and nine not in {c.open_time for c in held}
+    assert len(held) == 1439 and NINE not in {c.open_time for c in held}
     assert read_record(tmp_path, "SPOT", "DOT-USDT", DAY) == day, "exact through the record"
-    states = presence(
-        day.window,  # type: ignore[attr-defined]
-        day.requests,  # type: ignore[attr-defined]
-        [c.open_time for c in held],
-        day.in_conflict,  # type: ignore[attr-defined]
-    )
-    assert states[nine] is Presence.EN_CONFLICTO
+    states = presence(day.window, day.requests, [c.open_time for c in held], day.in_conflict)
+    assert states[NINE] is Presence.EN_CONFLICTO
     report = coverage(states, [])
-    assert report.in_conflict == [nine] and report.failed == []
+    assert report.in_conflict == [NINE] and report.failed == []
     assert (report.numerator, report.denominator) == (1439, 1440)
     asked = len(fake.asked)
     run(test_client, fake, tmp_path, Instrument("SPOT", "DOT-USDT"), whole)
     assert len(fake.asked) == asked, "settled: the closed day is not asked again"
+
+
+def test_a_recent_day_stays_open_and_takes_kucoin_s_correction(
+    test_client: Factory, tmp_path: Path
+) -> None:
+    """CD-20, as it happened: the DOT-USDT day of 18 November 2026 was downloaded 8.6 h
+    after its end with two candles for 09:03 UTC, and at 22:10 UTC on 19 November KuCoin
+    gave only the full one. Downloaded before 48 h, the day stays open with its conflict;
+    the next download asks for it again and keeps the new answer; from 48 h on it closes
+    and is never asked again."""
+    fake = FakeKlines()
+    fake.add("SPOT", "DOT-USDT", START, 1440, set())
+    fake.rows[("SPOT", "DOT-USDT")][int(NINE.timestamp())] = FULL
+    fake.repeated[("SPOT", "DOT-USDT")] = [PARTIAL]
+    whole = Window(START, END)
+    dot = Instrument("SPOT", "DOT-USDT")
+
+    (early,) = run(test_client, fake, tmp_path, dot, whole, END + timedelta(hours=8, minutes=36))
+    assert not early.closed and early.in_conflict == [NINE] and early.rows == 1439
+    fake.repeated.clear()  # KuCoin corrects its answer
+    (later,) = run(test_client, fake, tmp_path, dot, whole, END + timedelta(hours=22, minutes=10))
+    assert not later.closed and later.conflicts == () and later.rows == 1440
+    held = {c.open_time: c for c in read_candles(tmp_path, "SPOT", "DOT-USDT", DAY)}
+    assert (held[NINE].low, held[NINE].close) == (Decimal("0.7309"), Decimal("0.7314"))
+    (settled,) = run(test_client, fake, tmp_path, dot, whole, END + SETTLING)
+    assert settled.closed and settled.rows == 1440
+    asked = len(fake.asked)
+    run(test_client, fake, tmp_path, dot, whole, END + timedelta(days=30))
+    assert len(fake.asked) == asked, "closed: never asked again"
 
 
 def test_a_failure_then_an_answer_and_an_unreadable_answer_are_retried(
@@ -215,10 +246,10 @@ def test_a_failure_then_an_answer_and_an_unreadable_answer_are_retried(
     fake.unreadable.add(("ETH-USDT", first_second))
     whole = Window(START, START + timedelta(days=1))
     (day,) = run(test_client, fake, tmp_path, Instrument("SPOT", "BTC-USDT"), whole)
-    assert day.closed  # type: ignore[attr-defined]
+    assert day.closed
     assert len([a for a in fake.asked if a[0] == "BTC-USDT"]) == 2
     (eth,) = run(test_client, fake, tmp_path, Instrument("SPOT", "ETH-USDT"), whole)
-    assert not eth.closed, "an unreadable row spoils its answer, three times"  # type: ignore[attr-defined]
+    assert not eth.closed, "an unreadable row spoils its answer, three times"
     assert len([a for a in fake.asked if a[0] == "ETH-USDT"]) == 3
 
 

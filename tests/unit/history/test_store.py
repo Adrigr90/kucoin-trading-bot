@@ -14,6 +14,7 @@ import pytest
 from kbot.history.coverage import Request, Window
 from kbot.history.store import (
     CANDLE_COLUMNS,
+    SETTLING,
     Conflict,
     paths,
     read_candles,
@@ -26,7 +27,8 @@ from tools.measure_archive import MIGRATION, table_specs
 DAY = date(2026, 11, 10)
 START = datetime(2026, 11, 10, tzinfo=UTC)
 WHOLE = Window(START, START + timedelta(days=1))
-NOW = START + timedelta(days=2)
+END = START + timedelta(days=1)
+NOW = END + SETTLING  # the first moment at which the day can close
 
 
 def candle(minute: int, price: str = "73759.123456789012345678") -> Ohlcv:
@@ -88,6 +90,22 @@ def test_a_day_with_a_failed_request_or_not_over_stays_open(tmp_path: Path) -> N
     half = [Request(START, START + timedelta(hours=10) - timedelta(minutes=1), True)]
     today = write_day(tmp_path, "FUTURES", "XBTUSDTM", DAY, partial, [], half, NOW)
     assert not today.closed, "the window stops before the end of the day"
+
+
+def test_a_day_closes_only_48_hours_after_its_end(tmp_path: Path) -> None:
+    """CD-20: KuCoin may still change a recent day, as it did with DOT-USDT on 19 November
+    2026. Downloaded less than 48 h after its end, a day stays open even with every request
+    answered, and the next download writes it again; from 48 h on, it closes."""
+    assert timedelta(hours=48) == SETTLING
+    early = END + SETTLING - timedelta(microseconds=1)
+    first = write_day(tmp_path, "SPOT", "BTC-USDT", DAY, WHOLE, [candle(0)], everything(), early)
+    assert not first.closed
+    again = write_day(
+        tmp_path, "SPOT", "BTC-USDT", DAY, WHOLE, [candle(0), candle(1)], everything(), NOW
+    )
+    assert again.closed and again.rows == 2, "written again with the new answer, and closed"
+    with pytest.raises(FileExistsError, match="closed"):
+        write_day(tmp_path, "SPOT", "BTC-USDT", DAY, WHOLE, [], everything(), NOW)
 
 
 def test_the_minutes_in_conflict_go_to_the_record_with_their_exact_candles(

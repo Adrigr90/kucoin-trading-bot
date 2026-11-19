@@ -11,12 +11,15 @@
   ``no_descargado``, and the next run asks for them again.
 * **Two different candles for one minute in an answer:** that minute is ``en_conflicto``.
   Neither candle is used or chosen, both go to the record of the day, and the rest of the
-  answer counts. It is settled, like an absence: asking again gives the same answer. KuCoin
-  does this: on 19 November 2026 a whole day of Spot DOT-USDT came with two candles for
-  2026-11-18 09:03 UTC, a full one and a partial one, while a narrower request gave one.
-  Two identical candles are one.
+  answer counts. Like an absence, that answer settles it: it is not asked again as a
+  failure would be. KuCoin does this: on 19 November 2026 a whole day of Spot DOT-USDT
+  came with two candles for 2026-11-18 09:03 UTC, a full one and a partial one, while a
+  narrower request gave one; by 22:10 UTC KuCoin gave only the full one (CD-20). Two
+  identical candles are one.
 * **Day by day:** a closed day is skipped, any other is downloaded whole and written
-  (``store``). Repeating the download changes no closed file.
+  (``store``). A day closes only if downloaded at least 48 h after its end, so a recent
+  day, conflicts included, is asked again until then. Repeating the download changes no
+  closed file.
 * **Only closed minutes:** the window ends at the last minute whose stabilization margin has
   passed.
 """

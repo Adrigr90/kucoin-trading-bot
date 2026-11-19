@@ -13,8 +13,10 @@
   conflict stopped the download, so it has none.
 * **Both are written atomically:** a temporary name, synced, then renamed, the Parquet file
   first. A record whose SHA-256 does not match its file does not count.
-* **A day is closed** when it has ended and none of its minutes is left undownloaded. A
-  closed day is never written again: the download is resumable and idempotent.
+* **A day is closed** when it has ended, none of its minutes is left undownloaded and it was
+  downloaded at least ``SETTLING`` (48 h) after its end: KuCoin may still change a recent
+  day, as it did on 19 November 2026 (CD-19 and CD-20). Until then each download writes
+  it again. A closed day is never written again: the download is resumable and idempotent.
 """
 
 from __future__ import annotations
@@ -39,6 +41,9 @@ from kbot.market.timeutil import as_utc
 
 FORMAT = "kbot.history 1"
 DAY = timedelta(days=1)
+# A day closes only if downloaded this long after its end: the 48 h during which the
+# recorder still asks for its REST candles (02 §3.8 and §12.1, point 1; CD-20).
+SETTLING = timedelta(hours=48)
 
 # The columns of market.candles (migration 0003), in its order.
 CANDLE_COLUMNS: tuple[Column, ...] = (
@@ -90,10 +95,14 @@ class DayRecord:
 
     @property
     def closed(self) -> bool:
-        """Ended, and none of its minutes left undownloaded. A minute in conflict was
-        answered, so it does not keep its day open."""
-        if self.window.end < datetime.combine(self.day, datetime.min.time(), UTC) + DAY:
+        """Ended, downloaded at least ``SETTLING`` after its end, and none of its minutes
+        left undownloaded. A minute in conflict was answered, so it does not keep its day
+        open."""
+        end = datetime.combine(self.day, datetime.min.time(), UTC) + DAY
+        if self.window.end < end:
             return False  # the window stops before the end of the day: not over yet
+        if self.downloaded_at < end + SETTLING:
+            return False  # KuCoin may still change it: the next download asks again
         states = presence(self.window, self.requests, (), self.in_conflict)
         return Presence.NO_DESCARGADO not in states.values()
 

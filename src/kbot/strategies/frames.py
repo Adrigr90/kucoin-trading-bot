@@ -2,10 +2,10 @@
 
 * **A frame** holds the points of a timeframe, the values of the indicators a ficha uses in
   it, and its regime. A value or a point is read at an instant only if it is available then.
-* **Execution candles:** one that is not usable resolves when that is known: at the first of
-  its minutes that is absent, known at the end of that minute plus the margin (the rule of
-  the history, §12.1, point 4), or present without a valid P or T, known when it is
-  available.
+* **Execution candles:** one that is not usable resolves as soon as that is known: at the
+  earliest instant at which one of its minutes is known to make it so (F3E3-04). An absent
+  minute is known at its end plus the margin (the rule of the history, §12.1, point 4); a
+  present one without a valid P or T, when it is available.
 * **Provenance** of a result: the original minutes of its inputs, as merged intervals.
   Every input candle is complete, so every minute of those intervals is present, and the
   share only REST counts them on the minute frame, each once (§12.1, point 5).
@@ -139,17 +139,21 @@ def trigger_candle(frame: Frame, minutes: Frame, open_time: datetime) -> Trigger
 
 
 def known_unusable(frame: Frame, minutes: Frame, open_time: datetime) -> datetime:
-    """When it is known that the candle ``open_time`` of ``frame`` will not be usable."""
+    """When it is first known that the candle ``open_time`` of ``frame`` will not be
+    usable: the earliest instant among its minutes that make it so, never the first of them
+    by opening (F3E3-04)."""
     end = open_time + frame.step
+    known = []
     minute = open_time
     while minute < end:
         point = minutes.points.get(minute)
         if point is None:
-            return minute + MINUTE + STABILIZATION
-        if point.available_at is not None and not point.valid(PRICE):
-            return point.available_at
+            known.append(minute + MINUTE + STABILIZATION)
+        elif point.available_at is not None and not point.valid(PRICE):
+            known.append(point.available_at)
         minute += MINUTE
-    return end + STABILIZATION  # every minute is there: only the end of the data holds it
+    # With every minute there and valid, only the end of the data can hold the candle back.
+    return min(known, default=end + STABILIZATION)
 
 
 def value_span(value: Value, step: timedelta) -> Interval:

@@ -5,7 +5,9 @@
   latest of their availabilities, if its preparation holds and its context holds at D_s.
 * **Decision:** the K execution candles that start when t ends are walked with the rule of
   §12.3.1, whose instants never go back (F3E3-01). The context is checked again at each of
-  them. A decision fixes the initial stop.
+  them. A decision fixes the initial stop. Its provenance holds every execution candle
+  whose close was looked at, the trigger and those before it, and the context at each of
+  their instants (F3E3-03).
 * Each ficha declares its indicators by timeframe, its preparation, its context and its
   trigger; everything else is here, the same for the three.
 """
@@ -36,6 +38,7 @@ from kbot.strategies.rules import (
     Interval,
     Outcome,
     Signal,
+    TriggerCandle,
     context_open,
     directions,
     initial_stop,
@@ -125,17 +128,9 @@ class Ficha:
         ]
         holds = partial(self._context_holds, frames, signal.direction)
         result = walk(signal.at, candles, partial(self.fires, signal), holds)
+        provenance = self._examined(frames, signal, result.examined)
         if result.candle is None or result.candle.close is None:
-            return Decision(signal, result.outcome, result.at, None, None, None, signal.provenance)
-        used = self.context(frames, signal.direction, result.at) or ()
-        context_step = step_of(p.context)
-        provenance = merged(
-            (
-                *signal.provenance,
-                candle_span(result.candle.open_time, execution.step),
-                *(value_span(v, context_step) for v in used),
-            )
-        )
+            return Decision(signal, result.outcome, result.at, None, None, None, provenance)
         stop = initial_stop(signal.direction, result.candle.close, signal.level("atr"), p.stop_atr)
         return Decision(
             signal,
@@ -149,6 +144,20 @@ class Ficha:
 
     def _context_holds(self, frames: Frames, d: int, at: datetime) -> bool:
         return self.context(frames, d, at) is not None
+
+    def _examined(
+        self, frames: Frames, signal: Signal, examined: Sequence[tuple[TriggerCandle, datetime]]
+    ) -> tuple[Interval, ...]:
+        """The provenance of what the walk gave: the signal's, every execution candle whose
+        close was looked at, and the context at each of their instants (F3E3-03). Each
+        original minute counts once."""
+        execution, context = step_of(self.params.execution), step_of(self.params.context)
+        spans = list(signal.provenance)
+        for instant in sorted({at for _, at in examined}):
+            used = self.context(frames, signal.direction, instant) or ()
+            spans.extend(value_span(v, context) for v in used)
+        spans.extend(candle_span(candle.open_time, execution) for candle, _ in examined)
+        return merged(spans)
 
     def make_signal(
         self,

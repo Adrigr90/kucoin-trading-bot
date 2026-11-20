@@ -2,8 +2,9 @@
 random walk of minutes, with short periods so that they appear in a few days. Poisoning
 everything after D_s changes no signal, and everything after a decision changes neither the
 decision nor its stop (F3-A4, as far as signals go). Also: Spot has no shorts, the context
-candle is never an older one, an unusable execution candle resolves when that is known, and
-the share only REST counts original minutes."""
+candle is never an older one, an unusable execution candle resolves as soon as that is known
+(F3E3-04), a decision holds every execution candle looked at (F3E3-03), and the share only
+REST counts original minutes."""
 
 from __future__ import annotations
 
@@ -13,7 +14,9 @@ from decimal import Decimal
 
 import pytest
 
-from kbot.market.last_candles import STABILIZATION
+from kbot.history.timeframes import Quality, aggregate
+from kbot.indicators.series import from_bar, from_minute
+from kbot.market.last_candles import STABILIZATION, CandleEvidence
 from kbot.strategies.breakout import Breakout, BreakoutParams
 from kbot.strategies.ficha import Ficha
 from kbot.strategies.frames import ONE_MINUTE, Frame, known_unusable, rest_only, trigger_candle
@@ -197,6 +200,73 @@ def test_an_unusable_execution_candle_resolves_when_that_is_known() -> None:
     following = trigger_candle(frames["5m"], frames[ONE_MINUTE], opened + 5 * MINUTE)
     assert following.close is not None
     assert following.resolved_at == opened + 10 * MINUTE + STABILIZATION
+
+
+def quarter_of(minutes: list) -> tuple[Frame, Frame]:
+    """The frame of minutes and the 15 m frame of the first quarter of an hour."""
+    one = Frame(
+        "FUTURES", "ETHUSDTM", ONE_MINUTE, {m.candle.open_time: from_minute(m) for m in minutes}
+    )
+    bars = aggregate(minutes, "15m", downloaded_until=START + 15 * MINUTE)
+    return one, Frame("FUTURES", "ETHUSDTM", "15m", {b.open_time: from_bar(b) for b in bars})
+
+
+def test_an_unusable_candle_resolves_at_the_earliest_known_instant() -> None:
+    """F3E3-04, the reviewer's case: in [00:00, 00:15), 00:01 is discrepant and available
+    only at 01:00, and 00:05 is absent. The absence is known at 00:06:15, and that is when
+    the candle resolves, not at 01:00."""
+    base = walk_minutes(15, seed=1)
+    late = replace(
+        base[1],
+        evidence=CandleEvidence.CRUZADA_DISCREPANTE,
+        price=Quality.DISCREPANTE,
+        available_at=START + timedelta(hours=1),
+    )
+    both = [late if i == 1 else m for i, m in enumerate(base) if i != 5]
+    one, quarter = quarter_of(both)
+    assert known_unusable(quarter, one, START) == START + 6 * MINUTE + STABILIZATION
+    # Only the discrepant one: when it is available. Only the absence: at its end plus 15 s.
+    one, quarter = quarter_of([late if i == 1 else m for i, m in enumerate(base)])
+    assert known_unusable(quarter, one, START) == START + timedelta(hours=1)
+    one, quarter = quarter_of([m for i, m in enumerate(base) if i != 5])
+    assert known_unusable(quarter, one, START) == START + 6 * MINUTE + STABILIZATION
+    # A discrepant minute known before the absence decides.
+    early = replace(late, available_at=START + 2 * MINUTE + STABILIZATION)
+    one, quarter = quarter_of([early if i == 1 else m for i, m in enumerate(base) if i != 5])
+    assert known_unusable(quarter, one, START) == START + 2 * MINUTE + STABILIZATION
+
+
+def covered(provenance: tuple, span: tuple) -> bool:
+    return any(start <= span[0] and span[1] <= end for start, end in provenance)
+
+
+def test_the_decision_counts_the_candles_looked_at_before_the_trigger() -> None:
+    """F3E3-03, the reviewer's case: the trend signal of 07:00 looks at [07:15, 07:20), which
+    does not fire, and decides with [07:20, 07:25). With only the five minutes of the first
+    left only REST, the decision has 445 minutes, 5 of them only REST: about 1.1236 %."""
+    ficha = fichas()[0]
+    first = START + timedelta(hours=7, minutes=15)
+    mixed = [
+        m if first <= m.candle.open_time < first + 5 * MINUTE else contrasted(m) for m in MINUTES
+    ]
+    frames = ficha.frames(mixed, downloaded_until=UNTIL)
+    signal = ficha.signal(frames, START + timedelta(hours=7), LONG)
+    assert signal is not None
+    decision = ficha.decide(frames, signal)
+    assert decision.trigger_open == first + 5 * MINUTE
+    assert rest_only(decision.provenance, frames[ONE_MINUTE]) == (445, 5)
+
+
+def test_a_decision_holds_every_candle_looked_at_and_none_after(scanned) -> None:
+    ficha, frames, _, decisions = scanned
+    step = frames[ficha.params.execution].step
+    for decision in (d for d in decisions if d.decided):
+        assert decision.trigger_open is not None
+        opened = decision.signal.open_time + frames[ficha.params.signal].step
+        while opened <= decision.trigger_open:
+            assert covered(decision.provenance, (opened, opened + step))
+            opened += step
+        assert decision.provenance[-1][1] == decision.trigger_open + step  # none after it
 
 
 def test_the_share_only_rest_counts_original_minutes(scanned) -> None:

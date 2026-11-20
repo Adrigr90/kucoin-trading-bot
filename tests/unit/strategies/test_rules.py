@@ -73,6 +73,8 @@ def test_the_instants_of_the_trigger_never_go_back() -> None:
     assert result.at == at(15, 50) and result.candle == second
     assert execution_minute(result.at) == at(15, 51)  # never 15:31
     assert asked == [at(15, 50), at(15, 50)]  # the context, at the effective instants
+    # F3E3-03: both candles were looked at, each at its instant.
+    assert result.examined == ((first, at(15, 50)), (second, at(15, 50)))
 
 
 def test_the_first_late_candle_that_fires_decides_at_its_instant() -> None:
@@ -87,6 +89,22 @@ def test_a_late_unusable_first_candle_makes_the_signal_expire() -> None:
     second = trigger(at(15, 15), at(15, 30, 15), 101.0)
     result = walk(at(15, 0, 15), [first, second], above(100.0), lambda _: True)
     assert (result.outcome, result.at, result.candle) == (Outcome.UNUSABLE, at(15, 50), None)
+    assert result.examined == ()  # no close was looked at
+
+
+def test_the_walk_keeps_the_candles_it_looked_at() -> None:
+    """F3E3-03: the inputs of each outcome are the candles whose close was looked at, the
+    one that fires included; never those after it."""
+    candles = [trigger(at(15, 15 * i), at(15, 15 * i + 15, 15), 99.0 + i) for i in range(4)]
+    decided = walk(at(15, 0, 15), candles, above(100.5), lambda _: True)
+    assert decided.candle == candles[2]
+    assert decided.examined == tuple((c, c.resolved_at) for c in candles[:3])
+    expired = walk(at(15, 0, 15), candles, above(105.0), lambda _: True)
+    assert expired.outcome is Outcome.NO_TRIGGER
+    assert expired.examined == tuple((c, c.resolved_at) for c in candles)
+    cut = walk(at(15, 0, 15), candles, above(105.0), lambda instant: instant < at(15, 45))
+    assert cut.outcome is Outcome.CONTEXT
+    assert cut.examined == tuple((c, c.resolved_at) for c in candles[:2])
 
 
 def test_with_the_usual_availabilities_each_candle_decides_at_its_own() -> None:

@@ -86,6 +86,9 @@ class Walk:
     outcome: Outcome
     at: datetime  # the instant of the decision, or of the expiry
     candle: TriggerCandle | None  # the candle that fired
+    # Every candle whose close was looked at, in order, with its instant D_i, at which the
+    # context held: the inputs of the outcome, the trigger candle included (F3E3-03).
+    examined: tuple[tuple[TriggerCandle, datetime], ...] = ()
 
 
 def walk(
@@ -97,15 +100,17 @@ def walk(
     """§12.3.1, «Disparo». ``at`` is D_{i-1} when the loop takes e_i, with D_0 = D_s, so
     ``max(at, resolution)`` is max(D_s, D_{i-1}, resolution of e_i): it never goes back."""
     at = signal_at
+    examined: list[tuple[TriggerCandle, datetime]] = []
     for candle in candles:
         at = max(at, candle.resolved_at)
         if candle.close is None:
-            return Walk(Outcome.UNUSABLE, at, None)
+            return Walk(Outcome.UNUSABLE, at, None, tuple(examined))
         if not context_holds(at):
-            return Walk(Outcome.CONTEXT, at, None)
+            return Walk(Outcome.CONTEXT, at, None, tuple(examined))
+        examined.append((candle, at))
         if fires(candle.close):
-            return Walk(Outcome.DECISION, at, candle)
-    return Walk(Outcome.NO_TRIGGER, at, None)
+            return Walk(Outcome.DECISION, at, candle, tuple(examined))
+    return Walk(Outcome.NO_TRIGGER, at, None, tuple(examined))
 
 
 def initial_stop(d: int, trigger_close: float, atr: float, multiple: Decimal) -> float:
@@ -186,7 +191,9 @@ class Decision:
     trigger_open: datetime | None
     trigger_close: float | None
     stop: float | None
-    provenance: tuple[Interval, ...]  # the signal's, the trigger candle and the context
+    # The signal's, every execution candle whose close was looked at and the context at
+    # each of their instants (F3E3-03), merged: each original minute once.
+    provenance: tuple[Interval, ...]
 
     @property
     def decided(self) -> bool:

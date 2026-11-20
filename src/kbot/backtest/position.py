@@ -23,7 +23,8 @@
   The liberation is the knowledge instant of the exit.
 * **Two provenances** (F3E4-03): the decision's, and the result's. The result's adds the
   minutes from the entry to the exit, all looked at, and what every check before the exit
-  used. Nothing after the exit counts, and every minute counts once.
+  used. Nothing after the exit counts, and every minute counts once. The trade keeps both
+  intervals and both counts, total and only REST (F3E4-05).
 """
 
 from __future__ import annotations
@@ -36,7 +37,7 @@ from kbot.backtest.execution import Costs, gross_r, net_r, stop_fill
 from kbot.market.last_candles import STABILIZATION
 from kbot.market.timeutil import MINUTE, floor_to
 from kbot.strategies.ficha import Ficha, Frames
-from kbot.strategies.frames import ONE_MINUTE, Frame, merged, step_of
+from kbot.strategies.frames import ONE_MINUTE, Frame, merged, rest_only, step_of
 from kbot.strategies.rules import (
     Check,
     Decision,
@@ -101,6 +102,10 @@ class Trade:
     net_r: float
     decision_provenance: tuple[Interval, ...]
     result_provenance: tuple[Interval, ...]
+    # The two shares only REST (F3E4-05): (original minutes, of them only REST), of the
+    # decision and of the result, counted on the minutes of the run.
+    decision_rest_only: tuple[int, int]
+    result_rest_only: tuple[int, int]
     ideal_open: float | None  # «idealizada»: the opening of t+1; never used for anything
 
 
@@ -198,6 +203,7 @@ def simulate(
     entry_fill, exit_fill = costs.entry(d, entry), costs.exit(d, exit_price)
     signal_step = step_of(signal.timeframe)
     ideal = minutes.points.get(signal.open_time + signal_step)
+    result_provenance = merged((*decision.provenance, (entry_minute, exit_minute + MINUTE), *used))
     trade = Trade(
         family=signal.family,
         market=signal.market,
@@ -224,9 +230,9 @@ def simulate(
         gross_r=gross_r(d, entry, exit_price, r),
         net_r=net_r(d, entry_fill, exit_fill, r, costs.fee),
         decision_provenance=decision.provenance,
-        result_provenance=merged(
-            (*decision.provenance, (entry_minute, exit_minute + MINUTE), *used)
-        ),
+        result_provenance=result_provenance,
+        decision_rest_only=rest_only(decision.provenance, minutes),
+        result_rest_only=rest_only(result_provenance, minutes),
         ideal_open=ideal.open if ideal is not None else None,
     )
     return Execution(decision, trade, None, known)

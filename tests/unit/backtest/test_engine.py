@@ -18,14 +18,15 @@ from decimal import Decimal
 
 import pytest
 
-from kbot.backtest.engine import COMBINED, EXECUTED, RepeatedSignal, Run, Window, run
+from kbot.backtest.engine import CHOSEN, COMBINED, EXECUTED, RepeatedSignal, Run, Window, run
 from kbot.backtest.execution import Costs
 from kbot.backtest.position import ExitReason
 from kbot.market.last_candles import STABILIZATION
 from kbot.strategies.ficha import Frames
 from kbot.strategies.frames import ONE_MINUTE, build_frames, rest_only
-from kbot.strategies.rules import Signal, execution_minute
+from kbot.strategies.rules import LONG, Signal, execution_minute
 from kbot.strategies.trend import Trend
+from tests.unit.backtest.support import Fixed, at, decision, flat
 from tests.unit.strategies.support import (
     MINUTE,
     MINUTES,
@@ -38,7 +39,6 @@ from tests.unit.strategies.support import (
 
 EXAMPLE = Costs(fee=Decimal("0.0006"), slippage=Decimal("0.0005"))
 WINDOW = Window(START + timedelta(days=1), UNTIL)
-CHOSEN = (EXECUTED, "caduca_sin_minuto", "no_entra")  # known when the entry minute is
 
 
 @pytest.fixture(scope="module")
@@ -69,7 +69,8 @@ def test_the_combined_run_holds_one_position_at_a_time(combined: Run) -> None:
     assert len({t.family for t in trades}) > 1
     for before, after in itertools.pairwise(trades):
         assert before.exit_known_at <= after.decision_at  # [decision, liberation)
-    assert {r.status for r in combined.decisions} >= {EXECUTED, "ocupado"}
+    assert {r.status for r in combined.decisions} >= {CHOSEN, "ocupado"}
+    assert {r.entry for r in combined.decisions if r.status == CHOSEN} >= {EXECUTED}
 
 
 def test_running_again_or_in_another_order_gives_the_same_record(combined: Run) -> None:
@@ -87,7 +88,8 @@ def test_an_absent_execution_minute_makes_the_signal_expire(combined: Run) -> No
         if (r.decision.signal.family, r.decision.signal.open_time, r.decision.at)
         == (trade.family, trade.signal_open, trade.decision_at)
     )
-    assert record.status == "caduca_sin_minuto"
+    assert (record.status, record.entry) == (CHOSEN, "caduca_sin_minuto")
+    assert record.entry_known_at == trade.entry_minute + MINUTE + STABILIZATION
     assert all(t.decision_at != trade.decision_at for t in again.trades)
 
 
@@ -125,19 +127,24 @@ def known(result: Run, cut: datetime) -> dict[str, list[object]]:
     for t in result.trades:
         if t.entry_known_at <= cut:
             entry = (t.family, t.signal_open, t.direction, t.decision_at, t.entry_minute)
-            entries.append((*entry, t.entry_price, t.initial_stop, t.target, t.r))
+            entries.append(
+                (*entry, t.entry_price, t.initial_stop, t.target, t.r, t.decision_rest_only)
+            )
         stops.extend((t.signal_open, c) for c in t.stop_changes if c.known_at <= cut)
         if t.exit_known_at <= cut:
-            exits.append((t.signal_open, t.exit_reason, t.exit_minute, t.exit_price, t.net_r))
-    decisions = [
-        (r.decision, "elegida" if r.status in CHOSEN else r.status)
+            exit_ = (t.signal_open, t.exit_reason, t.exit_minute, t.exit_price, t.net_r)
+            exits.append((*exit_, t.result_rest_only))
+    decisions = [(r.decision, r.status) for r in result.decisions if r.decision.at <= cut]
+    entered = [
+        (r.decision, r.entry)
         for r in result.decisions
-        if r.decision.at <= cut
+        if r.entry_known_at is not None and r.entry_known_at <= cut
     ]
     signals: list[object] = [s for s in result.signals if s.at <= cut]
     return {
         "signals": signals,
         "decisions": decisions,
+        "entered": entered,
         "entries": entries,
         "stops": stops,
         "exits": exits,
@@ -231,3 +238,52 @@ def test_a_repeated_signal_stops_the_run() -> None:
         run([trend, trend], MINUTES, WINDOW, EXAMPLE)
     with pytest.raises(RepeatedSignal, match="two signals with the key"):
         run([Repeating(trend.params)], MINUTES, WINDOW, EXAMPLE)
+
+
+def fixed_run(minutes: list, chosen) -> Run:
+    return run([Fixed(chosen)], minutes, Window(at(10), at(13)), EXAMPLE)
+
+
+def test_the_record_keeps_when_a_failed_entry_is_known() -> None:
+    """F3E4-04: the same decision at 10:20:15 and the same refusal of its entry, whose minute
+    opens past the stop. In one run that minute is available at 10:22:15; in the other, at
+    12:00. The records differ, and at 11:00 only the first knows the refusal."""
+    chosen = decision("tendencia", LONG, at(10, 20, 15), opened=at(10), stop=100.0)
+    below = flat(at(10), 180, changes={at(10, 21): (99.5, 99.6, 99.4, 99.5)})
+    late = [
+        replace(m, available_at=at(12)) if m.candle.open_time == at(10, 21) else m for m in below
+    ]
+    soon, later = fixed_run(below, chosen), fixed_run(late, chosen)
+    (first,), (second,) = soon.decisions, later.decisions
+    assert (first.status, first.entry, first.entry_known_at) == (CHOSEN, "no_entra", at(10, 22, 15))
+    assert (second.status, second.entry, second.entry_known_at) == (CHOSEN, "no_entra", at(12))
+    assert soon != later
+    assert known(soon, at(11))["entered"] == [(chosen, "no_entra")]
+    assert known(later, at(11))["entered"] == []
+    assert known(soon, at(11))["decisions"] == known(later, at(11))["decisions"]  # chosen at D
+
+
+def test_the_record_keeps_the_two_shares_only_rest(combined: Run) -> None:
+    """F3E4-05, read straight from the run: 100 % with every minute only REST, 0 % with every
+    minute contrasted, and the mixed case of §12.4.7, (15, 0) and (41, 20)."""
+    for trade in combined.trades:  # the history: every minute only REST
+        assert trade.decision_rest_only[0] == trade.decision_rest_only[1] > 0
+        assert trade.result_rest_only[0] == trade.result_rest_only[1] > 0
+    confirmed = run(short_fichas(), [contrasted(m) for m in MINUTES], WINDOW, EXAMPLE)
+    assert confirmed != combined and confirmed.trades
+    for trade in confirmed.trades:
+        assert trade.decision_rest_only[1] == trade.result_rest_only[1] == 0
+    chosen = decision(
+        "tendencia",
+        LONG,
+        at(10, 20, 15),
+        opened=at(10),
+        stop=100.0,
+        provenance=((at(10), at(10, 15)),),
+    )
+    mixed = [
+        m if m.candle.open_time >= at(10, 21) else contrasted(m)
+        for m in flat(at(10), 180, changes={at(10, 40): (101.0, 101.0, 99.5, 100.0)})
+    ]
+    (trade,) = fixed_run(mixed, chosen).trades
+    assert (trade.decision_rest_only, trade.result_rest_only) == ((15, 0), (41, 20))

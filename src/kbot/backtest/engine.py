@@ -10,6 +10,10 @@
 * **The record:** the versions, the instrument, the window, the costs and the mode; the
   signals; every decision with what became of it; and the trades. Its order depends only on
   the data, never on the order in which the fichas or the events come.
+* **A decision keeps apart** what is known at its instant D (the expiry of the walk, the
+  refusal of the combiner, or that it was chosen) and, when chosen, what became of its
+  entry, with the instant that is known: the availability of the entry minute, whether it
+  entered or not (F3E4-04).
 """
 
 from __future__ import annotations
@@ -25,6 +29,7 @@ from kbot.strategies.combiner import FAMILY_ORDER, allocate, rank
 from kbot.strategies.ficha import Ficha
 from kbot.strategies.rules import Decision, Signal
 
+CHOSEN = "elegida"
 EXECUTED = "ejecutada"
 BY_FAMILY = "por_familia"
 COMBINED = "combinado"
@@ -49,11 +54,17 @@ class Window:
 
 @dataclass(frozen=True)
 class DecisionRecord:
-    """A decision or an expiry of the walk, with what became of it: ``ejecutada``, the
-    expiry of the walk, the refusal of the combiner, or the entry that did not happen."""
+    """A decision or an expiry of the walk, and what became of it."""
 
     decision: Decision
+    # Known at the instant of the decision: the expiry of the walk, the refusal of the
+    # combiner, or «elegida».
     status: str
+    # Of a chosen one, its entry: «ejecutada», «caduca_sin_minuto» (CD-03) or «no_entra»,
+    # and when that is known: the availability of the entry minute, or, absent, when the
+    # absence is known (F3E4-04).
+    entry: str | None = None
+    entry_known_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -124,10 +135,13 @@ def run(
             records.append(DecisionRecord(decision, refusal.value))
             continue
         execution = executions[decision]
-        status = EXECUTED if execution.failure is None else execution.failure.value
-        records.append(DecisionRecord(decision, status))
         if execution.trade is not None:
             trades.append(execution.trade)
+            entry, known = EXECUTED, execution.trade.entry_known_at
+        else:
+            entry = execution.failure.value if execution.failure is not None else EXECUTED
+            known = execution.liberation
+        records.append(DecisionRecord(decision, CHOSEN, entry, known))
     market, symbol = kept[0].market, kept[0].symbol
     return Run(
         market=market,

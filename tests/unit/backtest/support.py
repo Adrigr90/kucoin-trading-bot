@@ -5,7 +5,10 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 from kbot.history.timeframes import MinuteCandle
-from kbot.strategies.rules import LONG, Decision, Outcome, Signal
+from kbot.indicators.series import Indicator
+from kbot.strategies.ficha import Ficha, Frames
+from kbot.strategies.rules import LONG, Check, Decision, Outcome, Signal
+from kbot.strategies.trend import TrendParams
 from tests.unit.strategies.support import minute
 
 DAY = datetime(2025, 6, 2, tzinfo=UTC)
@@ -45,6 +48,40 @@ def decision(
     )
     level = stop if stop is not None else (99.0 if d == LONG else 101.0)
     return Decision(signal, Outcome.DECISION, instant, opened, 100.0, level, provenance)
+
+
+QUARTER = timedelta(minutes=15)
+
+
+class Fixed(Ficha):
+    """A ficha that gives one decision made by hand, for the tests of the record of a run.
+    Its only exit besides its stop is a check at every candle of 15 m that never exits, so
+    that the result uses those candles."""
+
+    family = "tendencia"
+
+    def __init__(self, chosen: Decision) -> None:
+        super().__init__(TrendParams(context="1h", signal="15m", execution="5m", trigger_candles=3))
+        self._chosen = chosen
+
+    def indicators(self) -> dict[str, dict[str, Indicator]]:
+        return {}
+
+    def signals(self, frames: Frames) -> list[Signal]:
+        return [self._chosen.signal]
+
+    def decide(self, frames: Frames, signal: Signal) -> Decision:
+        return self._chosen
+
+    @property
+    def invalidation_timeframe(self) -> str:
+        return "15m"
+
+    def invalidation(self, frames: Frames, signal: Signal, open_time: datetime) -> Check | None:
+        point = frames["15m"].usable(open_time)
+        if point is None or point.available_at is None:
+            return None
+        return Check(point.available_at, False, ((open_time, open_time + QUARTER),))
 
 
 def flat(

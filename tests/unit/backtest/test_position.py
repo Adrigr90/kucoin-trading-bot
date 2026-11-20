@@ -230,6 +230,7 @@ def test_the_two_provenances() -> None:
     # the check of [10:30, 10:45), at 10:45:15, comes after the exit and does not count.
     assert trade.result_provenance == ((at(10), at(10, 41)),)
     assert rest_only(trade.result_provenance, frames[ONE_MINUTE]) == (41, 20)
+    assert (trade.decision_rest_only, trade.result_rest_only) == ((15, 0), (41, 20))  # F3E4-05
 
 
 def test_the_idealized_reference_is_apart() -> None:

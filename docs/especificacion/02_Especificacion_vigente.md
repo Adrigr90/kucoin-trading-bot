@@ -1993,7 +1993,7 @@ Cada ficha da los suyos y su hash, y las pruebas reproducen los tres.
   - ni D16, D28 ni D12, que son de la F8.
 - **Los parámetros de partida son valores habituales, elegidos sin mirar el histórico.** No se ha consultado ninguna partición de F3-AL-03 para fijarlos.
 
-### 12.4 Señales, combinador y motor de backtest de F3-E4 [diseño del 20 nov 2026, **pendiente de revisión**]
+### 12.4 Señales, combinador y motor de backtest de F3-E4 [diseño del 20 nov 2026. Primera revisión (`8d6932b`): APROBABLE CON CORRECCIONES; F3E4-01 a F3E4-03, corregidos y **pendientes de la segunda revisión**]
 
 Fija cómo se ejecutan en el tiempo las señales de las fichas de §12.3, cómo se combinan las de varias familias en un instrumento y cómo funciona el motor de backtest de la F3 (`08`, F3-E4). No cambia ninguna regla de §12.3. **El modelo de ejecución es simple y declarado:** el simulador de la F5 (§7) lo sustituirá, con su libro, su latencia y sus estados de resultado.
 
@@ -2011,7 +2011,7 @@ Fija cómo se ejecutan en el tiempo las señales de las fichas de §12.3, cómo 
 #### 12.4.2 Posiciones y ocupación
 
 - **Una posición** nace de una decisión ejecutada: su familia, su señal, su dirección, su precio de entrada $P_e$, su riesgo por unidad $r$ (§12.3.1) y su stop, que solo se acerca. Sale por las reglas de su ficha: nivel (stop u objetivo), cierre (invalidación) o tiempo.
-- **Ocupación.** Una posición ocupa su instrumento desde su decisión hasta su **liberación**. La liberación es la disponibilidad del minuto en que se resuelve:
+- **Ocupación.** Una posición ocupa su instrumento en el intervalo **[decisión, liberación)**: desde el instante de su decisión, incluido, hasta el de su **liberación**, excluido (F3E4-01). En el instante de la liberación, el instrumento ya está libre. La liberación es la disponibilidad del minuto en que se resuelve:
   - en una salida por nivel durante el minuto $m$: la disponibilidad de $m$, al terminar más el margen;
   - en una salida por cierre o por tiempo en la apertura de $m$: también la disponibilidad de $m$;
   - si la entrada no llega a hacerse (falta el minuto de ejecución, o no pasa los controles de §12.3.1): la disponibilidad de ese minuto, también si falta (en el histórico, al terminar más el margen; §12.3.1).
@@ -2019,11 +2019,15 @@ Fija cómo se ejecutan en el tiempo las señales de las fichas de §12.3, cómo 
 
 #### 12.4.3 El combinador (F3-A8)
 
-**Una posición neta por instrumento** (§12). Las decisiones de las familias de un instrumento se recorren en orden de instante. En cada instante $D$:
-1. **Ocupado:** si en $D$ hay una posición sin liberar, no se ejecuta ninguna decisión, del mismo sentido o del contrario. No se amplía (D20 sigue pendiente) y no se da la vuelta. La posición sigue con sus salidas.
-2. **Señales opuestas:** si hay decisiones de los dos sentidos en el mismo $D$, no se ejecuta ninguna (§12).
-3. **Del mismo sentido:** se ejecuta una sola, la de la familia que va antes en el orden fijo tendencia, breakout y reversión a la media, y, dentro de una familia, la de la vela de señal más antigua.
-4. Cada decisión no ejecutada queda registrada con su motivo: `ocupado`, `opuestas` o `posicion_tomada`.
+**Una posición neta por instrumento** (§12). El combinador recorre los instantes en orden. En cada instante $X$ (F3E4-01):
+1. **Primero, las resoluciones de $X$:** las salidas y las entradas fallidas cuyo minuto está disponible en $X$. Las posiciones que se liberan en $X$ dejan libre el instrumento.
+2. **Después, todas las decisiones de $X$ juntas**, de todas las familias:
+   - **Ocupado:** si en $X$ hay una posición que ocupa el instrumento, no se ejecuta ninguna, del mismo sentido o del contrario. No se amplía (D20 sigue pendiente) y no se da la vuelta. La posición sigue con sus salidas.
+   - **Señales opuestas:** si hay decisiones de los dos sentidos, no se ejecuta ninguna (§12).
+   - **Del mismo sentido:** se ejecuta una sola, la de la familia que va antes en el orden fijo tendencia, breakout y reversión a la media, y, dentro de una familia, la de la vela de señal más antigua. El orden de familias solo sirve para este desempate.
+3. Cada decisión no ejecutada queda registrada con su motivo: `ocupado`, `opuestas` o `posicion_tomada`.
+
+El resultado no depende del orden en que lleguen los sucesos de un mismo instante.
 
 **Modo por familia:** el motor puede correr una familia sola, con las mismas reglas de posición y de ocupación. Es como una cuenta sombra (las contables son de la F5) y es lo que usará el informe exploratorio de cada familia (F3-E5).
 
@@ -2045,9 +2049,13 @@ Fija cómo se ejecutan en el tiempo las señales de las fichas de §12.3, cómo 
 - **Resultado** de una operación, por unidad y en múltiplos de $r$:
   - bruto: $d\,(P_x - P_e)/r$, con los precios sin costes;
   - neto: $\big[d\,(P'_x - P'_e) - f\,(P'_e + P'_x)\big]/r$, con los precios con deslizamiento $P'$.
-- **Ventana:** el motor corre sobre $[inicio, fin)$.
-  - Actúa sobre las decisiones con $D$ dentro de la ventana. Las velas anteriores a $inicio$ solo sirven para calentar los indicadores.
-  - Una posición abierta en $fin$ sale al cierre del último minuto presente antes de $fin$, con deslizamiento, rotulada «fin de ventana». Así, nada de la ventana siguiente entra en el resultado.
+- **Ventana:** el motor corre sobre $[inicio, fin)$ (F3E4-02).
+  - **Solo recibe los minutos anteriores a $fin$.** Nada de lo que viene después entra en ningún cálculo. Las velas anteriores a $inicio$ solo sirven para calentar los indicadores.
+  - Actúa sobre las decisiones con $D$ en la ventana **y con su minuto de ejecución también en ella**. Si ese minuto empieza en $fin$ o después, la decisión no se ejecuta (`fin_de_ventana`) y no ocupa el instrumento.
+  - Tampoco hay salidas en $fin$ o después: una posición que aún espera su salida a mercado se liquida como sigue.
+  - **La ventana se resuelve** cuando está disponible su último minuto, presente o ausente: $fin$ más el margen en el histórico.
+  - **Liquidación de evaluación.** Una posición que sigue abierta cuando se resuelve la ventana se liquida al cierre del último minuto presente de la ventana, con deslizamiento. Va rotulada «liquidación de fin de ventana».
+  - **Su instante de conocimiento es el de la resolución de la ventana**, no el de ese minuto: elegirlo como el último presente exige conocer la ventana entera.
   - Las particiones y el *walk-forward* son de F3-E5.
 
 #### 12.4.5 El motor
@@ -2056,15 +2064,21 @@ Fija cómo se ejecutan en el tiempo las señales de las fichas de §12.3, cómo 
 - **La misma lógica que el paper trading** (§0, principio 3): las fichas, el combinador y las reglas de posición son las mismas funciones. Solo cambian el reloj y la capa de datos.
   - **Datos:** en la F3, los minutos del histórico (F3-E1), con la disponibilidad de §12.1, punto 4. De ellos salen los marcos de §12.3.
   - **Reloj:** los instantes de disponibilidad, en orden.
-- **Orden de los sucesos.** Los sucesos se procesan por instante; en un mismo instante, por familia en el orden fijo, después por vela de señal y por dirección. Es un orden total, así que el resultado es determinista.
+- **Orden de los sucesos.** Se procesan por instante. En cada uno, primero las resoluciones y liberaciones; después, los cambios del stop y las invalidaciones; y al final, todas las decisiones juntas, con el combinador (§12.4.3; F3E4-01). Dentro de cada grupo, el resultado no depende del orden de llegada, así que es determinista.
 - **Registro de la ejecución:**
   - la versión de cada familia (§12.3.3), o «sin versión»;
   - el instrumento, la ventana, el modelo de costes y el modo (por familia o combinado);
   - las señales, con sus cuatro instantes;
   - las decisiones, con su resultado: ejecutada, caducada con su motivo, o no ejecutada con su motivo;
   - las operaciones, con su entrada, su stop inicial y cada cambio del stop, su salida, su motivo, sus precios, $r$ y su resultado bruto y neto;
-  - el porcentaje solo REST de cada operación, el de su decisión (§12.1, punto 5).
-- **Instante de conocimiento** de cada suceso: el más tardío de los datos que usa. Una decisión es $D$. Una ejecución o una salida, la disponibilidad de su minuto. Un cambio del stop, el de su vela.
+  - **dos porcentajes solo REST** por operación (§12.1, punto 5; F3E4-03), con su procedencia por separado:
+    - **el de la decisión:** su procedencia (§12.3.1);
+    - **el del resultado:** la de la decisión más todo lo que usó después. Son los minutos de la entrada a la salida, todos examinados, y los valores de cada cambio del stop y de cada invalidación examinada antes de la salida. Si hay liquidación de evaluación, también los minutos de la ventana hasta el liquidado. Nada posterior a la salida, y cada minuto una sola vez.
+- **Instante de conocimiento** de cada suceso: el más tardío de los datos que usa.
+  - Una decisión es $D$.
+  - Una ejecución o una salida, la disponibilidad de su minuto.
+  - Un cambio del stop, el de su vela.
+  - Una liquidación de evaluación, el de la resolución de la ventana (F3E4-02).
 
 #### 12.4.6 Ejemplos
 
@@ -2088,11 +2102,23 @@ Los costes de los ejemplos, $f$ = 0,06 % y $s$ = 0,05 %, solo sirven para ilustr
 
 **D. El minuto de ejecución:** con una decisión a las 10:05:16, la ejecución es en la apertura del minuto de las 10:06 (CD-17). Si ese minuto falta, la señal caduca (CD-03) y el instrumento se libera a las 10:07:15.
 
-**E. El fin de una ventana** $[inicio, fin)$ con $fin$ = 1 feb 2025 a las 00:00: una posición abierta sale al cierre del minuto de las 23:59 del 31 de enero, o del último presente antes, con deslizamiento, rotulada «fin de ventana».
+**E. El fin de una ventana** $[inicio, fin)$, con $fin$ el 1 feb 2025 a las 00:00 (F3E4-02):
+1. Una decisión a las 23:59:15 del 31 de enero no se ejecuta (`fin_de_ventana`): su minuto, las 00:00, ya no es de la ventana.
+2. La ventana se resuelve a las 00:00:15. Una posición abierta se liquida al cierre del minuto de las 23:59, con deslizamiento, rotulada.
+3. Si faltan los minutos de 23:31 a 23:59, se liquida al cierre del de las 23:30. Su instante de conocimiento sigue siendo las 00:00:15, no las 23:31:15.
+
+**F. Liberación y decisión a la vez** (F3E4-01):
+1. Un breakout sale por su stop durante el minuto de las 11:59 y libera el instrumento a las 12:00:15.
+2. Una decisión de la tendencia a las 12:00:15 encuentra el instrumento libre, porque la liberación se aplica antes, y entra a las 12:01.
+3. Igual tras una entrada fallida: la del ejemplo D libera a las 10:07:15, y una decisión de las 10:07:15 entra a las 10:08.
+4. Si a las 12:00:15 hubiera también una decisión en corto, no entraría ninguna (`opuestas`), en cualquier orden de llegada.
 
 #### 12.4.7 Pruebas (F3-A8, F3-A9 y F3-A4 del motor entero)
 
-- **F3-A8, el combinador:** los cinco casos del ejemplo C y el modo por familia.
+- **F3-A8, el combinador:**
+  - los cinco casos del ejemplo C y el modo por familia;
+  - **F3E4-01:** el ejemplo F, con la liberación y la decisión en el mismo instante, también tras una entrada fallida, y con decisiones opuestas y del mismo sentido;
+  - permutar el orden de llegada de los sucesos de un mismo instante no cambia el registro.
 - **F3-A9, los instantes:**
   - en cada operación de las tres fichas, fin + margen ≤ $D_s$ ≤ $D$ < ejecución;
   - la ejecución es en el primer minuto que empieza después de la decisión (CD-17);
@@ -2100,13 +2126,17 @@ Los costes de los ejemplos, $f$ = 0,06 % y $s$ = 0,05 %, solo sirven para ilustr
   - retrasar la disponibilidad de una vela retrasa su uso: la señal, la decisión y la ejecución llegan después, y ninguna antes de la nueva disponibilidad;
   - repetir la ejecución da exactamente el mismo registro.
 - **F3-A4 del motor entero:** cambiar todos los datos posteriores a un instante $X$ no cambia ningún suceso cuyo instante de conocimiento sea ≤ $X$: señales, decisiones, ejecuciones, salidas y cambios del stop. Se prueba con varios $X$ sobre series de minutos.
+- **F3E4-02, el fin de ventana:**
+  - la decisión de las 23:59:15 del ejemplo E, sin entrada fuera de la ventana;
+  - una ventana con una cola de minutos ausentes: la liquidación se conoce al resolverse la ventana;
+  - cambiar los datos posteriores a un corte, también añadir un minuto en esa cola, no cambia ningún suceso conocido antes del corte.
+- **F3E4-03, los dos porcentajes:** con datos solo REST únicamente después de la decisión, esta conserva el 0 %. El resultado cuenta los minutos posteriores que usó y deja fuera los que no.
 - **El modelo de ejecución:**
   - el hueco en el stop del ejemplo B;
   - el stop antes que el objetivo en el mismo minuto;
   - el objetivo a $T$, nunca mejor;
   - un minuto ausente no ejecuta, y se espera al siguiente presente;
   - las salidas por cierre y por tiempo;
-  - el fin de ventana;
   - los resultados en R del ejemplo A.
 
 #### 12.4.8 Qué se programa y qué no se decide aquí
@@ -2680,3 +2710,5 @@ $$\Delta Cap=\underbrace{8}_{\text{distancia mark-stop de lo cerrado}}+\underbra
 | 20 nov 2026 | **Segunda revisión del código de F3-E3 (commit `67e0f9f`): APROBADO.** F3E3-03, RESUELTO: la procedencia incorpora las velas examinadas y el contexto de cada instante, fusionando los intervalos sin duplicados; el caso exacto da 445 minutos y 5 solo REST, y excluye las velas posteriores al disparo. F3E3-04, RESUELTO: la resolución toma el primer instante conocido; el caso exacto da las 00:06:15, y sus variantes quedan cubiertas. Pasan las 74 pruebas locales de estrategias, y las dos pruebas de regresión fallan con `49b9987` y pasan con la corrección. El diff y el ZIP coinciden. Sin residuales ni hallazgos nuevos. Queda aprobada la implementación del régimen, la versión y las tres fichas en el alcance de F3-E3; el combinador, la persistencia y el motor de backtest son de F3-E4 | Revisor |
 | 20 nov 2026 | **F3-E3 integrada en `main`** (`cd16a6b`) por decisión del propietario («sí»), con F3-A6, F3-A7 y F3-A4 en las señales | Claude |
 | 20 nov 2026 | **Diseño de F3-E4: señales, combinador y motor de backtest** (§12.4, rama `fase-3-e4`, **pendiente de revisión**, antes del código). **La señal:** única por su clave, con sus cuatro instantes (fin, disponibilidad, decisión y ejecución) y la referencia idealizada aparte. **Posiciones:** ocupan su instrumento desde la decisión hasta la disponibilidad del minuto en que se resuelven. **Combinador:** una posición neta por instrumento; con el instrumento ocupado no se ejecuta ninguna decisión; con decisiones opuestas en el mismo instante, ninguna; del mismo sentido, una, por un orden fijo de familias; y un modo por familia para el informe exploratorio. **Ejecución de la F3**, simple y declarada: entrada a mercado en la apertura; stop a mercado, a la apertura si hay hueco; objetivo limitado a su nivel; salidas por cierre y por tiempo a mercado; sin precio observado no hay ejecución; comisión y deslizamiento fijos, con sus valores en F3-E5; sin funding; resultados en R, brutos y netos; ventanas sin datos de la siguiente. **Motor:** por instrumento, con un orden total de sucesos y la misma lógica que el paper trading. Cinco ejemplos y las pruebas de F3-A8, F3-A9 y F3-A4 del motor entero. No decide D12, D13, D15, D16, D20, D22, D28 ni D30 | Claude |
+| 20 nov 2026 | **Revisión del diseño de F3-E4 (commit `8d6932b`): APROBABLE CON CORRECCIONES.** El diff y el ZIP coinciden y solo cambian documentación. Los ejemplos A y B son correctos: +0,15294 R bruto, −0,11029 R neto y 99,1504 tras el deslizamiento del hueco. Tres hallazgos MEDIOS. **F3E4-01:** faltaba ordenar las liberaciones y las decisiones de un mismo instante. Con un breakout liberado a las 12:00:15 y una decisión de la tendencia en ese instante, el orden por familia podía rechazarla como `ocupado`; y las decisiones simultáneas debían reunirse antes de ver si son opuestas. **F3E4-02:** el fin de ventana admitía una decisión a las 23:59:15 que entraba a las 00:00, fuera de la ventana. Además, la liquidación al cierre del último minuto presente se atribuía a ese minuto, aunque elegirlo exige conocer la ventana entera. **F3E4-03:** el porcentaje solo REST de la operación era el de la decisión, y omitía los datos que deciden la salida. La revisión es documental y matemática: F3-A8, F3-A9 y el envenenamiento del motor se acreditarán con el código | Revisor |
+| 20 nov 2026 | **F3E4-01 a F3E4-03, corregidos en §12.4.** (1) La ocupación es [decisión, liberación). En cada instante se aplican primero las resoluciones y liberaciones, y después todas las decisiones juntas; el orden de familias solo desempata las del mismo sentido, y el registro no depende del orden de llegada (ejemplo F). (2) El motor solo recibe los minutos anteriores a $fin$. Una decisión cuyo minuto de ejecución empieza en $fin$ o después no se ejecuta (`fin_de_ventana`), y no hay salidas desde $fin$. Una posición abierta cuando se resuelve la ventana se liquida al cierre de su último minuto presente, rotulada, y su instante de conocimiento es la resolución de la ventana (ejemplo E). (3) Cada operación lleva dos porcentajes solo REST, con su procedencia por separado: el de la decisión, y el del resultado, que añade todo lo que usó hasta la salida, cada minuto una vez. Las pruebas de §12.4.7 cubren los tres | Claude |

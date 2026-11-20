@@ -34,10 +34,12 @@ from kbot.strategies.frames import (
 )
 from kbot.strategies.regime import RegimeParams
 from kbot.strategies.rules import (
+    Check,
     Decision,
     Interval,
     Outcome,
     Signal,
+    Trail,
     TriggerCandle,
     context_open,
     directions,
@@ -92,6 +94,31 @@ class Ficha:
 
     def fires(self, signal: Signal, close: float) -> bool:
         raise NotImplementedError
+
+    # --- its exits after the entry (§12.3.4 to §12.3.6), the same interface for the three
+
+    @property
+    def invalidation_timeframe(self) -> str:
+        """The timeframe whose closed candles are checked for the invalidation."""
+        raise NotImplementedError
+
+    def invalidation(self, frames: Frames, signal: Signal, open_time: datetime) -> Check | None:
+        """The check at the candle ``open_time`` of the invalidation timeframe; None if
+        that candle is not usable or lacks a value: it is not checked."""
+        raise NotImplementedError
+
+    def trailing(self, frames: Frames, signal: Signal, open_time: datetime) -> Trail | None:
+        """What the candle ``open_time`` of the signal timeframe proposes for the stop.
+        Only the trend trails."""
+        return None
+
+    def entry_target(self, signal: Signal, entry: float, stop: float) -> float | None:
+        """The target fixed when entering, if the ficha has one."""
+        return None
+
+    def time_limit(self, entry_minute: datetime) -> datetime | None:
+        """From when the time exit applies, if the ficha has one."""
+        return None
 
     # --- the same for the three --------------------------------------------------------
 

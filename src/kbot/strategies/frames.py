@@ -88,6 +88,10 @@ class Frame:
         vol = found.volatility if found.volatility_at and found.volatility_at <= at else None
         return (trend, vol)
 
+    def span(self, start: datetime, end: datetime) -> list[datetime]:
+        """The openings of the candles there are in [start, end), in order."""
+        return self._opens[bisect_left(self._opens, start) : bisect_left(self._opens, end)]
+
     @cached_property
     def _opens(self) -> list[datetime]:
         return sorted(self.points)

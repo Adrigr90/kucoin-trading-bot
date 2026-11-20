@@ -6,11 +6,17 @@ from __future__ import annotations
 
 import random
 from collections.abc import Sequence
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from kbot.history.timeframes import MinuteCandle, Quality, historical_minute
 from kbot.market.last_candles import CandleEvidence, Ohlcv
+from kbot.strategies.breakout import Breakout, BreakoutParams
+from kbot.strategies.ficha import Ficha
+from kbot.strategies.mean_reversion import MeanReversion, MeanReversionParams
+from kbot.strategies.regime import RegimeParams
+from kbot.strategies.trend import Trend, TrendParams
 
 MINUTE = timedelta(minutes=1)
 START = datetime(2026, 1, 5, tzinfo=UTC)  # a Monday, 00:00 UTC
@@ -69,7 +75,7 @@ def minute(
 
 def poisoned(minutes: Sequence[MinuteCandle], after: datetime, seed: int) -> list[MinuteCandle]:
     """The same minutes, with every one available after ``after`` changed at random: its
-    prices and its volume."""
+    prices and its volume. When each is available does not change."""
     rng = random.Random(seed)
     result = []
     for m in minutes:
@@ -78,18 +84,17 @@ def poisoned(minutes: Sequence[MinuteCandle], after: datetime, seed: int) -> lis
             continue
         factor = rng.uniform(0.5, 1.5)
         c = m.candle
-        result.append(
-            minute(
-                m.market,
-                m.symbol,
-                c.open_time,
-                float(c.open) * factor,
-                float(c.high) * factor * 1.01,
-                float(c.low) * factor * 0.99,
-                float(c.close) * factor,
-                float(c.volume) * rng.uniform(0.1, 10.0),
-            )
+        changed = minute(
+            m.market,
+            m.symbol,
+            c.open_time,
+            float(c.open) * factor,
+            float(c.high) * factor * 1.01,
+            float(c.low) * factor * 0.99,
+            float(c.close) * factor,
+            float(c.volume) * rng.uniform(0.1, 10.0),
         )
+        result.append(replace(m, candle=changed.candle))
     return result
 
 
@@ -105,3 +110,60 @@ def contrasted(m: MinuteCandle) -> MinuteCandle:
         Quality.CONTRASTADA,
         m.available_at,
     )
+
+
+DAYS = 4
+UNTIL = START + timedelta(days=DAYS)
+REGIME = RegimeParams(adx=3, atr=3, bollinger=5, window=10)
+# A random walk has an ADX of 3 above 20 nearly always: the mean reversion sees a range
+# with higher thresholds. The approved ones are checked at their frontiers elsewhere.
+WIDE_RANGE = RegimeParams(
+    adx=3, atr=3, bollinger=5, window=10, trend_from=Decimal("70"), range_up_to=Decimal("50")
+)
+SHORT_TIMEFRAMES = {"context": "1h", "signal": "15m", "execution": "5m", "trigger_candles": 3}
+
+
+def short_fichas() -> list[Ficha]:
+    """The three fichas with short periods, so that they give signals and decisions in a few
+    days of a random walk."""
+    return [
+        Trend(
+            TrendParams(
+                REGIME,
+                **SHORT_TIMEFRAMES,
+                context_fast=3,
+                context_slow=6,
+                fast=3,
+                slow=6,
+                pullback=3,
+                macd=(2, 4, 2),
+                atr=3,
+            )
+        ),
+        Breakout(
+            BreakoutParams(
+                REGIME,
+                **SHORT_TIMEFRAMES,
+                context_slow=6,
+                pivot_k=2,
+                pivot_m=20,
+                relative_volume=5,
+                relative_volume_min=Decimal("1.2"),
+                atr=3,
+            )
+        ),
+        MeanReversion(
+            MeanReversionParams(
+                WIDE_RANGE,
+                **SHORT_TIMEFRAMES,
+                context_bollinger=10,  # with 5 closes, one can never be beyond 2 sigma
+                bollinger=10,
+                rsi=3,
+                atr=3,
+                vwap_atr=Decimal("0.5"),
+            )
+        ),
+    ]
+
+
+MINUTES = walk_minutes(DAYS * 1440, seed=9)  # four days of a random walk in Futures

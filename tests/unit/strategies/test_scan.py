@@ -10,81 +10,27 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import timedelta
-from decimal import Decimal
 
 import pytest
 
 from kbot.history.timeframes import Quality, aggregate
 from kbot.indicators.series import from_bar, from_minute
 from kbot.market.last_candles import STABILIZATION, CandleEvidence
-from kbot.strategies.breakout import Breakout, BreakoutParams
 from kbot.strategies.ficha import Ficha
 from kbot.strategies.frames import ONE_MINUTE, Frame, known_unusable, rest_only, trigger_candle
-from kbot.strategies.mean_reversion import MeanReversion, MeanReversionParams
-from kbot.strategies.regime import RegimeParams
 from kbot.strategies.rules import LONG, SHORT, Outcome, context_open, execution_minute
-from kbot.strategies.trend import Trend, TrendParams
 from tests.unit.strategies.support import (
+    DAYS,
     MINUTE,
+    MINUTES,
     START,
+    UNTIL,
     contrasted,
     poisoned,
     walk_minutes,
 )
+from tests.unit.strategies.support import short_fichas as fichas
 
-DAYS = 4
-UNTIL = START + timedelta(days=DAYS)
-REGIME = RegimeParams(adx=3, atr=3, bollinger=5, window=10)
-# A random walk has an ADX of 3 above 20 nearly always: the mean reversion sees a range
-# with higher thresholds. The approved ones are checked at their frontiers elsewhere.
-WIDE_RANGE = RegimeParams(
-    adx=3, atr=3, bollinger=5, window=10, trend_from=Decimal("70"), range_up_to=Decimal("50")
-)
-SHORT_TIMEFRAMES = {"context": "1h", "signal": "15m", "execution": "5m", "trigger_candles": 3}
-
-
-def fichas() -> list[Ficha]:
-    return [
-        Trend(
-            TrendParams(
-                REGIME,
-                **SHORT_TIMEFRAMES,
-                context_fast=3,
-                context_slow=6,
-                fast=3,
-                slow=6,
-                pullback=3,
-                macd=(2, 4, 2),
-                atr=3,
-            )
-        ),
-        Breakout(
-            BreakoutParams(
-                REGIME,
-                **SHORT_TIMEFRAMES,
-                context_slow=6,
-                pivot_k=2,
-                pivot_m=20,
-                relative_volume=5,
-                relative_volume_min=Decimal("1.2"),
-                atr=3,
-            )
-        ),
-        MeanReversion(
-            MeanReversionParams(
-                WIDE_RANGE,
-                **SHORT_TIMEFRAMES,
-                context_bollinger=10,  # with 5 closes, one can never be beyond 2 sigma
-                bollinger=10,
-                rsi=3,
-                atr=3,
-                vwap_atr=Decimal("0.5"),
-            )
-        ),
-    ]
-
-
-MINUTES = walk_minutes(DAYS * 1440, seed=9)
 IDS = [f.family for f in fichas()]
 
 

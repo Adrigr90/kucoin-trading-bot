@@ -22,6 +22,7 @@ from kbot.indicators.price import ADX, ATR, RSI, Bollinger
 from kbot.indicators.series import Indicator, Value
 from kbot.indicators.volume import VWAP
 from kbot.strategies.ficha import Ficha, Frames, check_timeframes
+from kbot.strategies.frames import merged, value_span
 from kbot.strategies.regime import Direction, RegimeParams, direction
 from kbot.strategies.rules import LONG, Check, Signal, at_least, at_most, context_open
 
@@ -203,7 +204,15 @@ class MeanReversion(Ficha):
             signal.level("objetivo"),
         )
 
-    def invalidation(self, frames: Frames, d: int, open_time: datetime) -> Check | None:
+    def entry_target(self, signal: Signal, entry: float, stop: float) -> float:
+        """The middle of the bands at the signal candle, fixed at the signal."""
+        return signal.level("objetivo")
+
+    @property
+    def invalidation_timeframe(self) -> str:
+        return self.params.context
+
+    def invalidation(self, frames: Frames, signal: Signal, open_time: datetime) -> Check | None:
         """At the 1 h candle ``open_time``; None if it has no values: it is not checked."""
         p = self.params
         frame = frames[p.context]
@@ -213,8 +222,10 @@ class MeanReversion(Ficha):
             return None
         upper, _, lower = bands.outputs
         close = frame.points[open_time].close
+        exits = invalidated(signal.direction, adx.outputs[0], close, lower, upper, p.regime)
         at = max(adx.available_at, bands.available_at)
-        return Check(at, invalidated(d, adx.outputs[0], close, lower, upper, p.regime))
+        spans = merged((value_span(adx, frame.step), value_span(bands, frame.step)))
+        return Check(at, exits, spans)
 
     def time_limit(self, entry_minute: datetime) -> datetime:
         return time_limit(entry_minute, self.params.time_limit_minutes)

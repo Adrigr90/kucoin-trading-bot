@@ -81,3 +81,18 @@ def test_a_baseline_of_zero_gives_no_relative_volume() -> None:
     assert [v.outputs[0] for v in values] == [0.0, 0.0, 0.0]  # at 4, 5 and 6
     reference = talib.RVOL(np.array(volumes), 3)
     assert math.isinf(float(reference[3])) and math.isnan(float(reference[7]))
+
+
+def test_the_running_total_of_relative_volume_rounds_as_talibs() -> None:
+    """F3E2-07 (review of 7b1c670), a declared limitation: with volumes 1e12, 1e-6, 1e-6,
+    1e-6 and 1e-6, the running total of RVOL(3) loses the small volumes while the large one
+    is in it, so the fifth candle gives 3, as TA-Lib 0.8.3 does with the same running total,
+    though the mean of its window, recomputed, gives 1. Agreeing with TA-Lib is not
+    mathematical exactness. It needs volumes some 10^16 times apart in one instrument."""
+    volumes = [1e12, 1e-6, 1e-6, 1e-6, 1e-6]
+    values = compute(RelativeVolume(3), make_points(rows_from([10.0] * 5, volumes)), MINUTE)
+    ours = values[-1].outputs[0]
+    reference = float(talib.RVOL(np.array(volumes), 3)[4])
+    recomputed = volumes[4] / (sum(volumes[1:4]) / 3)
+    assert (ours, reference) == (3.0, 3.0)
+    assert recomputed == pytest.approx(1.0, rel=1e-12)

@@ -57,7 +57,12 @@ class VWAP(Indicator):
 class RelativeVolume(Indicator):
     """``V_t`` over the mean of the ``w`` volumes before it, as ``RVOL`` of TA-Lib: the
     running total drops the oldest volume after the division, and a window of ``w`` zero
-    volumes resets it to exactly 0. No value when that mean is not positive."""
+    volumes resets it to exactly 0. No value when that mean is not positive.
+
+    Declared limitation (F3E2-07), the same as TA-Lib's: the running total rounds. A
+    volume some 10^16 times the others swallows the ones added while it is in the total,
+    and the error shows once it leaves: with 1e12, 1e-6, 1e-6, 1e-6 and 1e-6 the fifth
+    value of RVOL(3) is 3, not 1."""
 
     kind = Kind.WINDOW
     dims = PRICE_VOLUME

@@ -22,8 +22,9 @@ from decimal import Decimal
 from kbot.indicators.price import ADX, ATR, DMI, EMA, MACD
 from kbot.indicators.series import Indicator, Value
 from kbot.strategies.ficha import Ficha, Frames, check_timeframes
+from kbot.strategies.frames import merged, value_span
 from kbot.strategies.regime import Direction, RegimeParams, direction
-from kbot.strategies.rules import LONG, Check, Signal, beyond_extreme, context_open, trail
+from kbot.strategies.rules import LONG, Check, Signal, Trail, beyond_extreme, context_open
 
 FAMILY = "tendencia"
 
@@ -201,7 +202,11 @@ class Trend(Ficha):
     def fires(self, signal: Signal, close: float) -> bool:
         return beyond_extreme(signal.direction, close, signal.level("H"), signal.level("L"))
 
-    def invalidation(self, frames: Frames, d: int, open_time: datetime) -> Check | None:
+    @property
+    def invalidation_timeframe(self) -> str:
+        return self.params.context
+
+    def invalidation(self, frames: Frames, signal: Signal, open_time: datetime) -> Check | None:
         """At the 4 h candle ``open_time``; None if it has no values: it is not checked."""
         p = self.params
         frame = frames[p.context]
@@ -210,19 +215,22 @@ class Trend(Ficha):
         adx = frame.value("adx", open_time)
         if fast is None or slow is None or adx is None:
             return None
-        at = max(fast.available_at, slow.available_at, adx.available_at)
-        return Check(at, invalidated(d, fast.outputs[0], slow.outputs[0], adx.outputs[0], p.regime))
+        values = (fast, slow, adx)
+        exits = invalidated(
+            signal.direction, fast.outputs[0], slow.outputs[0], adx.outputs[0], p.regime
+        )
+        spans = merged(value_span(v, frame.step) for v in values)
+        return Check(max(v.available_at for v in values), exits, spans)
 
-    def trailed(
-        self, frames: Frames, d: int, stop: float, open_time: datetime
-    ) -> tuple[datetime, float] | None:
-        """The stop after the 1 h candle ``open_time`` and from when it holds; None if the
-        candle is not usable or has no ATR: the stop does not change."""
+    def trailing(self, frames: Frames, signal: Signal, open_time: datetime) -> Trail | None:
+        """The close of the 1 h candle ``open_time`` minus 3 of its ATR(14) (plus, when
+        short); None if the candle is not usable or has no ATR: the stop does not change."""
         p = self.params
         frame = frames[p.signal]
         point = frame.usable(open_time)
         atr = frame.value("atr", open_time)
         if point is None or point.available_at is None or atr is None:
             return None
+        level = point.close - signal.direction * float(p.trail_atr) * atr.outputs[0]
         at = max(point.available_at, atr.available_at)
-        return at, trail(d, stop, point.close, atr.outputs[0], p.trail_atr)
+        return Trail(at, level, (value_span(atr, frame.step),))

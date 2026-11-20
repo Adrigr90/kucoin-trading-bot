@@ -23,6 +23,7 @@ from kbot.indicators.price import ATR, EMA
 from kbot.indicators.series import PRICE, Indicator, Value
 from kbot.indicators.volume import RelativeVolume
 from kbot.strategies.ficha import Ficha, Frames, check_timeframes
+from kbot.strategies.frames import candle_span
 from kbot.strategies.regime import RegimeParams, Volatility
 from kbot.strategies.rules import LONG, Check, Signal, at_least, beyond_extreme, context_open
 
@@ -177,14 +178,19 @@ class Breakout(Ficha):
     def fires(self, signal: Signal, close: float) -> bool:
         return beyond_extreme(signal.direction, close, signal.level("H"), signal.level("L"))
 
-    def target(self, d: int, entry: float, stop: float) -> float:
-        return target(d, entry, stop, self.params.target_r)
+    def entry_target(self, signal: Signal, entry: float, stop: float) -> float:
+        return target(signal.direction, entry, stop, self.params.target_r)
 
-    def invalidation(
-        self, frames: Frames, d: int, level: float, open_time: datetime
-    ) -> Check | None:
-        """At the 1 h candle ``open_time``; None if it is not usable: it is not checked."""
-        point = frames[self.params.signal].usable(open_time, dims=PRICE)
+    @property
+    def invalidation_timeframe(self) -> str:
+        return self.params.signal
+
+    def invalidation(self, frames: Frames, signal: Signal, open_time: datetime) -> Check | None:
+        """At the 1 h candle ``open_time``, against the broken level of the signal, which
+        stays fixed; None if the candle is not usable: it is not checked."""
+        frame = frames[self.params.signal]
+        point = frame.usable(open_time, dims=PRICE)
         if point is None or point.available_at is None:
             return None
-        return Check(point.available_at, invalidated(d, point.close, level))
+        exits = invalidated(signal.direction, point.close, signal.level("nivel"))
+        return Check(point.available_at, exits, (candle_span(open_time, frame.step),))

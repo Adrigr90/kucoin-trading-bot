@@ -151,7 +151,11 @@ def level_exit(
 
 def trail(d: int, stop: float, close: float, atr: float, multiple: Decimal) -> float:
     """The trailing stop after a close: it only comes closer to the price."""
-    candidate = close - d * float(multiple) * atr
+    return closer(d, stop, close - d * float(multiple) * atr)
+
+
+def closer(d: int, stop: float, candidate: float) -> float:
+    """The stop after a candidate: whichever is closer to the price, never farther."""
     return max(stop, candidate) if d == LONG else min(stop, candidate)
 
 
@@ -202,7 +206,19 @@ class Decision:
 
 @dataclass(frozen=True)
 class Check:
-    """A check on a closed candle after the entry: in the instant ``at``, whether to exit."""
+    """A check on a closed candle after the entry: in the instant ``at``, whether to exit,
+    and the original minutes of what it used (F3E4-03)."""
 
     at: datetime
     exit: bool
+    provenance: tuple[Interval, ...] = ()
+
+
+@dataclass(frozen=True)
+class Trail:
+    """What a closed candle after the entry proposes for the stop, from the instant ``at``
+    on; the stop only takes it if it is closer to the price."""
+
+    at: datetime
+    level: float
+    provenance: tuple[Interval, ...] = ()

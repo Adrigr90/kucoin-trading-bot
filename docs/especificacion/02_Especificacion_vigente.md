@@ -1663,7 +1663,7 @@ Cada salida se compara según sus unidades. $b$ es el valor de TA-Lib y $a$ el p
 - El RSI de 50 en una serie plana es conforme con TA-Lib 0.8.3.
 - La tolerancia es la del punto 5.
 
-### 12.3 Régimen y fichas de F3-E3 [diseño del 20 nov 2026, **APROBADO** por el revisor en la segunda revisión (commit `1974a25`): F3E3-01 y F3E3-02 resueltos. Es una aprobación técnica: cada ficha necesita además la aprobación del propietario antes de programarse]
+### 12.3 Régimen y fichas de F3-E3 [diseño del 20 nov 2026, **APROBADO** por el revisor en la segunda revisión (commit `1974a25`): F3E3-01 y F3E3-02 resueltos. **Las tres fichas, APROBADAS por el propietario el 20 nov 2026** con sus parámetros de partida («apruebo las tres»): se programan con ellas]
 
 Fija el régimen de mercado y las fichas matemáticas de tres familias: tendencia, breakout y reversión a la media (`08`, F3-E3). Usa los indicadores de §12.2 y el contrato de datos de §12.1 sin cambiarlos. **Ninguna familia se programa como estrategia sin su ficha aprobada por el propietario**, después de la revisión (§12; `08` §6). El scalping y el volumen y flujo de mercado son de F3-E6.
 
@@ -1796,7 +1796,7 @@ Las tres fichas llevan los mismos parámetros del régimen:
 
 Cada ficha da los suyos y su hash, y las pruebas reproducen los tres.
 
-#### 12.3.4 Ficha de tendencia [diseño **APROBADO** por el revisor (`1974a25`); **pendiente de la aprobación del propietario**]
+#### 12.3.4 Ficha de tendencia [diseño **APROBADO** por el revisor (`1974a25`); **APROBADA por el propietario** el 20 nov 2026]
 
 **En pocas palabras.** Cuando el gráfico de 4 h tiene una tendencia fuerte, espera a que el de 1 h retroceda hasta su media y vuelva a coger impulso, y entra si una vela de 15 minutos lo confirma. El stop empieza 2 ATR por detrás y sube con el precio, nunca baja. Sale cuando se acaba la tendencia de 4 h.
 
@@ -1852,7 +1852,7 @@ Cada ficha da los suyos y su hash, y las pruebas reproducen los tres.
 - Con un ADX de 4 h de 25,00 hay señal; con 24,99, no.
 - Las mismas condiciones en corto no dan señal en Spot ETH-USDT, y sí en Futures.
 
-#### 12.3.5 Ficha de breakout [diseño **APROBADO** por el revisor (`1974a25`); **pendiente de la aprobación del propietario**]
+#### 12.3.5 Ficha de breakout [diseño **APROBADO** por el revisor (`1974a25`); **APROBADA por el propietario** el 20 nov 2026]
 
 **En pocas palabras.** Cuando el precio de 1 h ha estado comprimido (bandas de Bollinger estrechas) y cierra fuera de una resistencia o de un soporte con más volumen del habitual, entra a favor de la ruptura si una vela de 15 minutos la confirma. En 4 h solo pide no ir contra la media lenta. El stop queda a 2 ATR y el objetivo, a dos veces el riesgo. Sale si el precio vuelve al otro lado del nivel roto.
 
@@ -1903,7 +1903,7 @@ Cada ficha da los suyos y su hash, y las pruebas reproducen los tres.
 - Si ninguna vela de $t-5$ a $t-1$ está en `compresion`, no hay señal.
 - En Spot, la ruptura a la baja no da señal, y la alcista, sí.
 
-#### 12.3.6 Ficha de reversión a la media [diseño **APROBADO** por el revisor (`1974a25`); **pendiente de la aprobación del propietario**]
+#### 12.3.6 Ficha de reversión a la media [diseño **APROBADO** por el revisor (`1974a25`); **APROBADA por el propietario** el 20 nov 2026]
 
 **En pocas palabras.** Cuando el gráfico de 1 h no tiene tendencia y el de 15 minutos se aleja mucho de su media, entra esperando que vuelva a ella. «Mucho» es salir de las bandas de Bollinger, con el RSI en un extremo y lejos del VWAP del día. Entra si una vela de 5 minutos lo confirma. El objetivo es la media y el stop, 2 ATR. Sale si aparece una tendencia, si se rompe el rango o a las 4 horas.
 
@@ -2536,3 +2536,4 @@ $$\Delta Cap=\underbrace{8}_{\text{distancia mark-stop de lo cerrado}}+\underbra
 | 20 nov 2026 | **Revisión del diseño de F3-E3 (commit `db0c8db`): APROBABLE CON CORRECCIONES.** El régimen, sus fronteras y sus calentamientos son coherentes. Los tres hashes coinciden al recalcularlos, y la aritmética de los ejemplos es correcta. Dos hallazgos MEDIOS. **F3E3-01:** el recorrido de los disparos podía retroceder en el tiempo. Con una primera vela de ejecución disponible a las 15:50 y una segunda disponible a las 15:30:15, se decidía con la segunda a las 15:30:15 sin saber aún qué hacía la primera. **F3E3-02:** se admitían stops y objetivos no positivos, que ningún precio puede tocar: un largo con el stop en −1, o un breakout corto con el objetivo en −3. La revisión es documental y matemática: F3-A6 y F3-A7 se acreditarán con las pruebas del código. Las aprobaciones de las fichas y D13, D15, D20 y D30 siguen siendo del propietario | Revisor |
 | 20 nov 2026 | **F3E3-01 y F3E3-02, corregidos en §12.3.1**, con sus pruebas en §12.3.7. (1) Los instantes del disparo nunca retroceden: $D_0 = D_s$, y $D_i = \max(D_s, D_{i-1}, \text{resolución de } e_i)$. Una vela se resuelve cuando está disponible o cuando se sabe que no será utilizable, y el contexto se mira en ese instante. En el caso del revisor, la decisión es a las 15:50:00 y la entrada a las 15:51, nunca a las 15:31. (2) No se entra con un stop o un objetivo que no sea positivo, también en el objetivo del breakout (§12.3.5), y los niveles nunca se recortan. No cambian los parámetros, sus hashes ni los ejemplos de las fichas | Claude |
 | 20 nov 2026 | **Segunda revisión del diseño de F3-E3 (commit `1974a25`): APROBADO.** F3E3-01, RESUELTO: los instantes incorporan $D_{i-1}$ y la resolución de cada vela, también cuando no es utilizable, y el contexto se mira en el instante efectivo; el caso del retraso ya no permite decidir antes de las 15:50, y sus variantes quedan contempladas. F3E3-02, RESUELTO: se rechazan los stops y los objetivos cero o negativos, también el objetivo del breakout calculado al entrar, y los niveles no se recortan; las pruebas incluyen las fronteras en cero y conservan los ejemplos válidos. El diff y el ZIP coinciden y solo cambian documentación. Sin residuales ni hallazgos nuevos. **Es una aprobación técnica del diseño:** cada ficha necesita la aprobación del propietario antes de programarse, y F3-A6 y F3-A7 se acreditarán con las pruebas de la implementación | Revisor |
+| 20 nov 2026 | **Decisión del propietario: aprueba las tres fichas de F3-E3** (tendencia, breakout y reversión a la media; §12.3.4 a §12.3.6) con sus parámetros de partida y sus hashes, tras la aprobación técnica del revisor (respuesta: «apruebo las tres»). Se le explicaron antes, en palabras sencillas, con los ejemplos de cada ficha. Con esto se programan el régimen, la versión y las reglas de las tres fichas | Propietario |

@@ -13,6 +13,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
+from structlog.testing import capture_logs
 
 from kbot.ingest.core import MAX_CANDLE_ATTEMPTS
 from kbot.ingest.service import EVALUATION_TIME, INDEX_ATTEMPTS, INDEX_DELAY, Recorder
@@ -258,6 +259,45 @@ def test_pending_rest_candles_survive_a_restart(
     run(again.startup(minute + timedelta(seconds=80)))
     assert again.core is not None
     assert again.core.awaiting_until(MIDNIGHT + timedelta(days=1)) == 0, "nothing twice"
+
+
+def test_two_different_rest_candles_are_logged_and_none_is_written(
+    setup: tuple[Recorder, MemorySink, FakeKucoin],
+) -> None:
+    """The REST answer brings two different candles for 23:58 of BTC-USDT, as KuCoin did for
+    DOT-USDT on 18 November 2026: the conflict is logged, no candle is written for that
+    minute and it stays pending, while XBTUSDTM is decided. Once KuCoin gives one candle
+    again, the minute is decided with it, contrasted with its WebSocket candle."""
+    recorder, sink, fake = setup
+    minute = MIDNIGHT - timedelta(minutes=2)
+    partial = [seconds(minute), "100", "100", "100", "100", "0.1", "10"]
+
+    def conflicting(market: str, symbol: str, start: int, end: int) -> list[list[object]]:
+        rows = candles(market, symbol, start, end)
+        twice = symbol == "BTC-USDT" and start <= seconds(minute) <= end
+        return [*rows, partial] if twice else rows
+
+    fake.candles = conflicting
+
+    async def first() -> None:
+        await recorder.startup(START)
+        connect_both(recorder, START + timedelta(seconds=1))
+        feed(recorder, minute)
+        await beat(recorder, minute + timedelta(seconds=76))
+
+    with capture_logs() as logs:
+        run(first())
+    conflicts = [(e["symbol"], e["minute"]) for e in logs if e["event"] == "rest_candle_conflict"]
+    assert conflicts == [("BTC-USDT", minute.isoformat())]
+    decided = {(d.symbol, d.minute) for d in sink.last_candles}
+    assert ("XBTUSDTM", minute) in decided and ("BTC-USDT", minute) not in decided
+    assert recorder.core is not None
+    assert recorder.core.awaiting_minutes("SPOT", "BTC-USDT") == [minute]
+
+    fake.candles = candles  # KuCoin gives one candle again
+    run(beat(recorder, minute + timedelta(seconds=140)))
+    (decision,) = [d for d in sink.last_candles if (d.symbol, d.minute) == ("BTC-USDT", minute)]
+    assert decision.state is CandleState.CERRADA_CRUZADA
 
 
 def test_pending_index_rebuilds_survive_a_restart(

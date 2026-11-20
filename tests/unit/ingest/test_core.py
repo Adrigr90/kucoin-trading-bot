@@ -699,6 +699,51 @@ def test_a_minute_never_answered_is_given_up_after_48_hours() -> None:
     assert recorder.awaiting_until(at(10**6)) == 0, "given up: its day closes as it is"
 
 
+def test_two_different_rest_candles_for_a_minute_are_no_answer_for_it() -> None:
+    """Two different candles for one minute in a REST answer, as KuCoin gave for DOT-USDT
+    at 09:03 UTC of 18 November 2026 (02 §12.1, CD-19). None is chosen: the minute is asked
+    again like after a failure, never using up its attempts, while the other minute of the
+    answer, sent twice and identical, is decided. Once KuCoin gives one candle again, as it
+    did by 22:10 of the next day (CD-20), the minute is decided with it."""
+    recorder = core(SPOT)
+    connect(recorder, at(0))
+    feed_minute(recorder, at(0))
+    feed_minute(recorder, at(60))
+    tick(recorder, at(122))
+    full = rest_kline(rest_row(at(0)))
+    partial = rest_kline([seconds(at(0)), "100", "100", "100", "100", "0.1", "10"])
+    other = rest_kline(rest_row(at(60)))
+    moment = at(135)
+    (request,) = recorder.candle_requests(moment)
+    assert (request.first, request.last) == (at(0), at(60))
+    decisions = recorder.apply_rest_candles(request, [full, other, other, partial], moment)  # type: ignore[list-item]
+    assert [d.minute for d in decisions] == [at(60)], "the rest of the answer counts"
+    for pause in (1, 2, 4, 8, 15, 15, 15):
+        moment += timedelta(minutes=pause)
+        assert recorder.candle_requests(moment - timedelta(seconds=1)) == []
+        (request,) = recorder.candle_requests(moment)
+        assert recorder.apply_rest_candles(request, [partial, full], moment) == []  # type: ignore[list-item]
+    assert recorder.awaiting_until(at(86_400)) == 1, "more answers than attempts: pending"
+    moment += timedelta(minutes=15)
+    (request,) = recorder.candle_requests(moment)
+    (decision,) = recorder.apply_rest_candles(request, [full, full], moment)  # type: ignore[list-item]
+    assert (decision.minute, decision.rest) == (at(0), full)
+    assert decision.state is CandleState.CERRADA_CRUZADA
+
+
+def test_a_minute_whose_answers_keep_two_candles_is_given_up_after_48_hours() -> None:
+    recorder = core(SPOT)
+    connect(recorder, at(0))
+    feed_minute(recorder, at(0))
+    tick(recorder, at(62))
+    full = rest_kline(rest_row(at(0)))
+    partial = rest_kline([seconds(at(0)), "100", "100", "100", "100", "0.1", "10"])
+    for moment in (at(75), at(48 * 3600 - 200), at(48 * 3600 + 100)):
+        (request,) = recorder.candle_requests(moment)
+        assert recorder.apply_rest_candles(request, [full, partial], moment) == []  # type: ignore[list-item]
+    assert recorder.awaiting_until(at(10**6)) == 0, "given up: its day closes as it is"
+
+
 def test_a_minute_seen_on_the_websocket_waits_for_its_rest_candle() -> None:
     recorder = core(SPOT)
     connect(recorder, at(0))

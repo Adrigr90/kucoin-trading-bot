@@ -50,6 +50,7 @@ from kbot.ingest.core import (
     InstrumentSpec,
     RecorderCore,
     TickOutput,
+    candles_by_minute,
 )
 from kbot.ingest.sinks import Sink
 from kbot.kucoin.rest import KucoinApiError, KucoinRestClient
@@ -114,6 +115,8 @@ class Recorder:
         self._days_to_close: set[datetime] = set()
         self._closing: dict[datetime, set[tuple[str, str]]] = {}  # members still to close
         self._last_beat: datetime | None = None  # set by run(); None in step-driven tests
+        # When the stop began, if it had to cancel a running step (``_supervised_step``).
+        self._stop_began: datetime | None = None
         self._db_call: asyncio.Future[Any] | None = None  # the last database call (``_db``)
 
     # --- start ------------------------------------------------------------------------------
@@ -288,7 +291,17 @@ class Recorder:
         parsed = [rest_kline(row) for row in rows]
         if any(candle is None for candle in parsed):
             return None  # one unreadable row makes the whole answer unusable: ask again
-        return [c for c in parsed if c is not None and request.first <= c.open_time <= request.last]
+        kept = [c for c in parsed if c is not None and request.first <= c.open_time <= request.last]
+        for minute, candles in candles_by_minute(kept).items():
+            if len(candles) > 1:  # none is chosen: the core asks for the minute again
+                log.warning(
+                    "rest_candle_conflict",
+                    market=request.market,
+                    symbol=request.symbol,
+                    minute=minute.isoformat(),
+                    candles=len(candles),
+                )
+        return kept
 
     async def _rebuild_index(self, now: datetime) -> None:
         minute = floor_to(now, MINUTE)
@@ -605,6 +618,7 @@ class Recorder:
         the Spot stream ended in silence at 17:45 and nothing noticed until midnight).
         However it stops, it first records what it leaves open (``_record_stop``)."""
         clock = clock or SystemClock()
+        self._stop_began = None
         await self.startup(clock.now())
         self._last_beat = clock.now()
         pacer = ConnectionPacer()
@@ -612,7 +626,7 @@ class Recorder:
         watchdog = asyncio.create_task(self._watch_stalls(stop, clock))
         try:
             while not stop.is_set():
-                await self._supervised_step(clock.now(), stop, streams, watchdog)
+                await self._supervised_step(clock, stop, streams, watchdog)
                 if stop.is_set():
                     break
                 if self.restart_streams:
@@ -628,16 +642,18 @@ class Recorder:
                 with suppress(TimeoutError):
                     await asyncio.wait_for(stop.wait(), timeout=pause)
         finally:
+            # A stop that cancelled a running step began before waiting for it (GR2-01).
+            stopped_at = self._stop_began or clock.now()
             watchdog.cancel()
             await _close_streams(streams)
-            await self._record_stop(clock.now())
+            await self._record_stop(stopped_at, clock.now())
             if self._rest is not None:
                 await self._rest.aclose()
             log.info("recorder_stopped")
 
     async def _supervised_step(
         self,
-        now: datetime,
+        clock: Clock,
         stop: asyncio.Event,
         streams: list[_Stream],
         watchdog: asyncio.Task[None],
@@ -650,8 +666,13 @@ class Recorder:
         asked for returns. Either way the step is cancelled at its current wait, which is
         like the process stopping there, something every step already survives; a database
         call it had started goes on to its end (``_db``). After a stop is asked for nothing
-        is checked: the watchdog ends with it, and that is no failure (review GR-05)."""
-        step = asyncio.create_task(self.step(now))
+        is checked: the watchdog ends with it, and that is no failure (review GR-05).
+
+        The moment a running step is cancelled is when the stop began (``_stop_began``),
+        taken before waiting for the step: a cancelled HTTP request can take seconds to
+        close, with the event loop running, and that wait is the stop, never a stall
+        (GR2-01)."""
+        step = asyncio.create_task(self.step(clock.now()))
         ended: TaskEnded | None = None
         try:
             while not step.done():
@@ -664,6 +685,8 @@ class Recorder:
                     ended = exc
                     break
         finally:
+            if not step.done() and self._stop_began is None:
+                self._stop_began = clock.now()
             failure = await _finish(step)
         if ended is not None:
             if failure is not None:
@@ -672,7 +695,7 @@ class Recorder:
         if failure is not None:
             raise failure
 
-    async def _record_stop(self, now: datetime) -> None:
+    async def _record_stop(self, stopped_at: datetime, now: datetime) -> None:
         """Write the gaps the recorder leaves unwritten, so that the next start-up and the
         day close find them (incident of 17 November 2026): those closed since the last
         tick, those still open, closed at this moment, and what the instruments that left
@@ -680,6 +703,10 @@ class Recorder:
         minute is closed here, because after a tick that could not be written that would
         leave time without rows and without a gap. The next start-up begins its own gap
         after these when they cover its resume point (``Sink.stop_gap_starts``).
+
+        A stall is looked for at ``stopped_at``, when the stop began: closing the streams
+        and the database after it is the stop itself, not a stall. Looked for at ``now``,
+        a stop that took more than ``STALL_LIMIT`` was labelled "Stall" (18 November 2026).
 
         It is the last thing the recorder writes and only a best effort: if it fails, the
         failure is logged and never hides why the recorder stopped. A stop that does not get
@@ -691,7 +718,7 @@ class Recorder:
             return
         try:
             await self._settle_db()
-            self._check_stall(now)
+            self._check_stall(stopped_at)
             gaps = core.stop(now)
             if gaps:
                 await self._db(self.sink.write_tick, TickOutput(gaps=gaps))

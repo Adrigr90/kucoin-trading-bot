@@ -710,15 +710,22 @@ class RecorderCore:
         is decided without a candle. A failed request is not an answer: the minutes are
         asked again after a growing pause (1, 2, 4 and 8 minutes, then every 15), for up to
         ``RECOVERY_HORIZON`` after each minute, and only then given up. Meanwhile they stay
-        pending, so their day is not closed (``kbot.ingest.service``)."""
+        pending, so their day is not closed (``kbot.ingest.service``).
+
+        An answer with two different candles for a minute is no answer for that minute
+        either: none of them is chosen, and it is asked again like after a failure. KuCoin
+        did it for DOT-USDT at 09:03 UTC of 18 November 2026 and gave one candle again by
+        22:10 of the next day (``02`` §12.1, CD-19 and CD-20). Two identical candles are
+        one, and the other minutes of the answer count."""
         now = as_utc(now, "now")
         key = (request.market, request.symbol)
         pending = self._awaiting.get(key, {})
         decisions: list[CandleDecision] = []
-        by_minute = {row.open_time: row for row in rows} if rows is not None else {}
+        by_minute = candles_by_minute(rows or [])
         for minute in [m for m in sorted(pending) if request.first <= m <= request.last]:
             awaiting = pending[minute]
-            if rows is None:
+            candles = by_minute.get(minute, [])
+            if rows is None or len(candles) > 1:
                 awaiting.failures += 1
                 pause = RETRY_INTERVAL * 2 ** min(awaiting.failures - 1, 4)
                 awaiting.next_try = now + min(pause, MAX_FAILURE_PAUSE)
@@ -731,7 +738,7 @@ class RecorderCore:
                 request.market,
                 request.symbol,
                 awaiting.flow,
-                by_minute.get(minute),
+                candles[0] if candles else None,
                 awaiting.ws,
                 awaiting.tick_size,
                 active=awaiting.active,
@@ -749,6 +756,17 @@ class RecorderCore:
         return sum(
             1 for pending in self._awaiting.values() for minute in pending if minute < moment
         )
+
+
+def candles_by_minute(rows: Iterable[Ohlcv]) -> dict[datetime, list[Ohlcv]]:
+    """The different candles of each minute of a REST answer, in the order KuCoin gave
+    them: one if all its rows for the minute are identical, two or more if they differ."""
+    by_minute: dict[datetime, list[Ohlcv]] = {}
+    for row in rows:
+        held = by_minute.setdefault(row.open_time, [])
+        if row not in held:
+            held.append(row)
+    return by_minute
 
 
 def _valid_trade(data: dict[str, Any]) -> bool:

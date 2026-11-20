@@ -50,6 +50,7 @@ from kbot.ingest.core import (
     InstrumentSpec,
     RecorderCore,
     TickOutput,
+    candles_by_minute,
 )
 from kbot.ingest.sinks import Sink
 from kbot.kucoin.rest import KucoinApiError, KucoinRestClient
@@ -288,7 +289,17 @@ class Recorder:
         parsed = [rest_kline(row) for row in rows]
         if any(candle is None for candle in parsed):
             return None  # one unreadable row makes the whole answer unusable: ask again
-        return [c for c in parsed if c is not None and request.first <= c.open_time <= request.last]
+        kept = [c for c in parsed if c is not None and request.first <= c.open_time <= request.last]
+        for minute, candles in candles_by_minute(kept).items():
+            if len(candles) > 1:  # none is chosen: the core asks for the minute again
+                log.warning(
+                    "rest_candle_conflict",
+                    market=request.market,
+                    symbol=request.symbol,
+                    minute=minute.isoformat(),
+                    candles=len(candles),
+                )
+        return kept
 
     async def _rebuild_index(self, now: datetime) -> None:
         minute = floor_to(now, MINUTE)
@@ -628,9 +639,10 @@ class Recorder:
                 with suppress(TimeoutError):
                     await asyncio.wait_for(stop.wait(), timeout=pause)
         finally:
+            stopped_at = clock.now()
             watchdog.cancel()
             await _close_streams(streams)
-            await self._record_stop(clock.now())
+            await self._record_stop(stopped_at, clock.now())
             if self._rest is not None:
                 await self._rest.aclose()
             log.info("recorder_stopped")
@@ -672,7 +684,7 @@ class Recorder:
         if failure is not None:
             raise failure
 
-    async def _record_stop(self, now: datetime) -> None:
+    async def _record_stop(self, stopped_at: datetime, now: datetime) -> None:
         """Write the gaps the recorder leaves unwritten, so that the next start-up and the
         day close find them (incident of 17 November 2026): those closed since the last
         tick, those still open, closed at this moment, and what the instruments that left
@@ -680,6 +692,10 @@ class Recorder:
         minute is closed here, because after a tick that could not be written that would
         leave time without rows and without a gap. The next start-up begins its own gap
         after these when they cover its resume point (``Sink.stop_gap_starts``).
+
+        A stall is looked for at ``stopped_at``, when the stop began: closing the streams
+        and the database after it is the stop itself, not a stall. Looked for at ``now``,
+        a stop that took more than ``STALL_LIMIT`` was labelled "Stall" (18 November 2026).
 
         It is the last thing the recorder writes and only a best effort: if it fails, the
         failure is logged and never hides why the recorder stopped. A stop that does not get
@@ -691,7 +707,7 @@ class Recorder:
             return
         try:
             await self._settle_db()
-            self._check_stall(now)
+            self._check_stall(stopped_at)
             gaps = core.stop(now)
             if gaps:
                 await self._db(self.sink.write_tick, TickOutput(gaps=gaps))

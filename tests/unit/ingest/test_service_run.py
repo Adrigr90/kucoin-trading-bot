@@ -220,6 +220,36 @@ def test_a_stop_with_a_connection_down_records_its_gap_up_to_the_stop(
         assert {g.channel for g in stalls} == {"obu5", "obu50", "trade", "kline", "mark-price"}
 
 
+def test_a_stop_that_takes_long_to_close_is_no_stall(
+    recorder: tuple[Recorder, MemorySink], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Closing the streams and the database after a stop takes 6 s, more than the stall
+    limit (seen on 18 November 2026 when stopping the recorder on the server). That is the
+    stop itself: no gap says "Stall", because a stall is looked for when the stop begins.
+    A stall before the stop is still recorded (the test above, with ``stall``)."""
+    rec, sink = recorder
+    clock = JumpingClock()
+
+    async def slow_to_close(stream: FakeStream, stop: asyncio.Event) -> None:
+        stream.report("connected")
+        await stop.wait()
+        clock.jump = timedelta(seconds=6)  # what the clock shows once the streams are closed
+
+    scripted(monkeypatch, {"SPOT": slow_to_close, "FUTURES": stays_up})
+
+    async def go() -> None:
+        stop = asyncio.Event()
+        asyncio.get_running_loop().call_later(1.5, stop.set)
+        await rec.run(stop, clock)
+
+    with capture_logs() as logs:
+        asyncio.run(go())
+    stalls = [g for t in sink.ticks for g in t.gaps if (g.detail or "").startswith("Stall")]
+    assert stalls == [], "a slow stop is not a stall"
+    assert [e for e in logs if e["event"] == "recorder_stalled"] == []
+    assert [e["event"] for e in logs if e["event"] == "stop_recorded"] == ["stop_recorded"]
+
+
 @pytest.mark.parametrize("fails", [False, True], ids=["written", "write failed"])
 @pytest.mark.parametrize("at_the_end", [False, True], ids=["while it runs", "as it ends"])
 def test_a_write_that_ends_after_its_step_was_cancelled_still_counts(
@@ -266,7 +296,8 @@ def test_a_write_that_ends_after_its_step_was_cancelled_still_counts(
             while not call.done():  # one turn of the event loop at a time
                 await asyncio.sleep(0)
         with capture_logs() as logs:
-            await rec._record_stop(moment + timedelta(seconds=1))
+            stopped = moment + timedelta(seconds=1)
+            await rec._record_stop(stopped, stopped)
         assert rec._rest is not None
         await rec._rest.aclose()
         return logs
@@ -392,7 +423,7 @@ def test_a_stop_writes_the_gaps_of_a_tick_that_could_not_be_written(
         sink.fail_next = True
         with pytest.raises(OSError, match="simulated"):
             await beat(rec, at(101))
-        await rec._record_stop(at(102))
+        await rec._record_stop(at(102), at(102))
         assert rec._rest is not None
         await rec._rest.aclose()
 

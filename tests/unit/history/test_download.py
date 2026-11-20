@@ -15,6 +15,8 @@ from pathlib import Path
 import httpx
 import pytest
 
+from kbot.core.clock import ManualClock
+from kbot.history import __main__ as command
 from kbot.history.coverage import Presence, Window, coverage, presence
 from kbot.history.download import (
     FUTURES_MINUTES_SINCE,
@@ -28,8 +30,10 @@ from kbot.history.report import instrument_report
 from kbot.history.store import SETTLING, DayRecord, read_candles, read_record, requested
 from kbot.kucoin.ratelimit import RestRateLimiter
 from kbot.kucoin.rest import KucoinRestClient
+from kbot.market.last_candles import STABILIZATION
 
 Factory = Callable[..., KucoinRestClient]
+UNIVERSE = Path(__file__).resolve().parents[3] / "docs" / "f3" / "universo_2026-11-18.json"
 DAY = date(2026, 11, 10)
 START = datetime(2026, 11, 10, tzinfo=UTC)
 END = START + timedelta(days=1)
@@ -60,6 +64,7 @@ class FakeKlines(httpx.AsyncBaseTransport):
     failures: dict[tuple[str, int], int] = field(default_factory=dict)
     unreadable: set[tuple[str, int]] = field(default_factory=set)
     interrupt: set[tuple[str, int]] = field(default_factory=set)  # the process stops there
+    interrupt_contracts: bool = False  # it stops at the contracts, the first request
     asked: list[tuple[str, int, int]] = field(default_factory=list)
 
     def add(self, market: str, symbol: str, start: datetime, minutes: int, skip: set[int]) -> None:
@@ -70,6 +75,10 @@ class FakeKlines(httpx.AsyncBaseTransport):
                 held[int(moment.timestamp())] = row(moment)
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/contracts/active"):
+            if self.interrupt_contracts:
+                raise Interrupted
+            return httpx.Response(200, json={"code": "200000", "data": []})
         q = dict(request.url.params)
         assert request.url.path.endswith("/market/kline"), request.url.path
         start, end = int(q["startAt"]), int(q["endAt"])
@@ -205,6 +214,35 @@ def test_an_interrupted_download_leaves_its_window_whole_in_the_report(
     run(test_client, fake, tmp_path, Instrument("SPOT", "BTC-USDT"), window)
     report = instrument_report(tmp_path, "SPOT", "BTC-USDT", [])
     assert (report.total.numerator, report.total.denominator) == (3 * 1440, 3 * 1440)
+
+
+@pytest.mark.parametrize("where", ["contracts", "candles"])
+def test_an_order_stopped_anywhere_keeps_the_windows_of_every_instrument(
+    test_client: Factory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, where: str
+) -> None:
+    """F3E1-02, residual: ``descargar`` for two instruments and one day stops at its first
+    request, the contracts, or at its first request for candles. The windows of both were
+    written before any request, so the report keeps both whole: 1440 minutes no_descargado
+    each, never a denominator of 0."""
+    fake = FakeKlines()
+    for symbol in ("BTC-USDT", "ETH-USDT"):
+        fake.add("SPOT", symbol, START, 1440, set())
+    if where == "contracts":
+        fake.interrupt_contracts = True
+    else:
+        fake.interrupt.add(("BTC-USDT", int(START.timestamp()) - 60))
+    limiter = RestRateLimiter(pool_weight=10**6)
+    monkeypatch.setattr(command, "KucoinRestClient", lambda: test_client(fake, limiter))
+    monkeypatch.setattr(command, "SystemClock", lambda: ManualClock(END + STABILIZATION))
+    order = ["descargar", "--universo", str(UNIVERSE), "--carpeta", str(tmp_path), "--dias", "1"]
+    with pytest.raises(Interrupted):
+        command.main([*order, "--solo", "SPOT:BTC-USDT", "--solo", "SPOT:ETH-USDT"])
+    assert len(fake.asked) == (0 if where == "contracts" else 1)
+    for symbol in ("BTC-USDT", "ETH-USDT"):
+        assert requested(tmp_path, "SPOT", symbol) == [Window(START, END)]
+        total = instrument_report(tmp_path, "SPOT", symbol, []).total
+        assert (total.numerator, total.denominator) == (0, 1440)
+        assert total.total(Presence.NO_DESCARGADO) == 1440
 
 
 def test_two_different_candles_for_a_minute_leave_it_in_conflict(

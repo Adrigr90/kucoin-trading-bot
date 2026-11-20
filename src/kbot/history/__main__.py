@@ -8,8 +8,9 @@
 ``descargar`` asks KuCoin, with the read-only client of E1, for the 1-minute candles of the
 last ``--dias`` days (730 by default) of each instrument, day by day, and keeps the opening
 dates of the Futures contracts (``contratos_futures.json``) as evidence of eligibility.
-What it asks for goes first to ``solicitado.json`` of each instrument. Repeating it
-resumes: a closed day is never asked again. ``informe`` writes the coverage report from the
+Before its first request, the contracts included, it writes what it will ask for to the
+``solicitado.json`` of every selected instrument. Repeating it resumes: a closed day is
+never asked again. ``informe`` writes the coverage report from the
 files alone, walking what was asked (``informe_cobertura.md`` and ``cobertura.json``).
 ``--solo MERCADO:SÍMBOLO`` (repeatable) limits either to some instruments.
 """
@@ -30,6 +31,7 @@ import structlog
 from kbot.core.clock import SystemClock
 from kbot.history.download import Downloader, Instrument, window_for
 from kbot.history.report import instrument_report, write
+from kbot.history.store import record_request
 from kbot.history.universe import Member, Universe, evidence, first_open_dates, load
 from kbot.kucoin.rest import KucoinRestClient
 
@@ -51,13 +53,18 @@ def selected(universe: Universe, only: Sequence[str]) -> list[Member]:
 async def download(arguments: argparse.Namespace) -> None:
     universe = load(arguments.universo)
     now = SystemClock().now()
+    members = selected(universe, arguments.solo)
+    windows = [window_for(member.market, arguments.dias, now) for member in members]
+    # What the order will ask goes to disk before its first request, the contracts
+    # included: stopped anywhere, it leaves every window whole in the report (F3E1-02).
+    for member, window in zip(members, windows, strict=True):
+        record_request(arguments.carpeta, member.market, member.symbol, window)
     client = KucoinRestClient()
     try:
         opened = first_open_dates((await client.get("futures.contracts")).data)
         save_contracts(arguments.carpeta, opened)
         downloader = Downloader(client, arguments.carpeta)
-        for member in selected(universe, arguments.solo):
-            window = window_for(member.market, arguments.dias, now)
+        for member, window in zip(members, windows, strict=True):
             records = await downloader.instrument(
                 Instrument(member.market, member.symbol), window, now
             )

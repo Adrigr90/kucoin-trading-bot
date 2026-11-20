@@ -45,8 +45,8 @@
 
 | ID | Criterio | Pruebas | Estado |
 |---|---|---|---|
-| F3-A1 | Descarga histórica con el cliente de la E1, reanudable e idempotente, sin fabricar velas; informe de cobertura | — | No empezada |
-| F3-A2 | Temporalidades superiores reconstruidas desde 1 minuto igual en cualquier orden, sin velas sin cerrar | — | No empezada |
+| F3-A1 | Descarga histórica con el cliente de la E1, reanudable e idempotente, sin fabricar velas; informe de cobertura | `src/kbot/history/` (`download.py`, `store.py`, `coverage.py`, `universe.py`, `report.py`), `tests/unit/history/test_download.py`, `test_store.py`, `test_coverage.py`, `test_report.py`; universo `docs/f3/universo_2026-11-18.json`; informe `docs/f3/cobertura_2026-11-19.md` | F3-E1 programada (19 nov 2026, rama `fase-3-e1`). Casos CD-11, CD-13 a CD-16, CD-19 y CD-20. Descarga real en el PC del propietario: 40 instrumentos, 34.500.732 velas y 1,88 GB, sin ninguna petición fallida. El informe de cobertura recorre la ventana solicitada (`solicitado.json`): Spot 89,44 % y Futures 92,87 %, sin minutos `no_descargado` ni en conflicto y sin contradicciones. El revisor lo recalculó verificando las huellas y coincide. Revisión (`663c59c`): APROBABLE CON CORRECCIONES, con la enmienda del contrato (CD-19, CD-20 y la precisión de CD-16) APROBADA. F3E1-02 (el informe recorría los archivos y no la ventana): parcial en la segunda revisión (`7fd094a`), porque la orden no guardaba las ventanas de todos sus instrumentos antes de su primera petición; corregido. **APROBADA** en la tercera revisión (`65d450d`, 20 nov 2026), con F3E1-01 y F3E1-02 cerrados |
+| F3-A2 | Temporalidades superiores reconstruidas desde 1 minuto igual en cualquier orden, sin velas sin cerrar | `src/kbot/history/timeframes.py`, `tests/unit/history/test_timeframes.py`, `tests/fixtures/history/` | F3-E1 programada (19 nov 2026). Casos CD-01, CD-06 a CD-10 y CD-17, con la herencia de la peor calidad P, V y T y la evidencia solo REST. Revisión (`663c59c`): F3E1-01 (sumas de volumen y turnover redondeadas por el contexto decimal del entorno) corregido con el contexto contable: **RESUELTO** en la segunda revisión (`7fd094a`). **APROBADA** con F3-E1 en la tercera revisión (`65d450d`, 20 nov 2026). CD-02, CD-04, CD-05, CD-12 y CD-18 son de los indicadores (F3-E2) y CD-03, de la ejecución (F3-E4) |
 | F3-A3 | Cada indicador contra TA-Lib dentro de su tolerancia, en x86-64 y en aarch64 | — | No empezada |
 | F3-A4 | Ningún indicador ni señal cambia al envenenar los datos posteriores | — | No empezada |
 | F3-A5 | Sin valor con velas no utilizables, sin datos suficientes o con huecos; recalentamiento tras el hueco | — | No empezada |
@@ -56,6 +56,6 @@
 | F3-A9 | Backtest con `ejecución ≥ decisión ≥ disponibilidad` en todas las temporalidades | — | No empezada |
 | F3-A10 | Señal única por su clave; `kbot_strategy` solo inserta señales; matriz de permisos exacta | — | No empezada |
 | F3-A11 | Informe exploratorio de cada familia, que declara no ser la validación | — | No empezada |
-| F3-A12 | Coste 0 €: sin servicios de pago; dependencias nuevas, solo libres | — | No empezada |
+| F3-A12 | Coste 0 €: sin servicios de pago; dependencias nuevas, solo libres | `pyproject.toml`, `uv.lock` | F3-E1: sin dependencias ni servicios nuevos; la descarga usa la API pública de KuCoin, sin claves |
 
 Los resultados de la CI los comunica el propietario o los lee Claude en GitHub; el revisor independiente los contrasta con el código en cada revisión, pero no sustituyen a una auditoría de todos los puntos de parada posibles.

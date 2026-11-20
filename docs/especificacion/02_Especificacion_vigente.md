@@ -2032,7 +2032,9 @@ Fija cómo se ejecutan en el tiempo las señales de las fichas de §12.3, cómo 
 - **Entrada**, a mercado en la apertura del minuto de ejecución. Los controles de §12.3.1 (stop y objetivo positivos y del lado correcto) se hacen con esa apertura, $P_e$.
 - **Stop**, como orden stop a mercado. Se dispara en el primer minuto presente, desde el de entrada, con $L \le P_s$ (un largo) o $H \ge P_s$ (un corto). El precio es el del stop, o la apertura del minuto si ya abre al otro lado del stop: con hueco, a la apertura (§7).
 - **Objetivo**, como orden limitada. Se toca con $H \ge T$ (un largo) o $L \le T$ (un corto), y se ejecuta a $T$, nunca a un precio mejor. Si el stop y el objetivo se tocan en el mismo minuto, cuenta el stop (§12.3.1).
-- **Salidas por cierre y por tiempo**, a mercado en la apertura del primer minuto presente después de su instante.
+- **Salidas por cierre y por tiempo**, a mercado:
+  - por cierre, en la apertura del primer minuto presente que empieza después del instante de la invalidación;
+  - por tiempo, en la apertura del primer minuto presente que empieza en su límite o después (§12.3.6).
 - **Sin precio observado no hay ejecución** (§7). Un minuto ausente no ejecuta nada; se espera al siguiente presente. La entrada es la excepción: su minuto es uno solo, y si falta, la señal caduca (CD-03).
 - **Prioridad dentro de un minuto:** primero la salida a mercado pendiente, en la apertura; después, el stop y el objetivo del minuto. Un stop actualizado por el arrastre vale para los minutos que empiezan después de su instante (§12.3.4).
 - **Costes:**

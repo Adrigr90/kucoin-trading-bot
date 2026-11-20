@@ -1663,7 +1663,7 @@ Cada salida se compara según sus unidades. $b$ es el valor de TA-Lib y $a$ el p
 - El RSI de 50 en una serie plana es conforme con TA-Lib 0.8.3.
 - La tolerancia es la del punto 5.
 
-### 12.3 Régimen y fichas de F3-E3 [diseño del 20 nov 2026, **pendiente de revisión**; después, cada ficha necesita la aprobación del propietario]
+### 12.3 Régimen y fichas de F3-E3 [diseño del 20 nov 2026. Primera revisión (`db0c8db`): APROBABLE CON CORRECCIONES; F3E3-01 y F3E3-02, corregidos y **pendientes de la segunda revisión**. Después, cada ficha necesita la aprobación del propietario]
 
 Fija el régimen de mercado y las fichas matemáticas de tres familias: tendencia, breakout y reversión a la media (`08`, F3-E3). Usa los indicadores de §12.2 y el contrato de datos de §12.1 sin cambiarlos. **Ninguna familia se programa como estrategia sin su ficha aprobada por el propietario**, después de la revisión (§12; `08` §6). El scalping y el volumen y flujo de mercado son de F3-E6.
 
@@ -1690,19 +1690,38 @@ $K$ velas de ejecución duran lo que una de señal: $K\,\Delta_e = \Delta_s$.
 - Con la señal se guardan el régimen de su vela de contexto y el de $t$, y su porcentaje solo REST (§12.1, punto 5).
 - Si el ATR que fija el stop no es positivo, no hay señal.
 
-**Disparo.** Las velas de ejecución de la señal son las $K$ de $\tau_e$ que empiezan al terminar $t$: $e_1, \dots, e_K$. Se recorren en orden, cada una en $D_i = \max(D_s,\ \text{disponibilidad de } e_i)$:
+**Disparo.** Las velas de ejecución de la señal son las $K$ de $\tau_e$ que empiezan al terminar $t$: $e_1, \dots, e_K$.
+- Se recorren en orden, y **sus instantes nunca retroceden** (F3E3-01): $D_0 = D_s$, y $e_i$ se mira en $D_i = \max(D_s,\ D_{i-1},\ \text{resolución de } e_i)$.
+- Una vela se **resuelve** cuando está disponible o cuando se sabe que no será utilizable (§12.1, punto 4).
+
+En cada $D_i$:
 1. Si $e_i$ no es utilizable (ausente, incompleta o sin las dimensiones que necesita), la señal **caduca**.
 2. Si en $D_i$ el contexto ya no se cumple, caduca.
 3. Si $e_i$ cumple el disparo de la ficha, la **decisión** es en $D_i$. Si no, se pasa a $e_{i+1}$.
 4. Si ninguna de las $K$ dispara, caduca.
 
+Ejemplo: la señal está disponible a las 15:00:15, y dispara un cierre mayor que 100.
+- La primera vela de ejecución cierra en 99, pero no está disponible hasta las 15:50:00.
+- La segunda cierra en 101 y está disponible a las 15:30:15.
+- La primera se mira a las 15:50:00 y no dispara. La segunda se mira en $D_2 = \max(15{:}00{:}15,\ 15{:}50{:}00,\ 15{:}30{:}15)$ = 15:50:00, con el contexto de ese instante.
+- La decisión es a las 15:50:00, y la entrada, a las 15:51; nunca a las 15:31, cuando aún no se sabía qué hacía la primera.
+- Si la primera cerrara en 101, la decisión sería con ella, también a las 15:50:00. Si no fuera utilizable, la señal caducaría, aunque la segunda cerrara en 101.
+- En el histórico, cada vela está disponible al terminar más el margen, así que $D_i$ es la disponibilidad de $e_i$, y los ejemplos de las fichas no cambian.
+
 **Stop inicial.** Es obligatorio (§6.1) y se fija en la decisión: $P_s = C^{e}_{i} - d\,m_s\,\mathrm{ATR}^{\tau_s}_t$.
 - $C^{e}_{i}$ es el cierre de la vela de disparo; $m_s$, el múltiplo de la ficha; y $\mathrm{ATR}^{\tau_s}_t$, el ATR(14) de la señal en $t$.
 - Así, el stop queda siempre del lado de la pérdida respecto a la decisión.
+- Un stop que no es positivo impide la entrada (F3E3-02; véase «Ejecución»).
 
 **Ejecución** (regla causal de F3-E4, `08` §3):
 - El precio de entrada $P_e$ es la apertura de la primera vela de 1 minuto que empieza después de la decisión. Si esa vela falta, la señal caduca (CD-03).
-- Si $d\,(P_e - P_s) \le 0$, no se entra: el precio ya pasó el stop (requisito de §6.2.5). Con un objetivo $T$ fijado antes de entrar, tampoco si $d\,(T - P_e) \le 0$.
+- **No se entra** en ninguno de estos casos:
+  - si $d\,(P_e - P_s) \le 0$, porque el precio ya pasó el stop (requisito de §6.2.5);
+  - si $P_s \le 0$ (F3E3-02);
+  - con un objetivo $T$, si $T \le 0$ (F3E3-02) o si $d\,(T - P_e) \le 0$.
+- **Los niveles nunca se recortan.** Un stop o un objetivo que no es positivo no lo puede tocar ningún precio, porque la ingesta rechaza toda vela con un precio que no sea positivo (`kbot.kucoin.models`).
+  - Ejemplo: con un cierre de disparo de 1, un ATR de 1, $m_s$ = 2 y una entrada a 1, un largo tendría el stop en −1. Un breakout corto tendría el stop en 3 y el objetivo en −3.
+  - En los dos casos no se entra, aunque $r$ = 2 > 0.
 - El riesgo por unidad es $r = d\,(P_e - P_s) > 0$. Los resultados se miden en múltiplos de $r$ (R; §12).
 - Esta regla precisa la «decisión en la vela cerrada t y ejecución en t+1» del backtesting de §12.
 
@@ -1845,7 +1864,7 @@ Cada ficha da los suyos y su hash, y las pruebas reproducen los tres.
 
 - (b) es el **primer cierre fuera del nivel**, porque ningún cierre hasta $t-1$ ha superado un nivel vigente en $t-1$ (§12.2).
 - **Stop inicial:** $m_s$ = 2, con el ATR(14) de 1 h en $t$.
-- **Objetivo:** $T = P_e + 2\,d\,r$, fijado al entrar.
+- **Objetivo:** $T = P_e + 2\,d\,r$, fijado al entrar. Si $T \le 0$, no se entra (§12.3.1, «Ejecución»; F3E3-02).
 - **Invalidación**, en cada vela de 1 h que termina después de la entrada: el precio vuelve al otro lado del nivel roto, que queda fijo. En un largo, $C \le R_{t-1}$; en un corto, $C \ge S_{t-1}$.
 - **Sin salida por tiempo.**
 
@@ -1946,8 +1965,10 @@ Cada ficha da los suyos y su hash, y las pruebas reproducen los tres.
   - sin un valor necesario, no hay señal;
   - la vela de contexto es la última terminada en $D$; si no está disponible, no hay contexto, y nunca se usa una anterior. Se vuelve a mirar en cada disparo;
   - una vela de ejecución no utilizable hace caducar la señal;
+  - **los instantes del disparo nunca retroceden** (F3E3-01): el ejemplo de §12.3.1, sin ninguna decisión antes de las 15:50:00, y sus variantes, con la primera vela que dispara o que no es utilizable;
   - el stop queda del lado de la pérdida y solo se acerca;
   - no se entra con el precio al otro lado del stop o del objetivo;
+  - **no se entra con un stop o un objetivo cero o negativo** (F3E3-02): los dos casos de §12.3.1 y un nivel exactamente 0; con niveles positivos, los ejemplos de las fichas dan lo mismo;
   - si el stop y el objetivo se tocan en el mismo minuto, gana el stop.
 - **Sin anticipación** (F3-A4, en lo que toca a las señales): cambiar todos los datos posteriores a $D_s$ no cambia la señal, y cambiar los posteriores a la decisión no cambia ni la decisión ni el stop. El envenenamiento del motor entero es de F3-E4 (F3-A9).
 - **F3-A7:**
@@ -2512,3 +2533,5 @@ $$\Delta Cap=\underbrace{8}_{\text{distancia mark-stop de lo cerrado}}+\underbra
 | 20 nov 2026 | **F3E2-07, atendido.** La limitación queda declarada en §12.2, punto 4, y en `RelativeVolume`. `test_volume.py` conserva el ejemplo: el resultado propio y el de TA-Lib, los dos 3, frente a la media recalculada de la ventana, que da 1. El código no cambia | Claude |
 | 20 nov 2026 | **F3-E2 integrada en `main`** (`13d5a3c`) por decisión del propietario («sí»), con F3-A3, F3-A4 y F3-A5. La CI de `main` pasa | Claude |
 | 20 nov 2026 | **Diseño de F3-E3: régimen y fichas de tendencia, breakout y reversión a la media** (§12.3, rama `fase-3-e3`, **pendiente de revisión**; después, cada ficha necesita la aprobación del propietario). **Común:** contexto, señal y disparo en tres temporalidades; lo que se ve en cada instante, sin usar nunca una vela de contexto anterior a la última terminada; caducidad de la señal; stop obligatorio a $m_s$ ATR del cierre de disparo, que solo se acerca; ejecución con la regla causal de F3-E4; salidas por nivel, por cierre y por tiempo; en Spot, solo largos. **Régimen:** dirección por el ADX (25 y 20) y volatilidad por el ATR relativo y la anchura de Bollinger frente a sus 100 últimos valores, sin que los empates hagan un extremo. **Versión:** commit más el SHA-256 del JSON canónico de los parámetros. **Fichas:** tendencia (4 h / 1 h / 15 m, con arrastre del stop), breakout (4 h / 1 h / 15 m, tras compresión y con volumen relativo, objetivo de 2 R) y reversión a la media (1 h / 15 m / 5 m, objetivo en la media, salida a las 4 h), cada una con sus parámetros de partida, su hash, los datos que exige y un ejemplo resuelto con variantes. No decide D13, D15, D20, D30 ni ninguna de la F8 | Claude |
+| 20 nov 2026 | **Revisión del diseño de F3-E3 (commit `db0c8db`): APROBABLE CON CORRECCIONES.** El régimen, sus fronteras y sus calentamientos son coherentes. Los tres hashes coinciden al recalcularlos, y la aritmética de los ejemplos es correcta. Dos hallazgos MEDIOS. **F3E3-01:** el recorrido de los disparos podía retroceder en el tiempo. Con una primera vela de ejecución disponible a las 15:50 y una segunda disponible a las 15:30:15, se decidía con la segunda a las 15:30:15 sin saber aún qué hacía la primera. **F3E3-02:** se admitían stops y objetivos no positivos, que ningún precio puede tocar: un largo con el stop en −1, o un breakout corto con el objetivo en −3. La revisión es documental y matemática: F3-A6 y F3-A7 se acreditarán con las pruebas del código. Las aprobaciones de las fichas y D13, D15, D20 y D30 siguen siendo del propietario | Revisor |
+| 20 nov 2026 | **F3E3-01 y F3E3-02, corregidos en §12.3.1**, con sus pruebas en §12.3.7. (1) Los instantes del disparo nunca retroceden: $D_0 = D_s$, y $D_i = \max(D_s, D_{i-1}, \text{resolución de } e_i)$. Una vela se resuelve cuando está disponible o cuando se sabe que no será utilizable, y el contexto se mira en ese instante. En el caso del revisor, la decisión es a las 15:50:00 y la entrada a las 15:51, nunca a las 15:31. (2) No se entra con un stop o un objetivo que no sea positivo, también en el objetivo del breakout (§12.3.5), y los niveles nunca se recortan. No cambian los parámetros, sus hashes ni los ejemplos de las fichas | Claude |

@@ -22,6 +22,7 @@ dev = [
     "pglast>=8,<9",
     "pytest>=8",
     "ruff>=0.15",
+    "ta-lib>=0.8.3,<0.9",
 ]
 
 [build-system]

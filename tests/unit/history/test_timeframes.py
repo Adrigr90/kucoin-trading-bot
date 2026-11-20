@@ -67,6 +67,18 @@ def test_a_complete_candle_is_made_from_its_minutes() -> None:
     assert bar.complete and bar.minutes_present == 5
 
 
+def test_a_candle_counts_its_minutes_only_rest() -> None:
+    """The share only REST counts original minutes (02 §12.1, point 5; §12.2, point 1):
+    a 5-minute candle with two contrasted minutes holds three only REST."""
+    start = DAY + timedelta(hours=10)
+    five = minutes(start, 5)
+    contrasted = [replace(m, evidence=CandleEvidence.CRUZADA_CONSISTENTE) for m in five[:2]]
+    (bar,) = aggregate(contrasted + five[2:], "5m", downloaded_until=DAY + timedelta(days=1))
+    assert (bar.minutes, bar.rest_only_minutes) == (5, 3)
+    (history,) = aggregate(five, "5m", downloaded_until=DAY + timedelta(days=1))
+    assert history.rest_only_minutes == 5, "the history: all only REST"
+
+
 def day_of(start: datetime, volumes: list[Decimal], turnovers: list[Decimal]) -> list[Bar]:
     one = Decimal(1)
     candles = [

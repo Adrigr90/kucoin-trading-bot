@@ -14,7 +14,9 @@ from pathlib import Path
 
 import pytest
 
-STANDARD_RUNNERS = {"ubuntu-24.04", "ubuntu-22.04", "ubuntu-latest"}
+# ubuntu-24.04-arm: the standard aarch64 runner, free for public repositories too
+# (P-F3-3, verified by the reviewer on 16 Nov 2026): F3-A3 runs on it.
+STANDARD_RUNNERS = {"ubuntu-24.04", "ubuntu-22.04", "ubuntu-latest", "ubuntu-24.04-arm"}
 VISIBILITY_WIRING = "KBOT_REPO_VISIBILITY: ${{ github.event.repository.visibility }}"
 
 

@@ -1411,12 +1411,12 @@ El diseño del despliegue, las copias y su restauración en la etapa E4 está en
 | Volumen y flujo | 15m / 5m / 1m | Pico de volumen relativo, desequilibrio y confirmación | El flujo se invierte |
 
 **Reglas comunes:**
-- régimen determinista (ADX, percentil del ATR, anchura de Bollinger);
+- régimen determinista (ADX, percentil del ATR, anchura de Bollinger; §12.3.2);
 - **una posición neta por instrumento**; con señales opuestas no se opera;
 - las temporalidades superiores, solo cerradas;
 - **cuentas sombra** para evaluar cada estrategia;
-- `strategy_version` = commit + hash de los parámetros;
-- **ninguna estrategia se activa sin una ficha matemática aprobada** (precisión A);
+- `strategy_version` = commit + hash de los parámetros (§12.3.3);
+- **ninguna estrategia se activa sin una ficha matemática aprobada** (precisión A). Las de tendencia, breakout y reversión a la media están en §12.3;
 - el aprendizaje solo genera propuestas.
 
 **Backtesting:**
@@ -1662,6 +1662,315 @@ Cada salida se compara según sus unidades. $b$ es el valor de TA-Lib y $a$ el p
 - El VWAP de sesión UTC, sin valor el resto del día tras un hueco, y la definición de soportes y resistencias son admisibles, esta última con la caducidad de $m$ contada desde la vela del pivote y su prueba.
 - El RSI de 50 en una serie plana es conforme con TA-Lib 0.8.3.
 - La tolerancia es la del punto 5.
+
+### 12.3 Régimen y fichas de F3-E3 [diseño del 20 nov 2026, **pendiente de revisión**; después, cada ficha necesita la aprobación del propietario]
+
+Fija el régimen de mercado y las fichas matemáticas de tres familias: tendencia, breakout y reversión a la media (`08`, F3-E3). Usa los indicadores de §12.2 y el contrato de datos de §12.1 sin cambiarlos. **Ninguna familia se programa como estrategia sin su ficha aprobada por el propietario**, después de la revisión (§12; `08` §6). El scalping y el volumen y flujo de mercado son de F3-E6.
+
+#### 12.3.1 Común a las tres fichas
+
+**Dirección.** $d = +1$ es largo y $d = -1$, corto. En Spot solo hay largos (§6.2.1): una condición de corto en Spot no da señal. En Futures, las dos.
+
+**Temporalidades.** Cada ficha tiene tres:
+- **contexto** ($\tau_c$): el estado del mercado mayor;
+- **señal** ($\tau_s$): la preparación de la entrada;
+- **ejecución** ($\tau_e$): la vela que confirma la entrada, el **disparo**.
+
+$K$ velas de ejecución duran lo que una de señal: $K\,\Delta_e = \Delta_s$.
+
+**Qué se ve en un instante $D$.** Todo se evalúa con lo disponible en $D$:
+- Un valor de un indicador se puede usar en $D$ si su disponibilidad (§12.2, punto 1) es $\le D$.
+- La **vela de contexto en $D$** es la de $\tau_c$ cuyo intervalo es el último terminado en $D$ o antes. Tiene que ser utilizable y tener disponibles en $D$ los valores que se usan; si no, el contexto no se cumple. **Nunca se usa otra anterior.**
+- Ejemplo: en $D$ = 15:00:15, la vela de contexto de 4 h es la de [08:00, 12:00), porque la de [12:00, 16:00) aún no ha terminado.
+- En el histórico, una vela completa está disponible al terminar su intervalo más el margen de 15 s (§12.1, punto 4). Así, las de 1 h y de 4 h que terminan a la vez están disponibles a la vez.
+
+**Señal.** En la vela $t$ de $\tau_s$, en el instante $D_s$:
+- $D_s$ es la disponibilidad más tardía de los valores de $\tau_s$ que usa la ficha, en $t$ y en sus velas anteriores.
+- Si en $D_s$ se cumplen el contexto y la preparación, hay señal. Su clave es (familia, versión, instrumento, $\tau_s$, apertura de $t$, $d$) (§1.3).
+- Con la señal se guardan el régimen de su vela de contexto y el de $t$, y su porcentaje solo REST (§12.1, punto 5).
+- Si el ATR que fija el stop no es positivo, no hay señal.
+
+**Disparo.** Las velas de ejecución de la señal son las $K$ de $\tau_e$ que empiezan al terminar $t$: $e_1, \dots, e_K$. Se recorren en orden, cada una en $D_i = \max(D_s,\ \text{disponibilidad de } e_i)$:
+1. Si $e_i$ no es utilizable (ausente, incompleta o sin las dimensiones que necesita), la señal **caduca**.
+2. Si en $D_i$ el contexto ya no se cumple, caduca.
+3. Si $e_i$ cumple el disparo de la ficha, la **decisión** es en $D_i$. Si no, se pasa a $e_{i+1}$.
+4. Si ninguna de las $K$ dispara, caduca.
+
+**Stop inicial.** Es obligatorio (§6.1) y se fija en la decisión: $P_s = C^{e}_{i} - d\,m_s\,\mathrm{ATR}^{\tau_s}_t$.
+- $C^{e}_{i}$ es el cierre de la vela de disparo; $m_s$, el múltiplo de la ficha; y $\mathrm{ATR}^{\tau_s}_t$, el ATR(14) de la señal en $t$.
+- Así, el stop queda siempre del lado de la pérdida respecto a la decisión.
+
+**Ejecución** (regla causal de F3-E4, `08` §3):
+- El precio de entrada $P_e$ es la apertura de la primera vela de 1 minuto que empieza después de la decisión. Si esa vela falta, la señal caduca (CD-03).
+- Si $d\,(P_e - P_s) \le 0$, no se entra: el precio ya pasó el stop (requisito de §6.2.5). Con un objetivo $T$ fijado antes de entrar, tampoco si $d\,(T - P_e) \le 0$.
+- El riesgo por unidad es $r = d\,(P_e - P_s) > 0$. Los resultados se miden en múltiplos de $r$ (R; §12).
+- Esta regla precisa la «decisión en la vela cerrada t y ejecución en t+1» del backtesting de §12.
+
+**Salidas.** Son de tres tipos:
+- **Por nivel** (stop y objetivo): se miran en las velas de 1 minuto desde la de entrada, incluida.
+  - El stop de un largo se toca si $L \le P_s$, y el de un corto, si $H \ge P_s$. El objetivo de un largo, si $H \ge T$, y el de un corto, si $L \le T$.
+  - Si en un mismo minuto se tocan los dos, cuenta el stop.
+  - Un minuto ausente no se puede mirar; se mira el siguiente presente.
+  - El precio de la salida lo fija F3-E4. Los stops nunca esperan al cierre de una vela (§3.4 [H13]).
+- **Por cierre** (invalidación): se mira en la temporalidad que diga la ficha, en cada vela que termina después de la entrada, en el instante de su disponibilidad.
+  - Se sale en la apertura de la primera vela de 1 minuto **presente** que empieza después de ese instante. Una salida no caduca.
+  - Si la vela de la ficha no es utilizable o le falta algún valor, no se mira, y la posición sigue con su stop.
+- **Por tiempo:** solo en la reversión a la media.
+
+**El stop solo se acerca al precio, nunca se aleja.** En la tendencia, con el arrastre; en las otras dos, queda fijo. Así se cumple D13, se decida lo que se decida.
+
+**Una posición por familia e instrumento.** Mientras está abierta, las señales nuevas de la familia en ese instrumento se registran, pero ni amplían la posición ni la cierran (D20 sigue pendiente). Lo que pasa entre familias lo decide el combinador de F3-E4.
+
+**Aritmética.** Los niveles ($P_s$ y $T$) se calculan en `float`, como los indicadores (§12.2, punto 1), y se comparan con los precios de las velas convertidos igual. Su redondeo al tick del instrumento es de la F4, con el tamaño de la posición.
+
+**Volumen.** Solo los usos invariantes a escala de §12.1, punto 7: el volumen relativo (breakout) y el VWAP (reversión a la media).
+
+**Fuera de las fichas:**
+- el tamaño de la posición (§6.2.5, F4);
+- los costes: fijos y escritos en el informe exploratorio de F3-E5, y reales en la F5;
+- los filtros opcionales de D15, para los que el régimen dará datos (`08` §6);
+- $T_{max}$ de D30, que no es la salida por tiempo de la reversión a la media.
+
+#### 12.3.2 Régimen (F3-A7)
+
+En cada vela $t$ de una temporalidad, el régimen tiene dos etiquetas, y cada una puede quedar **sin valor**. Es determinista: sale solo de indicadores de §12.2, así que los mismos datos dan el mismo régimen.
+
+**Dirección**, con el ADX(14) de $t$:
+- `tendencia`, si ADX ≥ 25;
+- `rango`, si ADX ≤ 20;
+- `transicion`, si está entre los dos;
+- sin valor, si el ADX no lo tiene.
+
+**Volatilidad**, con dos medidas sin unidades:
+- **ATR relativo:** $\mathrm{NATR}_t = \mathrm{ATR}(14)_t / C_t$.
+- **Anchura de Bollinger:** $\mathrm{BW}_t = (\text{banda superior} - \text{banda inferior}) / \text{media}$, con Bollinger(20, 2).
+
+Cada una se compara con sus $W$ = 100 últimos valores, de $t - 99$ a $t$, que tienen que existir todos:
+- **Expansión:** el NATR de $t$ es **estrictamente mayor** que al menos el 80 % de los valores de su ventana: $100\cdot\#\{i : \mathrm{NATR}_i < \mathrm{NATR}_t\} \ge 80\,W$.
+- **Compresión:** la BW de $t$ es **estrictamente menor** que al menos el 80 % de los de su ventana: $100\cdot\#\{i : \mathrm{BW}_i > \mathrm{BW}_t\} \ge 80\,W$.
+
+La etiqueta es `expansion` si se cumple la primera, `compresion` si solo se cumple la segunda, y `normal` si no se cumple ninguna. Queda sin valor si falta alguna de las dos ventanas.
+- **Los empates nunca hacen un extremo.** En una serie plana ninguna medida supera a otra, así que la volatilidad es `normal`, nunca expansión ni compresión.
+- La cuenta es entera y la comparación, exacta. Con $W$ = 100, hay expansión con 80 o más valores menores, y compresión con 80 o más mayores.
+- **Calentamiento:** la dirección necesita las 28 velas utilizables y consecutivas del ADX. La volatilidad necesita 119, porque la BW da su primer valor en la vela 20 y faltan otros 99. Tras un reinicio, vuelven a hacer falta.
+- Las entradas, la procedencia y la disponibilidad del régimen son las de sus indicadores (§12.2, punto 1).
+- Cada ficha usa una etiqueta y deja la otra para los informes: la tendencia y la reversión a la media usan la dirección, y el breakout, la volatilidad.
+
+**Ejemplos** (las pruebas usan también $W$ = 100):
+- Un ADX de 25,00 da `tendencia`; uno de 24,99, `transicion`; y uno de 20,00, `rango`.
+- Con $W$ = 5, para que quepa, y BW de 0,050, 0,041, 0,038, 0,045 y 0,036: cuatro valores son mayores que 0,036, y $400 \ge 400$, así que hay compresión. Si el último fuera 0,038, empataría con el tercero: solo tres serían mayores, y no habría compresión.
+- Con $W$ = 100, 80 valores menores dan expansión, y 79, no. Un NATR en expansión con una BW en compresión da `expansion`.
+
+#### 12.3.3 Versión de la estrategia
+
+`strategy_version` = commit + hash de los parámetros (§12):
+- **Commit:** los 40 caracteres hexadecimales del commit del código que se ejecuta. Si el árbol tiene cambios sin confirmar, no hay versión, y nada se registra como de una versión.
+- **Parámetros:** un objeto JSON con la familia, sus temporalidades, el régimen y cada parámetro de la ficha. Los periodos y los recuentos son enteros. Los umbrales y los múltiplos son `Decimal`, en texto canónico (§5.7).
+- **Hash:** SHA-256, en hexadecimal, del JSON canónico de RFC 8785, calculado con `kbot.core.jcs`, como el de `config.risk_limits`.
+- **Texto:** `<commit>+<hash>`.
+
+Las tres fichas llevan los mismos parámetros del régimen:
+
+```json
+"regimen": {"adx": 14, "adx_tendencia": "25", "adx_rango": "20", "atr": 14, "bollinger": 20, "bollinger_k": "2", "ventana": 100, "expansion_mayor_que": "80", "compresion_menor_que": "80"}
+```
+
+Cada ficha da los suyos y su hash, y las pruebas reproducen los tres.
+
+#### 12.3.4 Ficha de tendencia [**pendiente de revisión**; después, de la aprobación del propietario]
+
+**En pocas palabras.** Cuando el gráfico de 4 h tiene una tendencia fuerte, espera a que el de 1 h retroceda hasta su media y vuelva a coger impulso, y entra si una vela de 15 minutos lo confirma. El stop empieza 2 ATR por detrás y sube con el precio, nunca baja. Sale cuando se acaba la tendencia de 4 h.
+
+| Temporalidad | Papel | Largo ($d$ = +1) | Corto ($d$ = −1, solo Futures) |
+|---|---|---|---|
+| 4 h | Contexto, en la vela de contexto $c$ | EMA(20) > EMA(50), dirección `tendencia` y +DI > −DI | EMA(20) < EMA(50), `tendencia` y −DI > +DI |
+| 1 h | Señal, en la vela $t$ | (a) $C_t$ > EMA(50)$_t$; (b) retroceso: $L_i \le$ EMA(20)$_i$ en alguna $i$ de $t-4$ a $t$; (c) el histograma del MACD(12, 26, 9) pasa de $\le 0$ en $t-1$ a $> 0$ en $t$ | (a) $C_t$ < EMA(50)$_t$; (b) $H_i \ge$ EMA(20)$_i$ en alguna $i$; (c) pasa de $\ge 0$ a $< 0$ |
+| 15 m | Disparo, con $K$ = 4 | $C^{e}_i > H_t$ | $C^{e}_i < L_t$ |
+
+- Todos los valores que usan (a), (b) y (c) tienen que existir: la EMA(20) de $t-4$ a $t$, y el MACD en $t-1$ y en $t$.
+- **Stop inicial:** $m_s$ = 2, con el ATR(14) de 1 h en $t$.
+- **Arrastre:** en cada vela $u$ de 1 h que termina después de la entrada, $P_s \leftarrow \max(P_s,\ C_u - 3\,\mathrm{ATR}(14)_u)$ en un largo, y $\min(P_s,\ C_u + 3\,\mathrm{ATR}(14)_u)$ en un corto.
+  - Vale para los minutos que empiezan después de la disponibilidad de $u$.
+  - Si $u$ no es utilizable o no tiene ATR, el stop no cambia.
+- **Invalidación**, en cada vela de 4 h que termina después de la entrada: la EMA(20) deja de estar del lado de la posición (en un largo, EMA(20) ≤ EMA(50)), o la dirección pasa a `rango`.
+- **Sin objetivo fijo ni salida por tiempo:** la tendencia sale por el stop o por la invalidación.
+- **El 1 d del resumen de §12 no se usa en esta versión.** Una vela diaria exige sus 1.440 minutos (§12.1, punto 4), y la EMA(50) diaria, 50 días seguidos completos. El informe exploratorio puede comparar esa variante.
+
+**Parámetros** (hash `8866b51449f119568d5012acb47487d37d411b66fda8d615661564b144fa36d3`):
+
+```json
+{"familia": "tendencia", "temporalidades": {"contexto": "4h", "senal": "1h", "ejecucion": "15m"}, "regimen": {…}, "contexto": {"ema_rapida": 20, "ema_lenta": 50}, "senal": {"ema_rapida": 20, "ema_lenta": 50, "retroceso": 5, "macd": [12, 26, 9], "atr": 14}, "ejecucion": {"velas": 4}, "stop": {"multiplo_atr": "2"}, "arrastre": {"multiplo_atr": "3"}}
+```
+
+**Datos que exige:**
+- Velas de 4 h, de 1 h y de 15 m con P + T (§3.4), y las de 1 minuto para ejecutar y salir.
+- Calentamiento: 50 velas de 4 h y 50 de 1 h, utilizables y consecutivas, por la EMA(50). Lo demás necesita menos.
+
+**Ejemplo 1: largo en Futures ETHUSDTM.** Los valores de los indicadores se dan; no se calculan.
+1. **Señal:** vela de 1 h [14:00, 15:00), con $D_s$ = 15:00:15.
+   - Contexto en la vela de 4 h [08:00, 12:00): EMA(20) 3.052,40 > EMA(50) 2.987,10; ADX 27,80, `tendencia`; y +DI 26,50 > −DI 13,20.
+   - (a) $C_t$ = 3.041,20 > EMA(50) = 3.002,60.
+   - (b) En [12:00, 13:00), $L$ = 3.019,00 ≤ EMA(20) = 3.021,75.
+   - (c) El histograma vale −0,85 en $t-1$ y 1,30 en $t$.
+   - Además, $H_t$ = 3.046,00 y el ATR es 12,50. Hay señal larga.
+2. **Disparo:**
+   - [15:00, 15:15) cierra en 3.043,80, que no supera 3.046,00.
+   - [15:15, 15:30) cierra en 3.048,60, que sí. La decisión es en $D$ = 15:30:15, con el mismo contexto.
+   - Stop: $3.048{,}60 - 2 \times 12{,}50 = 3.023{,}60$.
+3. **Entrada:** la vela de 1 minuto de las 15:31 abre en 3.049,10, así que $r$ = 25,50.
+4. **Arrastre:**
+   - [15:00, 16:00): 3.061,00 − 3 × 12,60 = 3.023,20, sin cambio.
+   - [16:00, 17:00): 3.092,00 − 3 × 13,00 = 3.053,00, que es el stop desde las 17:00:15.
+   - [17:00, 18:00): 3.085,40 − 3 × 13,20 = 3.045,80, sin cambio.
+   - La vela de 4 h [12:00, 16:00), a las 16:00:15, no invalida: la EMA(20) sigue por encima y el ADX es 26,10.
+5. **Salida:** el minuto de las 18:12 tiene $L$ = 3.051,50 ≤ 3.053,00, así que toca el stop. Al nivel del stop, el resultado es $+3{,}90/25{,}50 \approx +0{,}15$ R, antes de costes.
+
+**Variantes del ejemplo 1:**
+- Si el stop no se toca y la vela de 4 h [16:00, 20:00) da ADX 19,60 (`rango`), se sale en la apertura de las 20:01.
+- Si los cuatro cierres de 15 m son 3.043,80, 3.045,90, 3.040,10 y 3.046,00, ninguno supera 3.046,00 (el último empata), y la señal caduca.
+- Si la vela [15:15, 15:30) es incompleta, la señal caduca, aunque la siguiente disparara.
+- Si el minuto de las 15:31 abre en 3.020,00, que no supera el stop de 3.023,60, no se entra. Si ese minuto falta, la señal caduca.
+- Con un ADX de 4 h de 25,00 hay señal; con 24,99, no.
+- Las mismas condiciones en corto no dan señal en Spot ETH-USDT, y sí en Futures.
+
+#### 12.3.5 Ficha de breakout [**pendiente de revisión**; después, de la aprobación del propietario]
+
+**En pocas palabras.** Cuando el precio de 1 h ha estado comprimido (bandas de Bollinger estrechas) y cierra fuera de una resistencia o de un soporte con más volumen del habitual, entra a favor de la ruptura si una vela de 15 minutos la confirma. En 4 h solo pide no ir contra la media lenta. El stop queda a 2 ATR y el objetivo, a dos veces el riesgo. Sale si el precio vuelve al otro lado del nivel roto.
+
+| Temporalidad | Papel | Largo | Corto (solo Futures) |
+|---|---|---|---|
+| 4 h | Contexto | $C_c$ > EMA(50)$_c$ | $C_c$ < EMA(50)$_c$ |
+| 1 h | Señal | (a) volatilidad `compresion` en alguna vela de $t-5$ a $t-1$; (b) $C_t > R_{t-1}$, la resistencia(5, 100) de $t-1$, que tiene que existir; (c) volumen relativo(20)$_t$ ≥ 1,5 | (a) igual; (b) $C_t < S_{t-1}$, el soporte(5, 100) de $t-1$; (c) igual |
+| 15 m | Disparo, con $K$ = 4 | $C^{e}_i > H_t$ | $C^{e}_i < L_t$ |
+
+- (b) es el **primer cierre fuera del nivel**, porque ningún cierre hasta $t-1$ ha superado un nivel vigente en $t-1$ (§12.2).
+- **Stop inicial:** $m_s$ = 2, con el ATR(14) de 1 h en $t$.
+- **Objetivo:** $T = P_e + 2\,d\,r$, fijado al entrar.
+- **Invalidación**, en cada vela de 1 h que termina después de la entrada: el precio vuelve al otro lado del nivel roto, que queda fijo. En un largo, $C \le R_{t-1}$; en un corto, $C \ge S_{t-1}$.
+- **Sin salida por tiempo.**
+
+**Parámetros** (hash `eac620fee86fed9ae4e3f5eeee8ded14986311445ccd71843bf5597d6ae94917`):
+
+```json
+{"familia": "breakout", "temporalidades": {"contexto": "4h", "senal": "1h", "ejecucion": "15m"}, "regimen": {…}, "contexto": {"ema_lenta": 50}, "senal": {"pivote_k": 5, "pivote_m": 100, "compresion_velas": 5, "volumen_relativo": 20, "volumen_relativo_minimo": "1.5", "atr": 14}, "ejecucion": {"velas": 4}, "stop": {"multiplo_atr": "2"}, "objetivo": {"multiplo_r": "2"}}
+```
+
+**Datos que exige:**
+- Velas de 1 h con P + T, y con P + V + T para el volumen relativo (§3.4: «breakout con volumen»). Velas de 4 h y de 15 m con P + T, y las de 1 minuto para ejecutar y salir.
+- Calentamiento: 120 velas de 1 h, porque la etiqueta de volatilidad en $t-1$ necesita 119; y 50 de 4 h.
+- El volumen relativo compara volúmenes solo dentro del instrumento. En Futures, se supone constante el multiplicador (§12.2, punto 3).
+
+**Ejemplo 2: corto en Futures SOLUSDTM.**
+1. **Señal:** vela de 1 h [09:00, 10:00), con $D_s$ = 10:00:15.
+   - Contexto en la vela de 4 h [04:00, 08:00): $C$ = 142,30 < EMA(50) = 145,80.
+   - (a) La vela [06:00, 07:00) está en `compresion`: su BW es menor que 86 de las 100 de su ventana, y su NATR solo supera a 41 valores.
+   - (b) $S_{t-1}$ = 140,00 y $C_t$ = 139,20.
+   - (c) El volumen relativo es 2,10.
+   - Además, $L_t$ = 138,90 y el ATR es 0,80. Hay señal corta.
+2. **Disparo:**
+   - [10:00, 10:15) cierra en 139,40, que no baja de 138,90.
+   - [10:15, 10:30) cierra en 138,70, que sí. La decisión es a las 10:30:15.
+   - Stop: $138{,}70 + 2 \times 0{,}80 = 140{,}30$.
+3. **Entrada:** la vela de las 10:31 abre en 138,65. Así, $r$ = 1,65 y $T = 138{,}65 - 2 \times 1{,}65 = 135{,}35$.
+4. **Invalidación:**
+   - [10:00, 11:00) cierra en 138,20, por debajo de 140,00, y la posición sigue.
+   - [11:00, 12:00) cierra en 140,10 ≥ 140,00: el precio ha vuelto. Hasta entonces, el stop no se ha tocado (máximo 140,25 < 140,30).
+5. **Salida:** en la apertura de las 12:01, a 140,05. El resultado es $-1{,}40/1{,}65 \approx -0{,}85$ R, antes de costes.
+
+**Variantes del ejemplo 2:**
+- Si antes el mínimo de un minuto llega a 135,35, sale por el objetivo: +2 R, antes de costes.
+- Con un volumen relativo de 1,50 hay señal; con 1,49, no.
+- Con $C_t$ = 140,00 no hay ruptura, porque tiene que ser estrictamente menor.
+- Si ninguna vela de $t-5$ a $t-1$ está en `compresion`, no hay señal.
+- En Spot, la ruptura a la baja no da señal, y la alcista, sí.
+
+#### 12.3.6 Ficha de reversión a la media [**pendiente de revisión**; después, de la aprobación del propietario]
+
+**En pocas palabras.** Cuando el gráfico de 1 h no tiene tendencia y el de 15 minutos se aleja mucho de su media, entra esperando que vuelva a ella. «Mucho» es salir de las bandas de Bollinger, con el RSI en un extremo y lejos del VWAP del día. Entra si una vela de 5 minutos lo confirma. El objetivo es la media y el stop, 2 ATR. Sale si aparece una tendencia, si se rompe el rango o a las 4 horas.
+
+| Temporalidad | Papel | Largo | Corto (solo Futures) |
+|---|---|---|---|
+| 1 h | Contexto | Dirección `rango`, y $C_c$ dentro de sus bandas de Bollinger(20, 2) | Igual |
+| 15 m | Señal | (a) $C_t$ < banda inferior$_t$; (b) RSI(14)$_t$ ≤ 30; (c) VWAP$_t - C_t \ge 1 \cdot$ ATR(14)$_t$ | (a) $C_t$ > banda superior$_t$; (b) RSI(14)$_t$ ≥ 70; (c) $C_t$ − VWAP$_t \ge$ ATR(14)$_t$ |
+| 5 m | Disparo, con $K$ = 3 | banda inferior$_t$ < $C^{e}_i$ < $T$ | $T$ < $C^{e}_i$ < banda superior$_t$ |
+
+- **Objetivo:** $T$ es la media de Bollinger de 15 m en $t$, la SMA(20), fijada en la señal. El disparo exige que el cierre quede entre la banda y $T$.
+- «Dentro de sus bandas» es banda inferior ≤ $C_c$ ≤ banda superior.
+- El VWAP es el del día UTC en las velas de 15 m (§12.2). Sin VWAP no hay señal.
+- **Stop inicial:** $m_s$ = 2, con el ATR(14) de 15 m en $t$.
+- **Invalidación**, en cada vela de 1 h que termina después de la entrada: la dirección pasa a `tendencia`, o el cierre sale de su banda en contra de la posición. En un largo, $C$ < banda inferior; en un corto, $C$ > banda superior.
+- **Salida por tiempo:** en la apertura de la primera vela de 1 minuto presente que empieza 240 minutos o más después de la de entrada.
+
+**Parámetros** (hash `adee5c8a2a900e797bf62abbc22aef3f441de36ffd79e4425f72a7087bad63d1`):
+
+```json
+{"familia": "reversion_media", "temporalidades": {"contexto": "1h", "senal": "15m", "ejecucion": "5m"}, "regimen": {…}, "contexto": {"bollinger": 20, "bollinger_k": "2"}, "senal": {"bollinger": 20, "bollinger_k": "2", "rsi": 14, "rsi_largo": "30", "rsi_corto": "70", "atr": 14, "distancia_vwap_atr": "1"}, "ejecucion": {"velas": 3}, "stop": {"multiplo_atr": "2"}, "salida_tiempo_minutos": 240}
+```
+
+**Datos que exige:**
+- Velas de 15 m con P + T, y con P + V + T para el VWAP: todas las del día hasta $t$ tienen que ser utilizables.
+- Velas de 1 h y de 5 m con P + T, y las de 1 minuto para ejecutar y salir.
+- Calentamiento: 20 velas de 15 m, por Bollinger, y 28 de 1 h, por el ADX.
+
+**Ejemplo 3: largo en Spot LINK-USDT.**
+1. **Señal:** vela de 15 m [13:15, 13:30), con $D_s$ = 13:30:15.
+   - Contexto en la vela de 1 h [12:00, 13:00): ADX 17,40, `rango`; y $C$ = 19,95, entre las bandas 19,60 y 20,30.
+   - (a) $C_t$ = 19,62 < banda inferior 19,70.
+   - (b) El RSI es 27,50.
+   - (c) El VWAP es 20,05: 20,05 − 19,62 = 0,43 ≥ ATR = 0,18.
+   - La media es $T$ = 20,10. Hay señal larga.
+2. **Disparo:**
+   - [13:30, 13:35) cierra en 19,66, sin superar 19,70.
+   - [13:35, 13:40) cierra en 19,74, entre 19,70 y 20,10. La decisión es a las 13:40:15.
+   - Stop: $19{,}74 - 2 \times 0{,}18 = 19{,}38$.
+3. **Entrada:** la vela de las 13:41 abre en 19,75. Así, $r$ = 0,37, y $T - P_e$ = 0,35 > 0.
+4. **Invalidación:**
+   - [13:00, 14:00): ADX 18,20, y $C$ = 19,90 ≥ banda inferior 19,55. Sigue.
+   - [14:00, 15:00): ADX 18,90, y $C$ = 20,02 ≥ 19,58. Sigue.
+5. **Salida:** el minuto de las 15:07 tiene $H$ = 20,11 ≥ 20,10 y toca el objetivo. El resultado es $+0{,}35/0{,}37 \approx +0{,}95$ R, antes de costes.
+
+**Variantes del ejemplo 3:**
+- Si la vela de 1 h [13:00, 14:00) da ADX 25,30 (`tendencia`), se sale en la apertura de las 14:01.
+- Si no pasa nada más, se sale en la apertura de la vela de las 17:41, o de la primera presente después.
+- Con un RSI de 30,00 hay señal; con 30,01, no. Con VWAP − $C$ = 0,18, exactamente un ATR, también hay señal.
+- Un cierre de 5 m de 20,12 ≥ $T$ no dispara.
+- Si el día tiene una vela de 15 m no utilizable antes de $t$, el VWAP no tiene valor y no hay señal.
+- En Spot, el corto no da señal.
+
+#### 12.3.7 Pruebas (F3-A6 y F3-A7)
+
+- **F3-A6, los ejemplos:** cada ejemplo de las tres fichas, con sus variantes, se reproduce dando a las funciones de la ficha los mismos valores. Los niveles se comparan con la tolerancia de precio de §12.2, punto 5, porque en `float`, por ejemplo, $138{,}70 + 2 \times 0{,}80$ da 140,29999999999998.
+- **F3-A6, además:**
+  - los tres hashes de los parámetros;
+  - en Spot nunca hay cortos;
+  - sin un valor necesario, no hay señal;
+  - la vela de contexto es la última terminada en $D$; si no está disponible, no hay contexto, y nunca se usa una anterior. Se vuelve a mirar en cada disparo;
+  - una vela de ejecución no utilizable hace caducar la señal;
+  - el stop queda del lado de la pérdida y solo se acerca;
+  - no se entra con el precio al otro lado del stop o del objetivo;
+  - si el stop y el objetivo se tocan en el mismo minuto, gana el stop.
+- **Sin anticipación** (F3-A4, en lo que toca a las señales): cambiar todos los datos posteriores a $D_s$ no cambia la señal, y cambiar los posteriores a la decisión no cambia ni la decisión ni el stop. El envenenamiento del motor entero es de F3-E4 (F3-A9).
+- **F3-A7:**
+  - las fronteras del ADX (20 y 25) y de las cuentas (79 y 80 de 100);
+  - los empates y la serie plana, que da `normal`;
+  - la precedencia de la expansión;
+  - la falta de valores en la ventana, con el calentamiento de 119 velas tras un reinicio;
+  - el mismo régimen con los mismos datos, también con los minutos cargados en otro orden.
+
+#### 12.3.8 Qué se programa y qué decide el propietario
+
+- **Se programa en F3-E3, después de las aprobaciones:**
+  - el régimen y la versión;
+  - las reglas de cada ficha aprobada, como funciones puras sobre los valores de los indicadores: la preparación, el disparo, los niveles, el arrastre y las invalidaciones.
+- **Es de F3-E4:** guardar las señales, el combinador, el motor de backtest con sus posiciones, los precios de salida y el envenenamiento del motor entero.
+- **El propietario aprueba cada ficha por separado**, después de la revisión (`08` §6). Puede aprobarla con los parámetros de partida o pedir otros; si cambian, cambia su hash.
+- **Esta sección no decide:**
+  - D13, porque el stop solo se acerca y vale con cualquier decisión;
+  - D15, porque no añade filtros opcionales;
+  - D20, porque no amplía posiciones;
+  - $T_{max}$ de D30;
+  - ni D16, D28 ni D12, que son de la F8.
+- **Los parámetros de partida son valores habituales, elegidos sin mirar el histórico.** No se ha consultado ninguna partición de F3-AL-03 para fijarlos.
 
 ## 13. Infraestructura, monitorización y alertas
 
@@ -2201,3 +2510,5 @@ $$\Delta Cap=\underbrace{8}_{\text{distancia mark-stop de lo cerrado}}+\underbra
 | 20 nov 2026 | **F3-E2: los indicadores, programados** (rama `fase-3-e2`, **pendiente de revisión**), según §12.2. El paquete `kbot.indicators` tiene cuatro módulos. `series` define el punto, el valor y `compute`, la única forma de ejecutar un indicador: velas utilizables, reinicios, entradas, procedencia, disponibilidad, usos del volumen (CD-05) y multiplicador (CD-12). `price` tiene SMA, EMA, RSI, MACD, Bollinger, ATR, DMI (±DI y DX) y ADX, con la aritmética del código de TA-Lib 0.8.3; no usa `fma`, que Python 3.12 no tiene. `volume` tiene el VWAP del día UTC y el volumen relativo, con sus tres diferencias declaradas. `levels` tiene los soportes y resistencias. Las velas superiores guardan cuántos de sus minutos son solo REST (`Bar.rest_only_minutes`). TA-Lib 0.8.3 entra solo como dependencia de desarrollo (BSD; trae NumPy 2.5.4), y el servidor no lo instala. Pruebas nuevas: 222. Cada indicador que tiene TA-Lib se compara en tres paseos aleatorios y tres escalas (×1, ×$10^{-8}$ y ×$10^{4}$), en un día real sin huecos (BTC-USDT del 10 nov 2026) y en otro con huecos, tramo a tramo (ZECUSDTM del 2 mar 2025, 888 de 1.440 minutos); además, el VWAP día a día y un cero que debe fallar. Se prueban también los DX y ADX degenerados, las series planas, el envenenamiento, la calidad, el recalentamiento, la procedencia, la disponibilidad, el volumen y los soportes y resistencias. La CI añade un trabajo en `ubuntu-24.04-arm` con las pruebas de los indicadores (F3-A3), y su prueba de política admite ese ejecutor estándar. **Revisado** en la fila siguiente | Claude |
 | 20 nov 2026 | **Revisión de los indicadores de F3-E2 (commit `7b1c670`): APROBADO**, conforme al diseño de §12.2 y sin defectos bloqueantes. El revisor comprobó los cálculos, los calentamientos, los reinicios, la calidad, la causalidad, la disponibilidad y el porcentaje solo REST. Pasó 243 pruebas locales de indicadores y temporalidades, en Windows x86-64, y confirmó que las dos fixtures coinciden exactamente con sus Parquet, SHA-256 incluidos. Las 1.464 pruebas de x86-64 y las 222 de aarch64 de la CI constan como evidencia aportada. TA-Lib queda solo en desarrollo, y el servidor instala con `--no-dev`. **F3E2-07** (BAJO, no bloquea ni exige otra ronda): con volúmenes 10¹², 10⁻⁶, 10⁻⁶, 10⁻⁶ y 10⁻⁶, RVOL(3) da 3 en la quinta vela, como TA-Lib 0.8.3, aunque la fórmula sobre su ventana da 1: el acumulado pierde precisión. Recomienda documentar la limitación y conservar el ejemplo como prueba, mostrando los dos resultados y la media recalculada | Revisor |
 | 20 nov 2026 | **F3E2-07, atendido.** La limitación queda declarada en §12.2, punto 4, y en `RelativeVolume`. `test_volume.py` conserva el ejemplo: el resultado propio y el de TA-Lib, los dos 3, frente a la media recalculada de la ventana, que da 1. El código no cambia | Claude |
+| 20 nov 2026 | **F3-E2 integrada en `main`** (`13d5a3c`) por decisión del propietario («sí»), con F3-A3, F3-A4 y F3-A5. La CI de `main` pasa | Claude |
+| 20 nov 2026 | **Diseño de F3-E3: régimen y fichas de tendencia, breakout y reversión a la media** (§12.3, rama `fase-3-e3`, **pendiente de revisión**; después, cada ficha necesita la aprobación del propietario). **Común:** contexto, señal y disparo en tres temporalidades; lo que se ve en cada instante, sin usar nunca una vela de contexto anterior a la última terminada; caducidad de la señal; stop obligatorio a $m_s$ ATR del cierre de disparo, que solo se acerca; ejecución con la regla causal de F3-E4; salidas por nivel, por cierre y por tiempo; en Spot, solo largos. **Régimen:** dirección por el ADX (25 y 20) y volatilidad por el ATR relativo y la anchura de Bollinger frente a sus 100 últimos valores, sin que los empates hagan un extremo. **Versión:** commit más el SHA-256 del JSON canónico de los parámetros. **Fichas:** tendencia (4 h / 1 h / 15 m, con arrastre del stop), breakout (4 h / 1 h / 15 m, tras compresión y con volumen relativo, objetivo de 2 R) y reversión a la media (1 h / 15 m / 5 m, objetivo en la media, salida a las 4 h), cada una con sus parámetros de partida, su hash, los datos que exige y un ejemplo resuelto con variantes. No decide D13, D15, D20, D30 ni ninguna de la F8 | Claude |

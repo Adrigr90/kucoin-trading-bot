@@ -115,6 +115,8 @@ class Recorder:
         self._days_to_close: set[datetime] = set()
         self._closing: dict[datetime, set[tuple[str, str]]] = {}  # members still to close
         self._last_beat: datetime | None = None  # set by run(); None in step-driven tests
+        # When the stop began, if it had to cancel a running step (``_supervised_step``).
+        self._stop_began: datetime | None = None
         self._db_call: asyncio.Future[Any] | None = None  # the last database call (``_db``)
 
     # --- start ------------------------------------------------------------------------------
@@ -616,6 +618,7 @@ class Recorder:
         the Spot stream ended in silence at 17:45 and nothing noticed until midnight).
         However it stops, it first records what it leaves open (``_record_stop``)."""
         clock = clock or SystemClock()
+        self._stop_began = None
         await self.startup(clock.now())
         self._last_beat = clock.now()
         pacer = ConnectionPacer()
@@ -623,7 +626,7 @@ class Recorder:
         watchdog = asyncio.create_task(self._watch_stalls(stop, clock))
         try:
             while not stop.is_set():
-                await self._supervised_step(clock.now(), stop, streams, watchdog)
+                await self._supervised_step(clock, stop, streams, watchdog)
                 if stop.is_set():
                     break
                 if self.restart_streams:
@@ -639,7 +642,8 @@ class Recorder:
                 with suppress(TimeoutError):
                     await asyncio.wait_for(stop.wait(), timeout=pause)
         finally:
-            stopped_at = clock.now()
+            # A stop that cancelled a running step began before waiting for it (GR2-01).
+            stopped_at = self._stop_began or clock.now()
             watchdog.cancel()
             await _close_streams(streams)
             await self._record_stop(stopped_at, clock.now())
@@ -649,7 +653,7 @@ class Recorder:
 
     async def _supervised_step(
         self,
-        now: datetime,
+        clock: Clock,
         stop: asyncio.Event,
         streams: list[_Stream],
         watchdog: asyncio.Task[None],
@@ -662,8 +666,13 @@ class Recorder:
         asked for returns. Either way the step is cancelled at its current wait, which is
         like the process stopping there, something every step already survives; a database
         call it had started goes on to its end (``_db``). After a stop is asked for nothing
-        is checked: the watchdog ends with it, and that is no failure (review GR-05)."""
-        step = asyncio.create_task(self.step(now))
+        is checked: the watchdog ends with it, and that is no failure (review GR-05).
+
+        The moment a running step is cancelled is when the stop began (``_stop_began``),
+        taken before waiting for the step: a cancelled HTTP request can take seconds to
+        close, with the event loop running, and that wait is the stop, never a stall
+        (GR2-01)."""
+        step = asyncio.create_task(self.step(clock.now()))
         ended: TaskEnded | None = None
         try:
             while not step.done():
@@ -676,6 +685,8 @@ class Recorder:
                     ended = exc
                     break
         finally:
+            if not step.done() and self._stop_began is None:
+                self._stop_began = clock.now()
             failure = await _finish(step)
         if ended is not None:
             if failure is not None:

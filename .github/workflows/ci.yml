@@ -72,3 +72,27 @@ jobs:
           KBOT_GITLEAKS: ${{ runner.temp }}/gitleaks/gitleaks
           KBOT_REPO_VISIBILITY: ${{ github.event.repository.visibility }}
         run: bash ci/step.sh "pytest" uv run pytest -p no:cacheprovider
+
+  indicators-aarch64:
+    name: F3-A3 - indicadores contra TA-Lib en aarch64
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    steps:
+      - name: Descargar el repositorio
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Instalar uv 0.13.7
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.13.7"
+
+      - name: Instalar exactamente uv.lock
+        run: bash ci/step.sh "aarch64 uv sync --frozen" uv sync --frozen
+
+      - name: Arquitectura del ejecutor
+        run: bash ci/step.sh "aarch64 arquitectura" uname -m
+
+      - name: Indicadores contra TA-Lib 0.8.3 (F3-A3)
+        run: bash ci/step.sh "aarch64 pytest" uv run pytest tests/unit/indicators -p no:cacheprovider

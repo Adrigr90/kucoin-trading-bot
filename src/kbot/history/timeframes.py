@@ -109,6 +109,9 @@ class Bar:
     evidence: CandleEvidence
     # When the last of its minutes became available; None if incomplete: it never is.
     available_at: datetime | None
+    # Of its minutes, those only REST (``vela_rest_suficiente``): the share of results based
+    # only on REST counts original minutes (02 §12.1, point 5; §12.2, point 1).
+    rest_only_minutes: int = 0
 
     @property
     def complete(self) -> bool:
@@ -177,6 +180,9 @@ def aggregate(
                 time=max(m.time for m in members),
                 evidence=_evidence(m.evidence for m in members),
                 available_at=max(m.available_at for m in members) if complete else None,
+                rest_only_minutes=sum(
+                    1 for m in members if m.evidence is CandleEvidence.REST_SUFICIENTE
+                ),
             )
         )
     return bars

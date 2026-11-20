@@ -1550,6 +1550,70 @@ Son tres cosas distintas, y ninguna se deduce de otra:
 
 Estas pruebas responden de F3-A1 (descarga, elegibilidad y cobertura), F3-A2 (temporalidades y disponibilidad), F3-A4 (anticipación) y F3-A5 (calidad, porcentaje solo REST, huecos, recalentamiento y volumen). El calentamiento concreto de cada indicador se fija en F3-E2, con su tabla.
 
+### 12.2 Indicadores de F3-E2 [propuesta del 20 nov 2026, **pendiente de revisión**]
+
+Fija qué calcula cada indicador de la F3, cuándo da su primer valor, qué velas puede usar y cómo se comprueba. Aplica el contrato de datos (§12.1, puntos 3 a 8) sin cambiarlo. La profundidad del libro es de F3-E6. **Los indicadores se programan cuando el revisor apruebe esta sección.**
+
+**1. Común a todos**
+- **Entrada:** la serie de un instrumento en una temporalidad (1 m, 5 m, 15 m, 1 h, 4 h o 1 d), indexada por la apertura UTC de cada vela (§12.1, punto 3). Cada vela llega con su presencia o su completitud, sus dimensiones P, V y T y su instante de disponibilidad (§12.1, puntos 2, 4 y 5).
+- **Vela utilizable** para un indicador: presente (1 m) o completa (temporalidad superior), con válidas las dimensiones que el indicador declara (contrastada o solo REST; nunca discrepante, §3.4), y consecutiva con la utilizable anterior: su apertura es la de esa más Δ (§12.1, punto 3).
+- **Valor:** en la vela $t$ solo si todas las velas que necesita desde su último inicio son utilizables y consecutivas. Si no, no hay valor en $t$ y el indicador vuelve a su estado inicial: los recursivos se reinician y el siguiente valor llega tras un calentamiento completo desde la primera vela utilizable posterior (§12.1, punto 6).
+- **Calentamiento:** cuántas velas utilizables y consecutivas hacen falta, contando la del primer valor. Está en la tabla y coincide con el primer valor de TA-Lib (su *lookback* más uno), comprobado con TA-Lib 0.8.3.
+- **Disponibilidad:** el valor en $t$ está disponible cuando lo está la vela $t$ (§12.1, punto 4).
+- **Aritmética:** precios y volúmenes entran como `float` de 64 bits, convertidos desde su `Decimal` exacto, y todo el cálculo es en `float` (§12.1, punto 6; regla declarada).
+- **Procedencia** (§12.1, punto 5): cada valor lleva el tramo de minutos originales desde su último inicio, para el porcentaje solo REST. En el histórico, el 100 %.
+- **Sin anticipación:** el valor en $t$ depende solo de las velas hasta $t$ (F3-A4).
+
+**2. Los indicadores**
+
+$C_t$, $H_t$, $L_t$ y $V_t$ son el cierre, el máximo, el mínimo y el volumen de la vela $t$. Las velas se numeran desde la primera utilizable del tramo: $1, 2, \dots$
+
+| Indicador | Definición | Parámetros de partida | Calentamiento (velas) | Dimensiones | Volumen | Referencia |
+|---|---|---|---|---|---|---|
+| SMA($n$) | Media de los $n$ últimos cierres | $n$ = 20 | $n$ | P | No | TA-Lib `SMA` |
+| EMA($n$) | $\alpha = 2/(n+1)$. En la vela $n$, la SMA de los $n$ primeros cierres; después, $E_t = \alpha C_t + (1-\alpha)E_{t-1}$ | $n$ = 20 | $n$ | P | No | `EMA` |
+| RSI($n$) | De Wilder. $\Delta_t = C_t - C_{t-1}$. Medias de subidas $G$ y de bajadas $B$: en la vela $n+1$, las medias simples de los $n$ primeros cambios; después, $G_t = (G_{t-1}(n-1) + \max(\Delta_t, 0))/n$, e igual $B$ con $\max(-\Delta_t, 0)$. RSI $= 100\,G/(G+B)$, y 50 si $G + B = 0$ (serie plana, como TA-Lib 0.8.3) | $n$ = 14 | $n+1$ | P | No | `RSI` |
+| MACD($f$, $s$, $q$) | Línea $=$ EMA$_f$ − EMA$_s$, **las dos empezadas en la vela $s$**: la lenta con la media de sus $s$ cierres, y la rápida con la de los $f$ cierres que acaban en la vela $s$. Señal $=$ EMA$_q$ de la línea, empezada en la vela $s+q-1$ con la media de sus $q$ primeros valores. Histograma $=$ línea − señal. Las tres salen desde la vela $s+q-1$ | 12, 26, 9 | $s+q-1$ (34) | P | No | `MACD`: así lo calcula TA-Lib, comprobado con 0.8.3 (con las dos EMA empezadas cada una con su propia media, la línea difiere 0,17 al principio) |
+| Bollinger($n$, $k$) | Media $=$ SMA($n$); bandas $=$ media $\pm\, k\sigma$, con $\sigma$ la desviación típica **poblacional** de los $n$ cierres | 20, 2 | $n$ | P | No | `BBANDS` (media simple) |
+| ATR($n$) | De Wilder. $TR_t = \max(H_t - L_t,\ |H_t - C_{t-1}|,\ |L_t - C_{t-1}|)$, desde la vela 2. En la vela $n+1$, la media de los $n$ primeros $TR$; después, $(ATR_{t-1}(n-1) + TR_t)/n$ | $n$ = 14 | $n+1$ | P | No | `ATR` |
+| +DI, −DI y ADX($n$) | De Wilder, como TA-Lib. $+DM_t = H_t - H_{t-1}$ si es mayor que $L_{t-1} - L_t$ y que 0; si no, 0. $-DM_t$, al revés. $TR$, $+DM$ y $-DM$ se suavizan con sumas: la de los $n-1$ primeros y después $S_t = S_{t-1} - S_{t-1}/n + x_t$. $\pm DI = 100\,S_{\pm DM}/S_{TR}$ (0 si $S_{TR} = 0$); $DX = 100\,|{+DI} - {-DI}|/({+DI} + {-DI})$ (0 si la suma es 0). ADX: en la vela $2n$, la media de los $n$ primeros $DX$; después, $(ADX_{t-1}(n-1) + DX_t)/n$ | $n$ = 14 | DI y DX: $n+1$; ADX: $2n$ | P | No | `PLUS_DI`, `MINUS_DI`, `DX`, `ADX` |
+| VWAP | Del día UTC: $\sum p_i V_i / \sum V_i$ sobre las velas del día hasta $t$, con $p_i = (H_i + L_i + C_i)/3$. Empieza a las 00:00 UTC. **Si alguna vela del día hasta $t$ no es utilizable, no hay valor hasta el día siguiente**, porque un VWAP rehecho a mitad del día ya no sería el del día. Sin valor si $\sum V_i = 0$. Solo en temporalidades de menos de 1 d | Día UTC | 1 | P y V | Invariante a escala: pondera dentro del propio instrumento (§12.1, punto 7) | Casos propios (TA-Lib no lo tiene) |
+| Volumen relativo($w$) | $V_t$ entre la media de $V_{t-1}, \dots, V_{t-w}$. Sin valor si esa media es 0 | $w$ = 20 | $w+1$ | V | Invariante a escala | Casos propios |
+| Soportes y resistencias($k$, $m$) | **Pivote alto** en la vela $j$: $H_j$ estrictamente mayor que los $H$ de las $k$ velas anteriores y de las $k$ siguientes. Se conoce al cerrar la vela $j+k$, nunca antes. **Resistencia** en $t$: el pivote alto confirmado más reciente entre las $m$ últimas velas que ningún cierre posterior ha superado. **Soporte**, igual con pivotes bajos ($L_j$ estrictamente menor) y cierres por debajo. Sin pivote vigente, no hay valor | $k$ = 5, $m$ = 100 | $2k+1$ | P | No | Casos propios |
+
+**3. Volumen** (§12.1, punto 7). El VWAP y el volumen relativo solo comparan volúmenes del mismo instrumento, así que están permitidos con B8 abierta. Cualquier uso que compare volúmenes entre instrumentos, o con un umbral absoluto, se rechaza con un error (CD-05).
+
+En Futures, un cambio del `multiplier` dentro de la ventana la rompe para los dos, como un hueco (CD-12). **En el histórico solo se conoce el multiplicador actual de cada contrato** [I]: KuCoin no da su historial. Se supone constante y se declara en cada informe.
+
+**4. Casos de referencia** (los de TA-Lib se comparan con TA-Lib):
+- **VWAP:** tres velas de un día con precios típicos 10, 11 y 12 y volúmenes 1, 2 y 1 dan 10, 10,667 y 11. A las 00:00 UTC empieza de nuevo. Un hueco a mitad del día deja el resto del día sin valor. Con volumen 0 en todas las velas, no hay valor.
+- **Volumen relativo(3):** con volúmenes 10, 20, 30 y 40, la cuarta vela da $40/20 = 2$. Si la media es 0, no hay valor.
+- **Soportes y resistencias($k$ = 2):**
+  - Con máximos 1, 2, 5, 2, 1, la vela de 5 es un pivote alto. Se conoce al cerrar la quinta vela, y la resistencia vale 5 desde ahí hasta que un cierre supera 5.
+  - Si después otro pivote más bajo se confirma y luego se supera, la resistencia vuelve a ser 5 si sigue sin superar.
+  - Dos máximos iguales no hacen pivote.
+
+**5. Pruebas** (F3-A3, F3-A4 y F3-A5):
+- **Contra TA-Lib:**
+  - Series aleatorias sin huecos y tramos reales del histórico, valor a valor desde el primero, con tolerancia $|a - b| \le 10^{-9}\max(1, |b|)$.
+  - Con huecos, cada tramo continuo se compara por separado, porque TA-Lib no conoce los huecos.
+  - Corre en x86-64 (el PC y la CI) y en aarch64, con un trabajo nuevo de la CI en el ejecutor `ubuntu-24.04-arm` de GitHub, gratuito para repositorios públicos (P-F3-3).
+  - TA-Lib es solo de desarrollo: TA-Lib 0.8.3, BSD, con ruedas para Windows y Linux en x86-64 y aarch64. Trae NumPy.
+- **Envenenamiento:** cambiar todas las velas posteriores a $t$ no cambia ningún valor hasta $t$ (F3-A4).
+- **Calidad:**
+  - Una vela discrepante en la dimensión que el indicador necesita lo deja sin valor y lo reinicia.
+  - Una vela incompleta, también.
+  - Una ausente rompe la contigüidad (CD-02 y CD-08).
+- **Recalentamiento:** tras un hueco, la EMA vuelve a dar su primer valor $n$ velas después, y ese valor es la media simple de esas $n$ velas (CD-02).
+- **Volumen:** CD-05 y CD-12.
+- **Porcentaje solo REST:** CD-04 y CD-18.
+
+**6. Decisiones abiertas para el revisor**
+- **El VWAP de sesión UTC** y su regla de quedarse sin valor el resto del día tras un hueco.
+- **La definición de soportes y resistencias** por pivotes de $k$ velas y su vigencia hasta que un cierre los supera.
+- **El RSI de 50 en una serie plana**, como TA-Lib 0.8.3. Las versiones anteriores de TA-Lib daban 0.
+- **La tolerancia común de $10^{-9}$ relativa.** Las diferencias medidas con TA-Lib son de $10^{-13}$.
+
 ## 13. Infraestructura, monitorización y alertas
 
 | Componente | RAM | Prioridad |
@@ -2081,3 +2145,4 @@ $$\Delta Cap=\underbrace{8}_{\text{distancia mark-stop de lo cerrado}}+\underbra
 | 20 nov 2026 | **GR2-01, corregido.** `_supervised_step` recibe el reloj. Cuando tiene que cancelar un ciclo que aún corre, por una parada pedida o por un stream terminado, anota ese instante como inicio de la parada (`_stop_began`), antes de esperar el ciclo cancelado. `run` busca el bloqueo en ese instante, si existe, o en el de su `finally`. Los huecos se siguen cerrando con un instante posterior, tras esperar las escrituras y cerrar los streams. Prueba: un KuCoin simulado no responde al funding, y su petición cancelada tarda 6 s en cerrarse con el bucle activo; no queda ningún «Stall» ni `recorder_stalled`. Con el código anterior falla. El bloqueo anterior a la parada se sigue anotando (la prueba de GR-08). **Confirmado** en la fila siguiente | Claude |
 | 20 nov 2026 | **Segunda revisión de la ronda del grabador (commit `687cd43`): APROBADO.** GR2-01, RESUELTO: el inicio de la parada se registra antes de esperar la cancelación del ciclo. El revisor lo confirmó con el servicio y HTTPX reales y un transporte simulado. Un cierre asíncrono de 6,1 s no genera «Stall» falsos. Un bloqueo previo de 10 s sigue registrándose, sin añadirle el tiempo de cierre. Se mantienen la confirmación de escrituras pendientes y las garantías de GR-01, y la prueba nueva detecta el defecto anterior. El tratamiento de las velas REST contradictorias sigue conforme. Pasaron 105 pruebas locales; las 1.241 de la CI, con las de PostgreSQL, constan como evidencia aportada. Sin hallazgos nuevos. La aprobación cubre el código; quedan su instalación y su verificación en el servidor | Revisor |
 | 20 nov 2026 | **Segunda ronda del grabador instalada en el servidor** (etiqueta `v0.2.8-grabador`, sobre `687cd43`), con el visto bueno del propietario («sí, intégralo e instálalo»), a las 07:56 UTC. `02_codigo.sh` terminó bien. El reinicio de `svc-ingest` lo dejó unos 6 s parado. `04_verificar.sh` dio «All checks passed.». El grabador nuevo conectó los dos mercados, sin errores ni reinicios. La parada del proceso anterior, que aún llevaba el código de `v0.2.7-decimales`, tardó 5,8 s en cerrar y anotó 160 huecos «Stall: did not run for 6 s», de 07:56:17 a 07:56:23. Es el defecto que corrige esta ronda: la etiqueta es falsa, pero el periodo es correcto, porque el grabador no grababa. La próxima parada ya usa el código nuevo | Claude |
+| 20 nov 2026 | **Diseño de los indicadores de F3-E2** (§12.2, rama `fase-3-e2`, **pendiente de revisión**, antes de programarlos). Recoge lo común a todos: la vela utilizable, el valor y el reinicio, el calentamiento, la disponibilidad, el cálculo en `float`, la procedencia y la regla sin anticipación. Define los diez indicadores del DM §5, salvo la profundidad, con su fórmula, parámetros de partida, calentamiento, dimensiones, uso del volumen y referencia. Los siete de TA-Lib reproducen su cálculo, medido con TA-Lib 0.8.3 en un entorno aparte, con diferencias de $10^{-13}$: por ejemplo, el MACD de TA-Lib empieza sus dos EMA en la misma vela, y con una serie plana el RSI da 50. VWAP, volumen relativo y soportes y resistencias llevan definición y casos propios. Las decisiones abiertas para el revisor están en el punto 6 | Claude |

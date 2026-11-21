@@ -1423,7 +1423,7 @@ El diseño del despliegue, las copias y su restauración en la etapa E4 está en
 - decisión en la vela cerrada t y ejecución en t+1, precisadas por la regla causal de §12.3.1;
 - prueba que "envenena" los datos futuros;
 - universo con instrumentos deslistados [P];
-- 60/20/20 más walk-forward;
+- 60/20/20 más walk-forward (las particiones y los tramos, en §12.5);
 - **el sentimiento generado por IA solo se valida en vivo**;
 - **el libro de órdenes solo se valida con profundidad grabada por el propio sistema** [H: no hay histórico].
 
@@ -2165,6 +2165,106 @@ Los costes de los ejemplos, $f$ = 0,06 % y $s$ = 0,05 %, solo sirven para ilustr
   - D30: $T_{max}$;
   - ni D12, D16 ni D28, que son de la F8.
 
+### 12.5 Evaluación exploratoria de F3-E5 [diseño del 21 nov 2026, **pendiente de revisión**]
+
+Fija las particiones del histórico y su uso (F3-AL-03), el *walk-forward* dentro del desarrollo, los costes del informe y el informe exploratorio de cada familia (`08`, F3-E5). **La migración `0004` (las señales en la base de datos) y `svc-strategy` son la segunda parte de F3-E5 (F3-E5b)**, con su propio diseño y su propia revisión.
+
+#### 12.5.1 Particiones (F3-AL-03)
+
+Son de calendario UTC y tienen **las mismas fechas para todos los instrumentos**. Parten el histórico descargado, [19 nov 2024 00:00, 19 nov 2026 22:10), por los puntos del 60 % y del 80 % de su duración, cada uno en la medianoche UTC más cercana:
+
+| Partición | Intervalo | Días | Parte |
+|---|---|---|---|
+| Desarrollo | [19 nov 2024, 1 feb 2026) | 439 | 60,06 % |
+| Validación | [1 feb 2026, 27 jun 2026) | 146 | 19,97 % |
+| Prueba | [27 jun 2026, 19 nov 2026 22:10) | 145,92 | 19,96 % |
+
+- **Las mismas fechas en Spot y en Futures**, aunque las velas de Futures empiezan el 1 ene 2025 y su desarrollo tiene 396 días. Los dos mercados se mueven juntos: un día de validación en uno no puede ser de desarrollo en el otro.
+- **Uso** (`08` §3):
+  - **Desarrollo:** toda exploración y toda decisión de la F3, como qué familias siguen o sus parámetros.
+  - **Validación:** como mucho una vez por familia y versión (§12.3.3). La herramienta lo anota en `docs/f3/consultas_validacion.json` y rechaza una segunda consulta de la misma familia y versión.
+  - **Prueba:** sellada hasta la F8. **La herramienta no lee ningún minuto de la prueba:** su lector se detiene el 27 jun 2026, y una ventana que la toque se rechaza con un error.
+  - Cada informe dice qué particiones consultó y qué decisiones se tomaron con ellas. Un periodo usado para elegir nunca se presenta después como prueba independiente.
+- **Los datos que graba el propio sistema** (desde el 17 nov 2026) son una muestra independiente aparte (`08` §3).
+- **Se fijan antes de ver ningún resultado:** hasta hoy, ningún motor ha corrido sobre el histórico real.
+
+#### 12.5.2 *Walk-forward* en el desarrollo
+
+El desarrollo se parte en **cuatro tramos consecutivos**, cada corte en la medianoche UTC más cercana a su cuarto:
+
+| Tramo | Intervalo | Días |
+|---|---|---|
+| 1 | [19 nov 2024, 9 mar 2025) | 110 |
+| 2 | [9 mar 2025, 27 jun 2025) | 110 |
+| 3 | [27 jun 2025, 14 oct 2025) | 109 |
+| 4 | [14 oct 2025, 1 feb 2026) | 110 |
+
+- **Cada tramo es una ventana del motor** (§12.4.4): empieza sin posiciones y calienta los indicadores con los **30 días anteriores**, o desde el primer minuto del histórico si hay menos. Una posición abierta al final del tramo se liquida para evaluarla.
+- **El calentamiento de 30 días es una regla declarada.** Un indicador recursivo calentado más tiempo daría valores algo distintos. Con la EMA(50) de 4 h, la influencia de su semilla tras 30 días (180 velas) es de $(1 - 2/51)^{180} \approx 0{,}0008$.
+- **La F3 no ajusta parámetros:** los fijan las fichas aprobadas. Por eso el *walk-forward* mide la **estabilidad**: el informe da cada tramo por separado y señala la familia que solo gana en uno.
+- **Un cambio de parámetros es una versión nueva** (§12.3.3). Se evalúa otra vez en el desarrollo, con los mismos tramos, y solo después, si acaso, en la validación.
+
+#### 12.5.3 Costes del informe
+
+- **La comisión por lado**, como tomador, es la de cada instrumento. La herramienta la lee de KuCoin con el cliente de solo lectura de la E1 el día del informe, y la guarda con él:
+  - **Futures:** el `takerFeeRate` del contrato. Es 0,06 % en la respuesta real guardada en la E1 [H].
+  - **Spot:** la tarifa de tomador del nivel 0 para la clase del par (`feeCategory`), multiplicada por su `takerFeeCoefficient` [P: la tarifa de cada clase se comprueba en la página oficial de comisiones de KuCoin al programarlo].
+- **Deslizamiento:** 0,05 % por ejecución, fijo y declarado. La F3 no tiene libro: la profundidad es de F3-E6 y de la F5.
+- **Prueba de esfuerzo:** cada informe repite los resultados netos con la comisión y el deslizamiento dobles.
+- **Sin funding** (§12.4.4). Los parámetros de costes del riesgo de la F4 son D22 y D30, que esto no decide.
+
+#### 12.5.4 El informe exploratorio de cada familia (F3-A11)
+
+- **Formato:** uno por familia y versión, en `docs/informes/exploratorio/`, en Markdown, con un JSON al lado con todas sus cifras.
+- **Registro completo:** las señales, las decisiones y las operaciones de cada ejecución quedan en el PC, junto al histórico (`C:\kbot_historico\informes\`), fuera de Git. Se pueden rehacer con los datos y la versión.
+- **Ejecución:** la familia corre **sola** (el modo por familia, §12.4.3), en cada instrumento del universo y en cada tramo.
+- **Primera línea:** «Este informe no es la validación de la estrategia (D16, F8): sirve para ver si la familia merece seguir.»
+- **Siempre lleva:**
+  - la familia, su versión (commit y hash) y su ficha;
+  - el periodo, las particiones consultadas y las decisiones tomadas con ellas;
+  - el universo (`docs/f3/universo_2026-11-18.json`) y su sesgo de supervivencia;
+  - la cobertura del histórico en el periodo, por instrumento;
+  - los porcentajes solo REST de las decisiones y de los resultados, que en el histórico son del 100 %;
+  - el modelo de ejecución y los costes (§12.4.4 y §12.5.3), y que no hay funding.
+- **Cifras**, por instrumento, por tramo y en total:
+  - señales, por dirección; decisiones, ejecutadas, caducadas por motivo o no ejecutadas por motivo; y operaciones;
+  - **por régimen:** las operaciones y su R medio, según la dirección y la volatilidad de la vela de contexto y de la de señal (§12.3.2);
+  - **resultados en R**, brutos y netos: número de operaciones, aciertos (R neto > 0), R medio, mediana, suma, peor, mejor y caída máxima de la curva de R acumulado, en el orden de las salidas;
+  - los mismos resultados netos con los costes dobles;
+  - las salidas por motivo: stop, objetivo, invalidación, tiempo y liquidación.
+- **La referencia idealizada** (la apertura de $t+1$), si aparece, va en una tabla aparte, rotulada «idealizada», y no se usa para nada.
+- **Datos para D15:** los resultados por volatilidad servirán para proponer, si procede, el filtro de volatilidad extrema, que decide el propietario.
+
+#### 12.5.5 La herramienta
+
+`python -m kbot.backtest.explore`:
+- **Argumentos:** la familia (o las tres), la partición (`desarrollo` o `validacion`) y la carpeta del histórico.
+- **Versión:** comprueba la de cada familia (§12.3.3). Sin árbol limpio no hay informe.
+- **Datos:** lee los minutos de cada instrumento con F3-E1 (`kbot.history.store`): solo los de su ventana y su calentamiento, y **nunca uno de la prueba**.
+- **Memoria acotada:** corre el motor por instrumento y por tramo, con unos 140 días de minutos a la vez.
+- **Comisiones:** las lee de KuCoin una vez, dentro del presupuesto REST de la E1, y las guarda con el informe.
+- **Validación:** comprueba `consultas_validacion.json` antes de leer nada y anota la consulta al terminar.
+- **Determinista:** los mismos datos, la misma versión y los mismos costes dan el mismo informe.
+
+#### 12.5.6 Pruebas (F3-A11)
+
+- **Con un histórico sintético pequeño** en una carpeta temporal, con dos instrumentos y unos días:
+  - el informe sale con todos sus apartados y con su primera línea;
+  - una ventana que toca la prueba se rechaza, y el lector nunca devuelve un minuto de la prueba;
+  - una segunda consulta de la validación con la misma familia y versión se rechaza; con una versión nueva, se admite;
+  - sin versión, con el árbol sucio, no hay informe;
+  - los costes se aplican como dice §12.5.3, y la variante doble los dobla;
+  - el calentamiento de 30 días y la liquidación al final de cada tramo;
+  - la misma entrada da el mismo informe.
+- **Las particiones y los tramos**, con sus fechas exactas.
+
+#### 12.5.7 Qué decide el propietario y qué sigue
+
+- **Tras los informes del desarrollo, el propietario decide qué familias siguen** y si cambia algún parámetro. Un cambio es una versión nueva, que vuelve a pasar por su ficha.
+- Con los datos de los informes se le podrá proponer D15 (filtros opcionales).
+- Esta sección no decide D12, D16, D22, D28 ni D30.
+- **Sigue en F3-E5b:** la migración `0004` y `svc-strategy` (F3-A10).
+
 ## 13. Infraestructura, monitorización y alertas
 
 | Componente | RAM | Prioridad |
@@ -2724,3 +2824,5 @@ $$\Delta Cap=\underbrace{8}_{\text{distancia mark-stop de lo cerrado}}+\underbra
 | 20 nov 2026 | **Revisión del código de F3-E4 (commit `535652a`): APROBABLE CON CORRECCIONES.** Pasan las 110 pruebas locales de backtest y de estrategias. El combinador, las reglas de ejecución y la interfaz de salidas coinciden con el diseño, y las dos precisiones sobre el conocimiento retrasado son coherentes. Dos hallazgos MEDIOS en el registro. **F3E4-04:** se perdía el instante de conocimiento de una entrada fallida. La misma decisión y el mismo `no_entra`, con el minuto de entrada disponible a las 10:22:15 o a las 12:00, daban un `Run` idéntico, aunque a las 11:00 el rechazo solo se conoce en el primero. **F3E4-05:** el registro no conservaba los dos porcentajes solo REST. La misma serie, con todos sus minutos solo REST o todos contrastados, daba `Run` idénticos: se guardaban los intervalos, pero no los recuentos | Revisor |
 | 20 nov 2026 | **F3E4-04 y F3E4-05, corregidos.** (1) `DecisionRecord` separa lo que se sabe en $D$ (la caducidad, el rechazo o «elegida») del resultado de la entrada de una elegida (`ejecutada`, `caduca_sin_minuto` o `no_entra`), con su instante de conocimiento. Los dos casos del revisor dan registros distintos, y a las 11:00 solo el primero conoce el rechazo. (2) Cada operación guarda los recuentos, total y solo REST, de la procedencia de la decisión y de la del resultado. Desde el `Run` se leen el 100 %, el 0 % y el caso mixto, (15, 0) y (41, 20). Dos pruebas nuevas, 38 en `tests/unit/backtest/` | Claude |
 | 21 nov 2026 | **Segunda revisión del código de F3-E4 (commit `676711b`): APROBADO.** F3E4-04, RESUELTO: `DecisionRecord` separa la elección en $D$ del resultado de la entrada y su conocimiento; los casos de las 10:22:15 y de las 12:00 dan registros distintos, y a las 11:00 solo el primero conoce el rechazo. F3E4-05, RESUELTO: cada operación conserva los dos recuentos solo REST; el revisor confirmó desde `Run` el 100 %, el 0 % y el caso mixto (15, 0) y (41, 20). Pasan las 112 pruebas locales de backtest y de estrategias. El diff y el ZIP coinciden. Sin residuales ni hallazgos nuevos. Queda aprobada la implementación del combinador, el modelo de ejecución, las posiciones y el motor de backtest en el alcance de F3-E4 | Revisor |
+| 21 nov 2026 | **F3-E4 integrada en `main`** (`350f8e0`) por decisión del propietario («integra»), con F3-A8, F3-A9 y F3-A4 del motor entero | Claude |
+| 21 nov 2026 | **Diseño de F3-E5a: la evaluación exploratoria** (§12.5, rama `fase-3-e5`, **pendiente de revisión**, antes del código). **Particiones** de calendario UTC, iguales para todos los instrumentos, en la medianoche más cercana al 60 % y al 80 % del histórico: desarrollo [19 nov 2024, 1 feb 2026), validación [1 feb 2026, 27 jun 2026) y prueba [27 jun 2026, 19 nov 2026 22:10). La validación, una vez por familia y versión, anotada; la prueba, sellada en el código. ***Walk-forward*** en cuatro tramos de unos 110 días del desarrollo, con 30 días de calentamiento, que mide la estabilidad porque la F3 no ajusta parámetros. **Costes:** la comisión de tomador de cada instrumento leída de KuCoin, 0,05 % de deslizamiento por ejecución y una prueba con costes dobles; sin funding. **Informe** por familia y versión, con todo lo que exige `08` §3 y sus cifras por instrumento, tramo y régimen. **Herramienta** `kbot.backtest.explore`. La migración `0004` y `svc-strategy` quedan para F3-E5b. No decide D12, D15, D16, D22, D28 ni D30 | Claude |

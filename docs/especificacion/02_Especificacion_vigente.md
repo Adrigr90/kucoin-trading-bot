@@ -2165,7 +2165,7 @@ Los costes de los ejemplos, $f$ = 0,06 % y $s$ = 0,05 %, solo sirven para ilustr
   - D30: $T_{max}$;
   - ni D12, D16 ni D28, que son de la F8.
 
-### 12.5 Evaluación exploratoria de F3-E5 [diseño del 21 nov 2026, **pendiente de revisión**]
+### 12.5 Evaluación exploratoria de F3-E5 [diseño del 21 nov 2026. Primera revisión (`00390b7`): APROBABLE CON CORRECCIONES; F3E5-01 a F3E5-04, corregidos y **pendientes de la segunda revisión**]
 
 Fija las particiones del histórico y su uso (F3-AL-03), el *walk-forward* dentro del desarrollo, los costes del informe y el informe exploratorio de cada familia (`08`, F3-E5). **La migración `0004` (las señales en la base de datos) y `svc-strategy` son la segunda parte de F3-E5 (F3-E5b)**, con su propio diseño y su propia revisión.
 
@@ -2182,10 +2182,14 @@ Son de calendario UTC y tienen **las mismas fechas para todos los instrumentos**
 - **Las mismas fechas en Spot y en Futures**, aunque las velas de Futures empiezan el 1 ene 2025 y su desarrollo tiene 396 días. Los dos mercados se mueven juntos: un día de validación en uno no puede ser de desarrollo en el otro.
 - **Uso** (`08` §3):
   - **Desarrollo:** toda exploración y toda decisión de la F3, como qué familias siguen o sus parámetros.
-  - **Validación:** como mucho una vez por familia y versión (§12.3.3). La herramienta lo anota en `docs/f3/consultas_validacion.json` y rechaza una segunda consulta de la misma familia y versión.
+  - **Validación:** como mucho una vez por familia y versión (§12.3.3), **reservada antes de leerla** (F3E5-01):
+    - La herramienta crea la reserva de forma atómica y persistente antes de leer el primer minuto de la validación: un archivo por familia y versión en `C:\kbot_historico\validacion\`, creado solo si no existe. Si dos procesos lo intentan a la vez, solo uno lo crea.
+    - La reserva tiene tres estados: `iniciada` al crearse, y `completada` o `fallida` al terminar. Un fallo después de leer la deja `fallida`, nunca borrada.
+    - Una reserva existente, en cualquier estado, impide otra consulta de esa familia y versión.
+    - Su copia, con el resultado, va en `docs/f3/consultas_validacion.json`, en el repositorio.
   - **Prueba:** sellada hasta la F8. **La herramienta no lee ningún minuto de la prueba:** su lector se detiene el 27 jun 2026, y una ventana que la toque se rechaza con un error.
   - Cada informe dice qué particiones consultó y qué decisiones se tomaron con ellas. Un periodo usado para elegir nunca se presenta después como prueba independiente.
-- **Los datos que graba el propio sistema** (desde el 17 nov 2026) son una muestra independiente aparte (`08` §3).
+- **Los datos que graba el propio sistema** solo son una muestra temporal independiente desde el **19 nov 2026 a las 22:10 UTC**, el final del histórico fijado (F3E5-04; `08` §3). Los grabados del 17 al 19 nov son los mismos instrumentos y minutos que la prueba, por otro canal: no añaden observaciones nuevas y quedan sellados con ella.
 - **Se fijan antes de ver ningún resultado:** hasta hoy, ningún motor ha corrido sobre el histórico real.
 
 #### 12.5.2 *Walk-forward* en el desarrollo
@@ -2200,7 +2204,7 @@ El desarrollo se parte en **cuatro tramos consecutivos**, cada corte en la media
 | 4 | [14 oct 2025, 1 feb 2026) | 110 |
 
 - **Cada tramo es una ventana del motor** (§12.4.4): empieza sin posiciones y calienta los indicadores con los **30 días anteriores**, o desde el primer minuto del histórico si hay menos. Una posición abierta al final del tramo se liquida para evaluarla.
-- **El calentamiento de 30 días es una regla declarada.** Un indicador recursivo calentado más tiempo daría valores algo distintos. Con la EMA(50) de 4 h, la influencia de su semilla tras 30 días (180 velas) es de $(1 - 2/51)^{180} \approx 0{,}0008$.
+- **El calentamiento de 30 días es una regla declarada.** Un indicador recursivo calentado más tiempo daría valores algo distintos. Con la EMA(50) de 4 h, 30 días son 180 velas: 50 forman su semilla y quedan 130 actualizaciones. La influencia de la semilla es $(49/51)^{130} \approx 0{,}0055$, un 0,55 % (F3E5-03).
 - **La F3 no ajusta parámetros:** los fijan las fichas aprobadas. Por eso el *walk-forward* mide la **estabilidad**: el informe da cada tramo por separado y señala la familia que solo gana en uno.
 - **Un cambio de parámetros es una versión nueva** (§12.3.3). Se evalúa otra vez en el desarrollo, con los mismos tramos, y solo después, si acaso, en la validación.
 
@@ -2208,7 +2212,7 @@ El desarrollo se parte en **cuatro tramos consecutivos**, cada corte en la media
 
 - **La comisión por lado**, como tomador, es la de cada instrumento. La herramienta la lee de KuCoin con el cliente de solo lectura de la E1 el día del informe, y la guarda con él:
   - **Futures:** el `takerFeeRate` del contrato. Es 0,06 % en la respuesta real guardada en la E1 [H].
-  - **Spot:** la tarifa de tomador del nivel 0 para la clase del par (`feeCategory`), multiplicada por su `takerFeeCoefficient` [P: la tarifa de cada clase se comprueba en la página oficial de comisiones de KuCoin al programarlo].
+  - **Spot:** la tarifa de tomador del nivel 0 para la clase del par (`feeCategory`), multiplicada por su `takerFeeCoefficient`. El modelo de clase y coeficiente lo comprobó el revisor el 21 nov 2026 en la página de tarifas de KuCoin y en su SDK oficial [H]. La tarifa de cada clase se lee de esa página al programarlo [P].
 - **Deslizamiento:** 0,05 % por ejecución, fijo y declarado. La F3 no tiene libro: la profundidad es de F3-E6 y de la F5.
 - **Prueba de esfuerzo:** cada informe repite los resultados netos con la comisión y el deslizamiento dobles.
 - **Sin funding** (§12.4.4). Los parámetros de costes del riesgo de la F4 son D22 y D30, que esto no decide.
@@ -2229,7 +2233,8 @@ El desarrollo se parte en **cuatro tramos consecutivos**, cada corte en la media
 - **Cifras**, por instrumento, por tramo y en total:
   - señales, por dirección; decisiones, ejecutadas, caducadas por motivo o no ejecutadas por motivo; y operaciones;
   - **por régimen:** las operaciones y su R medio, según la dirección y la volatilidad de la vela de contexto y de la de señal (§12.3.2);
-  - **resultados en R**, brutos y netos: número de operaciones, aciertos (R neto > 0), R medio, mediana, suma, peor, mejor y caída máxima de la curva de R acumulado, en el orden de las salidas;
+  - **resultados en R**, brutos y netos: número de operaciones, aciertos (R neto > 0), R medio, mediana, suma, peor, mejor y caída máxima;
+  - **la caída máxima** (F3E5-02): la curva de R acumulado empieza en 0 y avanza por el minuto de salida (`exit_minute`). Las operaciones que salen en el mismo minuto, de uno o de varios instrumentos, se suman en un solo paso. La caída máxima es la mayor bajada desde un máximo anterior de la curva, el 0 inicial incluido. Así no depende del orden de las operaciones;
   - los mismos resultados netos con los costes dobles;
   - las salidas por motivo: stop, objetivo, invalidación, tiempo y liquidación.
 - **La referencia idealizada** (la apertura de $t+1$), si aparece, va en una tabla aparte, rotulada «idealizada», y no se usa para nada.
@@ -2243,7 +2248,7 @@ El desarrollo se parte en **cuatro tramos consecutivos**, cada corte en la media
 - **Datos:** lee los minutos de cada instrumento con F3-E1 (`kbot.history.store`): solo los de su ventana y su calentamiento, y **nunca uno de la prueba**.
 - **Memoria acotada:** corre el motor por instrumento y por tramo, con unos 140 días de minutos a la vez.
 - **Comisiones:** las lee de KuCoin una vez, dentro del presupuesto REST de la E1, y las guarda con el informe.
-- **Validación:** comprueba `consultas_validacion.json` antes de leer nada y anota la consulta al terminar.
+- **Validación:** crea la reserva atómica antes de leer nada, y al terminar la marca `completada` o `fallida` y copia el resultado en `consultas_validacion.json` (§12.5.1; F3E5-01).
 - **Determinista:** los mismos datos, la misma versión y los mismos costes dan el mismo informe.
 
 #### 12.5.6 Pruebas (F3-A11)
@@ -2252,6 +2257,10 @@ El desarrollo se parte en **cuatro tramos consecutivos**, cada corte en la media
   - el informe sale con todos sus apartados y con su primera línea;
   - una ventana que toca la prueba se rechaza, y el lector nunca devuelve un minuto de la prueba;
   - una segunda consulta de la validación con la misma familia y versión se rechaza; con una versión nueva, se admite;
+  - **F3E5-01:** un fallo provocado después de leer la validación deja la reserva `fallida` y no permite otra consulta; y de dos procesos que la piden a la vez, solo uno la consigue;
+  - **F3E5-02:** tras −1 R, dos operaciones de dos instrumentos salen en el mismo minuto con +2 R y −1 R. La caída máxima es 1 R en cualquier orden;
+  - **F3E5-03:** dos semillas de la EMA(50) separadas por una unidad, seguidas de 130 actualizaciones iguales, siguen separadas por unos 0,0055;
+  - **F3E5-04:** ninguna observación contada como muestra adicional comparte instrumento y minuto con las particiones;
   - sin versión, con el árbol sucio, no hay informe;
   - los costes se aplican como dice §12.5.3, y la variante doble los dobla;
   - el calentamiento de 30 días y la liquidación al final de cada tramo;

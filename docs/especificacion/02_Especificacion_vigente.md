@@ -2334,7 +2334,7 @@ Los informes del desarrollo están en `docs/informes/exploratorio/` (§18).
   - Su dictamen no aprueba ninguna modificación del contrato.
 - **Estado:** la regla se mantiene. Los informes son correctos con ella, pero sus conclusiones de Futures descansan en pocos contratos. Estudiar una enmienda es decisión del propietario; si la pide, se diseña con esas condiciones y con su propia revisión.
 
-### 12.6 Las señales en la base de datos y `svc-strategy` (F3-E5b) [diseño del 23 nov 2026. Primera revisión (`6e50ef2`): APROBABLE CON CORRECCIONES; F3E5B-01 a F3E5B-04, corregidos y **pendientes de la segunda revisión**, antes del código]
+### 12.6 Las señales en la base de datos y `svc-strategy` (F3-E5b) [diseño del 23 nov 2026. Primera revisión (`6e50ef2`): APROBABLE CON CORRECCIONES. Segunda (`65aadae`): F3E5B-01 a F3E5B-03 resueltos; el residual de F3E5B-04, corregido y **pendiente de la tercera revisión**, antes del código]
 
 Fija la migración `0004`, con `trading.signals` y `config.strategy_versions`; los permisos de `kbot_strategy` (F3-A10); y `svc-strategy` como proceso sin red probado en la CI (`08`, F3-E5).
 
@@ -2426,14 +2426,20 @@ Fija la migración `0004`, con `trading.signals` y `config.strategy_versions`; l
 
   - **Disponibilidad de un minuto:** el máximo de su `recorded_at` y su fin más el margen de 15 s. Es la regla «en vivo» de §12.1, punto 4: la vela existe cuando el grabador la escribe ya cerrada.
   - Un minuto sin fila visible es una ausencia.
-- **El multiplicador** (CD-12; F3E5B-04):
-  - **De dónde sale:** `market.instruments` guarda una fila por cada cambio observado (§3.8). El grabador revisa los instrumentos al arrancar y a diario, así que un cambio visto en $t_2$ ocurrió en algún momento de las 24 h anteriores [R].
-  - **Qué multiplicador tiene cada minuto:**
-    - el de la última observación visible anterior a su apertura;
-    - **desconocido** si cae en las 24 h antes de una observación que lo cambia, o antes de la primera observación del instrumento.
+- **El multiplicador** (CD-12; F3E5B-04 y su residual):
+  - **De dónde sale:** `market.instruments` guarda una fila cuando cambia algo del instrumento, no en cada comprobación (§3.8). Las comprobaciones sin cambios no quedan, y un listado fallido retrasa la siguiente. **No hay ninguna cota fija** entre una observación guardada y la siguiente.
+  - **Qué multiplicador tiene cada minuto,** con las observaciones visibles en el corte, en orden:
+    - antes de la primera observación del instrumento: **desconocido**;
+    - entre dos observaciones seguidas con el mismo multiplicador (la segunda guardada por otro cambio): el de las dos;
+    - **entre dos observaciones seguidas con distinto multiplicador: desconocido**, en todo el intervalo desde la anterior hasta la que detecta el cambio. El cambio pudo ocurrir en cualquier momento de él;
+    - desde la última observación visible: el suyo. Es la única información que hay en ese corte.
   - **Un minuto de multiplicador desconocido** tiene la dimensión V no válida. Ningún uso del volumen lo toma, y rompe sus ventanas como un hueco. Los usos del precio no cambian.
   - **El minuto y la vela superior llevan su multiplicador.** El de una vela es el de sus minutos, que solo puede ser uno: una vela con minutos de dos multiplicadores contiene alguno desconocido, así que su V no es válida.
   - **Con eso, el cálculo de §12.2 rompe la ventana** de VWAP y del volumen relativo cuando cambia el multiplicador (CD-12). Sin él, un cambio de 0,01 a 0,001 con volúmenes de 100 y 1.000 daría un volumen relativo de 10, cuando en unidades base no hay cambio (caso del revisor).
+  - **Límite declarado del tiempo real.** Hasta que una observación detecta el cambio, los minutos posteriores a la anterior llevan el multiplicador antiguo: en ese corte no hay otra información.
+    - Las señales escritas así se quedan (F3E5B-02).
+    - En cuanto el cambio es visible, todo el intervalo pasa a desconocido en los recálculos.
+    - Acortarlo exigiría que el grabador guardara también las comprobaciones sin cambios. Es un cambio del grabador, que no entra en F3-E5b: se propondrá aparte si el propietario lo pide.
   - En Spot el multiplicador es siempre 1. En el histórico no hay ninguno, como hasta ahora (§12.2, punto 3): el backtest no cambia.
 - **Las señales de un día:** las de las fichas con $D_s$ en $[d, d+1)$, calculadas con los minutos visibles desde $d$ − 30 días. Es la misma regla declarada que el calentamiento de los tramos (§12.5.2), y cada día tiene así un comienzo fijo.
 - **Equivalencia con el motor, en cada corte** (F3E5B-02): las señales que un ciclo con corte $c$ escribe para el día $d$ son exactamente las del motor (`engine.run` con la ventana $[d, d+1)$) sobre los mismos minutos, los visibles en $c$, con $D_s$ ≤ $c$. Son las mismas funciones (§0, principio 3).
@@ -2484,11 +2490,16 @@ Fija la migración `0004`, con `trading.signals` y `config.strategy_versions`; l
     - **F3E5B-01:** un cambio del universo dentro del día, con señales antes y después: cada una cuenta según la evaluación vigente en su $D_s$, igual en el cálculo de cada ciclo, en la recuperación y en un arranque nuevo;
     - **F3E5B-02:** el caso del revisor (un minuto del 5 de enero de las 01:10, visible el día 6 a las 12:00). Cada corte da exactamente las señales del motor con sus minutos visibles. Lo escrito conserva las del corte de las 11:00:30, aunque el recálculo con todos los datos no las tenga, y las dos comparaciones se comprueban por separado;
     - **F3E5B-03:** fallan los ciclos de las 23:46, 00:01, 00:16, 00:31 y 00:46, y el de las 01:01, en el mismo proceso, escribe la señal de ayer con $D_s$ = 23:45:15; y una fila confirmada tarde, con `recorded_at` anterior a un corte ya usado, hace recalcular su día;
-    - **F3E5B-04:** 20 velas de volumen 100 con multiplicador 0,01 y después de volumen 1.000 con 0,001. El VWAP y el volumen relativo se reinician en el cambio, sin valor en las 24 h de multiplicador desconocido ni hasta recalentar, y no hay señales que dependan de ellos mientras tanto. Los indicadores de precio no cambian;
+    - **F3E5B-04, con su residual:** 20 velas de volumen 100 con multiplicador 0,01 y después de volumen 1.000 con 0,001. El caso del revisor:
+      - una comprobación sin cambios el 1 nov a las 23:59, que no se guarda;
+      - el cambio el día 2 a las 00:00;
+      - listados fallidos que retrasan la detección al día 3 a las 12:00, más de 24 h después.
+
+      Todo el intervalo desde la observación guardada anterior hasta la detección tiene la V no válida, también en los agregados. El VWAP y el volumen relativo se reinician y no dan valor hasta recalentar después de la detección, y no hay señales que dependan de ellos mientras tanto. Los indicadores de precio no cambian. Con un corte anterior a la detección, el minuto lleva el multiplicador antiguo (el límite declarado);
   - **sin red:** el ciclo corre en un proceso que rechaza cualquier conexión `AF_INET` o `AF_INET6` y cualquier resolución de nombres, y funciona por el socket Unix.
 - **Sin base, en cualquier máquina:**
   - la conversión de cada fila (estado, evidencia, dimensiones y disponibilidad);
-  - el multiplicador de cada minuto y de cada vela superior, con sus 24 h desconocidas;
+  - el multiplicador de cada minuto y de cada vela superior, con sus intervalos desconocidos según las observaciones visibles en cada corte;
   - las fechas de cada ciclo, su corte, su ventana de recuperación y los días que recalcula;
   - el texto de `params` de las tres fichas aprobadas, que da sus tres hashes.
 
@@ -2496,6 +2507,7 @@ Fija la migración `0004`, con `trading.signals` y `config.strategy_versions`; l
 
 - **Qué versiones se aprueban,** tras §12.5.7. Cada una es una fila de `config.strategy_versions`, en su propia migración.
 - **Cuándo se despliega `svc-strategy`,** con su revisión.
+- **Si el grabador debe guardar también las comprobaciones de los instrumentos sin cambios.** Acortaría el intervalo de multiplicador desconocido (§12.6.4), y sería una ronda del grabador, aparte.
 - Esta sección no decide D12, D16, D22, D28, D29 ni D30.
 
 ## 13. Infraestructura, monitorización y alertas
@@ -3073,3 +3085,5 @@ $$\Delta Cap=\underbrace{8}_{\text{distancia mark-stop de lo cerrado}}+\underbra
 | 23 nov 2026 | **Diseño de F3-E5b: las señales en la base de datos y `svc-strategy`** (§12.6, rama `fase-3-e5b`, **pendiente de revisión**, antes del código). **Migración `0004`:** `trading.signals`, una fila por señal, única por su clave de §1.3, con el commit y el hash de su versión, sus instantes, su régimen, sus niveles, su procedencia y sus recuentos solo REST, y una clave foránea a la versión aprobada; y `config.strategy_versions`, que aprueba los parámetros de una ficha, la escriben solo las migraciones y nace vacía, porque qué familias siguen lo decide el propietario (§12.5.7). **Permisos de `kbot_strategy` (F3-A10):** lee `market.candles`, `market.universe_snapshots` y `config.strategy_versions`, e inserta señales, y nada más. **`svc-strategy`:** calcula cada 15 minutos las señales de cada día con los minutos del grabador desde 30 días antes, con un corte de 60 s, la conversión de cada fila a un minuto del contrato y la disponibilidad en `recorded_at`. Con los mismos minutos da exactamente las señales del motor. Sin red, idempotente y sin desplegar | Claude |
 | 23 nov 2026 | **Revisión del diseño de F3-E5b (commit `6e50ef2`): APROBABLE CON CORRECCIONES**, con cuatro hallazgos MEDIOS. **F3E5B-01:** el universo podía aplicarse hacia atrás: con la última evaluación del día, una exclusión de las 00:30 quitaba al recalcular una señal de las 00:15:15 que el ciclo de las 00:16 podía escribir. **F3E5B-02:** la igualdad con el recálculo del día entero no está garantizada. El revisor lo reprodujo con la tendencia de periodos cortos: con un minuto del 5 de enero de las 01:10 disponible el día 6 a las 12:00, el corte de las 11:00:30 del día 6 da 9 señales, y el motor con todos los datos, 0 con $D_s$ ≤ ese corte; pasa también con `recorded_at` posterior al corte, no solo con la confirmación tardía. **F3E5B-03:** si fallan los ciclos de la primera hora del día, la señal de ayer con $D_s$ = 23:45:15 queda sin escribir, aunque se prometía reintentar. **F3E5B-04:** falta el multiplicador para cumplir CD-12. `market.candles` no lo tiene y el servicio no podía leer `market.instruments`: con 20 velas de volumen 100 y multiplicador 0,01 seguidas de volumen 1.000 y multiplicador 0,001, el revisor reprodujo un volumen relativo de 10. La tabla de aprobaciones vacía respeta las decisiones pendientes del propietario, y la reinserción sin `SELECT` es viable con `ON CONFLICT DO NOTHING` sin objetivo ni `RETURNING` | Revisor |
 | 23 nov 2026 | **F3E5B-01 a F3E5B-04, corregidos en §12.6.3 a §12.6.5.** (1) Un instrumento cuenta en $D_s$ según la última evaluación visible con `evaluated_at` ≤ $D_s$. (2) La equivalencia con el motor se define en cada corte, con los mismos minutos visibles, y se separa de la divergencia entre lo escrito y el recálculo final, que es un límite declarado que mide la F4. (3) Cada ciclo mira una ventana móvil de 48 h y recalcula, sin reiniciar, el día sin un cálculo bueno posterior a su fin o cuyo número de filas visibles cambió. (4) El servicio lee `market.instruments`: cada minuto lleva el multiplicador de la última observación anterior, y es desconocido, con la V no válida, en las 24 h antes de un cambio; así VWAP y volumen relativo se reinician en el cambio (CD-12). Cada corrección tiene su prueba en §12.6.5 | Claude |
+| 23 nov 2026 | **Segunda revisión del diseño de F3-E5b (commit `65aadae`): APROBABLE CON CORRECCIONES.** F3E5B-01, RESUELTO: el universo se determina en cada $D_s$. F3E5B-02, RESUELTO: la equivalencia usa los mismos datos visibles en cada corte y se separa del recálculo final. F3E5B-03, RESUELTO: la ventana móvil y los días pendientes cubren la recuperación sin reiniciar. **F3E5B-04, PARCIAL, con un residual MEDIO:** revisar a diario no garantiza una observación válida cada 24 h. El grabador conserva el universo, reintenta cuando faltan los listados y solo guarda los instrumentos que cambian. El revisor lo reprodujo: con una comprobación correcta el 1 nov a las 23:59, el cambio el día 2 a las 00:00 y la detección el día 3 a las 12:00 tras una evaluación fallida, la regla solo invalidaba desde el día 2 a las 12:00 y dejaba doce horas con el volumen utilizable y el multiplicador antiguo, así que aún era posible el volumen relativo artificial de 10. Sin hallazgos nuevos | Revisor |
+| 23 nov 2026 | **Residual de F3E5B-04, corregido en §12.6.4 y §12.6.5.** Sin ninguna cota fija: con las observaciones visibles en el corte, el multiplicador es desconocido en todo el intervalo entre dos observaciones seguidas que lo cambian, desde la anterior hasta la que detecta el cambio, y antes de la primera. Entre dos con el mismo, el de las dos, y desde la última, el suyo. Hasta la detección, los minutos llevan el multiplicador antiguo: es un límite declarado del tiempo real, y las señales escritas así se quedan (F3E5B-02). Acortarlo exigiría que el grabador guardara las comprobaciones sin cambios, y se propondrá aparte si el propietario lo pide. La prueba sigue el caso del revisor, con la detección más de 24 h después | Claude |

@@ -2334,7 +2334,7 @@ Los informes del desarrollo están en `docs/informes/exploratorio/` (§18).
   - Su dictamen no aprueba ninguna modificación del contrato.
 - **Estado:** la regla se mantiene. Los informes son correctos con ella, pero sus conclusiones de Futures descansan en pocos contratos. Estudiar una enmienda es decisión del propietario; si la pide, se diseña con esas condiciones y con su propia revisión.
 
-### 12.6 Las señales en la base de datos y `svc-strategy` (F3-E5b) [diseño del 23 nov 2026, **pendiente de revisión**, antes del código]
+### 12.6 Las señales en la base de datos y `svc-strategy` (F3-E5b) [diseño del 23 nov 2026. Primera revisión (`6e50ef2`): APROBABLE CON CORRECCIONES; F3E5B-01 a F3E5B-04, corregidos y **pendientes de la segunda revisión**, antes del código]
 
 Fija la migración `0004`, con `trading.signals` y `config.strategy_versions`; los permisos de `kbot_strategy` (F3-A10); y `svc-strategy` como proceso sin red probado en la CI (`08`, F3-E5).
 
@@ -2391,7 +2391,7 @@ Fija la migración `0004`, con `trading.signals` y `config.strategy_versions`; l
 | Objeto | Privilegio |
 |---|---|
 | Esquemas `market`, `trading` y `config` | `USAGE` |
-| `market.candles` y `market.universe_snapshots` | `SELECT` |
+| `market.candles`, `market.instruments` y `market.universe_snapshots` | `SELECT` |
 | `config.strategy_versions` | `SELECT` |
 | `trading.signals` | `INSERT`, y nada más |
 
@@ -2407,12 +2407,16 @@ Fija la migración `0004`, con `trading.signals` y `config.strategy_versions`; l
 
 #### 12.6.4 `svc-strategy`
 
-`python -m kbot.strategies`, un proceso que escribe las señales de las versiones aprobadas a partir de las velas del grabador.
+`python -m kbot.strategies`, un proceso que escribe las señales de las versiones aprobadas a partir de lo que graba el grabador.
 
 - **Versión:** el commit del código que se ejecuta (§12.3.3). Sin versión no arranca.
 - **Familias:** las de las fichas cuyo (`family`, `params_hash`) está en `config.strategy_versions`. Las demás no corren.
-- **Universo:** los instrumentos con `in_universe` de la evaluación de `market.universe_snapshots` que rige en el día de la señal: la última con `evaluated_at` en ese día o antes (§3.8).
-- **Datos:** las velas de 1 minuto de `last` de `market.candles`, con cada fila convertida en un minuto del contrato (§12.1):
+- **Lo visible en un corte:** cada ciclo fija al empezar su `corte`, la hora actual menos 60 s [R], el margen para que se confirmen las inserciones del grabador. Desde entonces solo usa las filas de `market.candles`, `market.instruments` y `market.universe_snapshots` con `recorded_at` ≤ `corte`, y solo escribe señales con $D_s$ ≤ `corte`.
+- **Universo, en cada instante** (F3E5B-01):
+  - Un instrumento cuenta en $D_s$ si la última evaluación visible con `evaluated_at` ≤ $D_s$ lo tiene en el universo (`in_universe`). `evaluated_at` es el momento desde el que rige (§3.8).
+  - Para un día se calculan los instrumentos que estén en el universo en algún instante de él. Después cada señal se queda solo si su instrumento contaba en su $D_s$.
+  - Así, una evaluación posterior nunca quita una señal anterior a ella. Y el cálculo de cada ciclo, el de la recuperación y el de un arranque nuevo usan los mismos límites.
+- **Datos:** las velas de 1 minuto de `last` de `market.candles`. Cada fila se convierte en un minuto del contrato (§12.1):
 
 | `state` | Evidencia | P | V | T |
 |---|---|---|---|---|
@@ -2421,28 +2425,37 @@ Fija la migración `0004`, con `trading.signals` y `config.strategy_versions`; l
 | `cerrada_rest` | `vela_rest_suficiente` | solo REST | solo REST | solo REST |
 
   - **Disponibilidad de un minuto:** el máximo de su `recorded_at` y su fin más el margen de 15 s. Es la regla «en vivo» de §12.1, punto 4: la vela existe cuando el grabador la escribe ya cerrada.
-  - Un minuto sin fila es una ausencia.
-  - El volumen de Futures va sin multiplicador, como en el histórico.
-- **Las señales de un día:** las de las fichas con $D_s$ en $[d, d+1)$. Se calculan con los minutos desde $d$ − 30 días, la misma regla declarada que el calentamiento de los tramos (§12.5.2). Así cada día tiene un comienzo fijo, que no depende de cuándo corre el servicio. **Con los mismos minutos dan exactamente las señales del motor** (`engine.run` con la ventana $[d, d+1)$), porque son las mismas funciones (§0, principio 3).
-- **Corte de cada ciclo:** al empezar, el ciclo fija su `corte` = la hora actual menos 60 s [R], el margen para que se confirmen las inserciones del grabador.
-  - Solo lee las filas con `recorded_at` ≤ `corte`.
-  - Solo escribe las señales con $D_s$ ≤ `corte`.
-  - Las velas superiores se forman con lo terminado hasta `corte`.
-- **Ciclos:** cada 15 minutos, en los minutos 01, 16, 31 y 46 de cada hora, a los 30 s.
-  - Así entra cada vela de 15 m y de 1 h, cuyo último minuto está disponible unos 15 s después de su fin.
-  - Cada ciclo calcula el día de `corte` y, si `corte` cae en la primera hora del día, también el anterior.
-  - El primero, al arrancar, calcula además los dos días anteriores: tras una parada recupera las señales de las últimas 48 h. Lo más antiguo es cosa del backtest.
+  - Un minuto sin fila visible es una ausencia.
+- **El multiplicador** (CD-12; F3E5B-04):
+  - **De dónde sale:** `market.instruments` guarda una fila por cada cambio observado (§3.8). El grabador revisa los instrumentos al arrancar y a diario, así que un cambio visto en $t_2$ ocurrió en algún momento de las 24 h anteriores [R].
+  - **Qué multiplicador tiene cada minuto:**
+    - el de la última observación visible anterior a su apertura;
+    - **desconocido** si cae en las 24 h antes de una observación que lo cambia, o antes de la primera observación del instrumento.
+  - **Un minuto de multiplicador desconocido** tiene la dimensión V no válida. Ningún uso del volumen lo toma, y rompe sus ventanas como un hueco. Los usos del precio no cambian.
+  - **El minuto y la vela superior llevan su multiplicador.** El de una vela es el de sus minutos, que solo puede ser uno: una vela con minutos de dos multiplicadores contiene alguno desconocido, así que su V no es válida.
+  - **Con eso, el cálculo de §12.2 rompe la ventana** de VWAP y del volumen relativo cuando cambia el multiplicador (CD-12). Sin él, un cambio de 0,01 a 0,001 con volúmenes de 100 y 1.000 daría un volumen relativo de 10, cuando en unidades base no hay cambio (caso del revisor).
+  - En Spot el multiplicador es siempre 1. En el histórico no hay ninguno, como hasta ahora (§12.2, punto 3): el backtest no cambia.
+- **Las señales de un día:** las de las fichas con $D_s$ en $[d, d+1)$, calculadas con los minutos visibles desde $d$ − 30 días. Es la misma regla declarada que el calentamiento de los tramos (§12.5.2), y cada día tiene así un comienzo fijo.
+- **Equivalencia con el motor, en cada corte** (F3E5B-02): las señales que un ciclo con corte $c$ escribe para el día $d$ son exactamente las del motor (`engine.run` con la ventana $[d, d+1)$) sobre los mismos minutos, los visibles en $c$, con $D_s$ ≤ $c$. Son las mismas funciones (§0, principio 3).
+- **Lo escrito frente al recálculo final** (F3E5B-02): son dos cosas distintas, cada una correcta en su papel.
+  - **Lo escrito** es la unión de lo que escribió cada ciclo, y nunca se borra: es lo que el sistema supo en vivo.
+  - **El recálculo con todos los datos** es el backtest.
+  - **Pueden diferir** cuando llega un minuto después de un corte: una vela REST tardía del grabador, la recuperación tras una parada o una inserción confirmada tarde. El minuto que faltaba reinició los indicadores, y el recálculo, con él, puede no tener señales ya escritas o tener otras.
+  - **El revisor lo reprodujo:** con un minuto del 5 de enero de las 01:10 disponible el día 6 a las 12:00, el corte de las 11:00:30 del día 6 da 9 señales, y el motor con todos los datos, 0 con $D_s$ ≤ ese corte.
+  - Es un límite declarado del tiempo real. La F4 medirá esa divergencia comparando lo escrito con el recálculo.
+- **Ciclos y recuperación** (F3E5B-03):
+  - **Cuándo:** cada 15 minutos, en los minutos 01, 16, 31 y 46 de cada hora, a los 30 s. Así entra cada vela de 15 m y de 1 h, cuyo último minuto está disponible unos 15 s después de su fin.
+  - **Ventana de recuperación:** cada ciclo mira los días que tocan $[$`corte` − 48 h, `corte`$]$, dos o tres. Es el plazo durante el que el grabador aún recupera velas REST (§3.8). Lo anterior es cosa del backtest.
+  - **Qué recalcula:** un día, por instrumento y familia, se recalcula si no hay un cálculo bueno de este proceso con un corte posterior a su fin, o si cambió lo que usa. Lo que usa es el número de sus filas visibles: las velas de su rango, las observaciones del instrumento y las evaluaciones del universo. Las filas solo se insertan, así que un número distinto es una fila nueva, también una confirmada tarde.
+  - **Sin reiniciar:** un ciclo que falla no cambia ese estado, y el siguiente reintenta cada día pendiente de la ventana. Un día que queda pendiente se recupera mientras siga dentro de ella.
+  - **Al arrancar,** el estado está vacío: se calculan todos los días de la ventana.
 - **Escritura:** cada ciclo inserta sus señales en una transacción, con `ON CONFLICT DO NOTHING`. Repetirlo, o arrancar otra vez, no duplica nada, y una señal escrita nunca se borra ni se cambia.
-- **Lo que llega tarde:** una fila con `recorded_at` ≤ `corte` cuya inserción se confirme después de que el ciclo lea no estaba visible para él.
-  - El ciclo siguiente la ve, y puede añadir señales que el anterior no podía calcular.
-  - Nunca quita ninguna, porque una señal escrita no se borra.
-  - Es un límite declarado del tiempo real: lo cuenta el registro del servicio, y la comparación de la F4 entre lo escrito en vivo y lo recalculado lo medirá.
 - **Sin red** (§1.1):
   - el proceso solo abre el socket Unix de PostgreSQL, con `peer` como `kbot_strategy`;
   - nunca importa el cliente de KuCoin;
   - desplegado, llevará `IPAddressDeny=any` (§9).
 - **Ante un fallo se bloquea** (§0, regla 1). Un ciclo que falla no escribe nada, y el siguiente lo reintenta. Sin universo o sin versiones aprobadas, no hay señales.
-- **Coste:** cada ciclo construye, por instrumento y familia, los marcos de unos 31 días de minutos. En el PC, un tramo de 140 días tarda unos 12 s por familia e instrumento (§18, 23 nov 2026). Se medirá con 31 días en la CI y en el PC antes de proponer el despliegue [P].
+- **Coste:** casi siempre un ciclo calcula solo el día en curso. Construye, por instrumento y familia, los marcos de unos 31 días de minutos. En el PC, un tramo de 140 días tarda unos 12 s por familia e instrumento (§18, 23 nov 2026). Se medirá con 31 días en la CI y en el PC antes de proponer el despliegue [P].
 
 #### 12.6.5 Pruebas (F3-A10)
 
@@ -2463,15 +2476,20 @@ Fija la migración `0004`, con `trading.signals` y `config.strategy_versions`; l
     - el minuto alineado;
     - `recorded_at` antes de `signal_at`;
   - **el servicio, sobre velas sintéticas del grabador** (los tres estados, una ausencia y una fila tardía), con dos instrumentos, un universo y versiones aprobadas de fichas de periodos cortos:
-    - un ciclo como `kbot_strategy` escribe exactamente las señales del motor para ese día;
-    - a mitad del día, escribe exactamente las del motor con $D_s$ ≤ `corte`. Las demás llegan en ciclos posteriores, y al final son las del día entero;
+    - un ciclo como `kbot_strategy`, después del día, escribe exactamente las señales del motor para ese día con los mismos minutos visibles;
+    - a mitad del día, escribe exactamente las del motor con los minutos visibles en su corte y $D_s$ ≤ `corte`. Sin filas tardías, los ciclos siguientes completan las del día entero;
     - repetirlo no añade nada;
     - una versión sin aprobar no escribe nada;
     - una fila con `recorded_at` posterior al corte no se usa;
+    - **F3E5B-01:** un cambio del universo dentro del día, con señales antes y después: cada una cuenta según la evaluación vigente en su $D_s$, igual en el cálculo de cada ciclo, en la recuperación y en un arranque nuevo;
+    - **F3E5B-02:** el caso del revisor (un minuto del 5 de enero de las 01:10, visible el día 6 a las 12:00). Cada corte da exactamente las señales del motor con sus minutos visibles. Lo escrito conserva las del corte de las 11:00:30, aunque el recálculo con todos los datos no las tenga, y las dos comparaciones se comprueban por separado;
+    - **F3E5B-03:** fallan los ciclos de las 23:46, 00:01, 00:16, 00:31 y 00:46, y el de las 01:01, en el mismo proceso, escribe la señal de ayer con $D_s$ = 23:45:15; y una fila confirmada tarde, con `recorded_at` anterior a un corte ya usado, hace recalcular su día;
+    - **F3E5B-04:** 20 velas de volumen 100 con multiplicador 0,01 y después de volumen 1.000 con 0,001. El VWAP y el volumen relativo se reinician en el cambio, sin valor en las 24 h de multiplicador desconocido ni hasta recalentar, y no hay señales que dependan de ellos mientras tanto. Los indicadores de precio no cambian;
   - **sin red:** el ciclo corre en un proceso que rechaza cualquier conexión `AF_INET` o `AF_INET6` y cualquier resolución de nombres, y funciona por el socket Unix.
 - **Sin base, en cualquier máquina:**
   - la conversión de cada fila (estado, evidencia, dimensiones y disponibilidad);
-  - las fechas de cada ciclo, su corte y sus días;
+  - el multiplicador de cada minuto y de cada vela superior, con sus 24 h desconocidas;
+  - las fechas de cada ciclo, su corte, su ventana de recuperación y los días que recalcula;
   - el texto de `params` de las tres fichas aprobadas, que da sus tres hashes.
 
 #### 12.6.6 Qué decide el propietario
@@ -3053,3 +3071,5 @@ $$\Delta Cap=\underbrace{8}_{\text{distancia mark-stop de lo cerrado}}+\underbra
 | 23 nov 2026 | **Informes del desarrollo rehechos con `3490a1c` (en `5829cf1`), y §12.5.8 ampliado.** El primer intento, con `2fd382e`, se detuvo en el primer día de Futures anterior a lo solicitado (antes del 1 ene 2025). El lector construía una ventana invertida para un día que no toca ninguna ventana pedida. `3490a1c` lo salta, con dos pruebas que fallaban con el lector anterior; su CI, en verde, pasa 1.619 pruebas y 223 en aarch64. La nueva ejecución tardó 1 h 08 min. **Todas las cifras coinciden con las de `6f08bb8`:** solo cambian la cobertura, el commit y la hora de lectura de las comisiones, que son las mismas. La cobertura del contrato da «no aplicable» a SOXLUSDTM y 99,37 % a XBTUSDTM, y deja aparte los 61.920 minutos de Futures anteriores al 1 ene 2025, que nunca se pidieron. EVAA-USDT y PIEVERSE-USDT de Spot dan 0 %: no hay evidencia de cuándo empezaron a cotizar, así que sus minutos son de elegibilidad desconocida y cuentan en E, como en el informe de cobertura de F3-E1. Los informes de `6f08bb8` se retiran del repositorio, y siguen en su historia. §12.5.8 añade la opinión del revisor y por qué calla cada contrato: sin periodo elegible (SOXL), el contexto nunca se calienta (8 contratos en la tendencia y en el breakout, 1 en la reversión) o valores a ratos sin señal | Claude |
 | 23 nov 2026 | **Segunda revisión del código de F3-E5a (commit `2ba8e2f`): APROBADO**, con el código y los tres informes del desarrollo. **F3E5-05, RESUELTO:** la cobertura usa la presencia y la elegibilidad de F3-E1 y deja lo no solicitado fuera del denominador. SOXLUSDTM figura como «no aplicable» y XBTUSDTM con 566.630 de 570.240, un 99,37 %, y la ventana invertida de los días anteriores a lo solicitado queda corregida. **F3E5-06, RESUELTO:** el cierre del sistema operativo protege a la vez la lectura, la mezcla y la publicación, y la prueba concurrente conserva las 100 anotaciones, con reemplazo atómico. **F3E5-07, RESUELTO:** los parámetros usan el texto canónico; `2` y `2.00` dan el mismo contenido y permiten rehacer el hash aprobado. **Verificación del revisor:** pasan las 80 pruebas de backtest, las cifras de operaciones y resultados de los 480 registros del desarrollo coinciden exactamente con las anteriores, y los informes en Markdown concuerdan con sus JSON. La separación de causas de Futures es coherente con mantener el contrato vigente; los recuentos de calentamiento son mediciones aportadas, que no recalculó. Sin hallazgos nuevos. El revisor no repitió la ejecución completa sobre el histórico ni consultó datos de la validación o de la prueba. La aprobación es la de la evaluación exploratoria: siguen pendientes F3-E5b y la validación definitiva | Revisor |
 | 23 nov 2026 | **Diseño de F3-E5b: las señales en la base de datos y `svc-strategy`** (§12.6, rama `fase-3-e5b`, **pendiente de revisión**, antes del código). **Migración `0004`:** `trading.signals`, una fila por señal, única por su clave de §1.3, con el commit y el hash de su versión, sus instantes, su régimen, sus niveles, su procedencia y sus recuentos solo REST, y una clave foránea a la versión aprobada; y `config.strategy_versions`, que aprueba los parámetros de una ficha, la escriben solo las migraciones y nace vacía, porque qué familias siguen lo decide el propietario (§12.5.7). **Permisos de `kbot_strategy` (F3-A10):** lee `market.candles`, `market.universe_snapshots` y `config.strategy_versions`, e inserta señales, y nada más. **`svc-strategy`:** calcula cada 15 minutos las señales de cada día con los minutos del grabador desde 30 días antes, con un corte de 60 s, la conversión de cada fila a un minuto del contrato y la disponibilidad en `recorded_at`. Con los mismos minutos da exactamente las señales del motor. Sin red, idempotente y sin desplegar | Claude |
+| 23 nov 2026 | **Revisión del diseño de F3-E5b (commit `6e50ef2`): APROBABLE CON CORRECCIONES**, con cuatro hallazgos MEDIOS. **F3E5B-01:** el universo podía aplicarse hacia atrás: con la última evaluación del día, una exclusión de las 00:30 quitaba al recalcular una señal de las 00:15:15 que el ciclo de las 00:16 podía escribir. **F3E5B-02:** la igualdad con el recálculo del día entero no está garantizada. El revisor lo reprodujo con la tendencia de periodos cortos: con un minuto del 5 de enero de las 01:10 disponible el día 6 a las 12:00, el corte de las 11:00:30 del día 6 da 9 señales, y el motor con todos los datos, 0 con $D_s$ ≤ ese corte; pasa también con `recorded_at` posterior al corte, no solo con la confirmación tardía. **F3E5B-03:** si fallan los ciclos de la primera hora del día, la señal de ayer con $D_s$ = 23:45:15 queda sin escribir, aunque se prometía reintentar. **F3E5B-04:** falta el multiplicador para cumplir CD-12. `market.candles` no lo tiene y el servicio no podía leer `market.instruments`: con 20 velas de volumen 100 y multiplicador 0,01 seguidas de volumen 1.000 y multiplicador 0,001, el revisor reprodujo un volumen relativo de 10. La tabla de aprobaciones vacía respeta las decisiones pendientes del propietario, y la reinserción sin `SELECT` es viable con `ON CONFLICT DO NOTHING` sin objetivo ni `RETURNING` | Revisor |
+| 23 nov 2026 | **F3E5B-01 a F3E5B-04, corregidos en §12.6.3 a §12.6.5.** (1) Un instrumento cuenta en $D_s$ según la última evaluación visible con `evaluated_at` ≤ $D_s$. (2) La equivalencia con el motor se define en cada corte, con los mismos minutos visibles, y se separa de la divergencia entre lo escrito y el recálculo final, que es un límite declarado que mide la F4. (3) Cada ciclo mira una ventana móvil de 48 h y recalcula, sin reiniciar, el día sin un cálculo bueno posterior a su fin o cuyo número de filas visibles cambió. (4) El servicio lee `market.instruments`: cada minuto lleva el multiplicador de la última observación anterior, y es desconocido, con la V no válida, en las 24 h antes de un cambio; así VWAP y volumen relativo se reinician en el cambio (CD-12). Cada corrección tiene su prueba en §12.6.5 | Claude |

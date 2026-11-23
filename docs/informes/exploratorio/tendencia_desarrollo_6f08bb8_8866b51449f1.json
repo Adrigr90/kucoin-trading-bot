@@ -1,0 +1,5571 @@
+{
+ "formato": "kbot.backtest informe exploratorio 1",
+ "aviso": "Este informe no es la validación de la estrategia (D16, F8): sirve para ver si la familia merece seguir.",
+ "familia": "tendencia",
+ "version": "6f08bb8669babfdcf629a6e1f0d2e0ba62a64a72+8866b51449f119568d5012acb47487d37d411b66fda8d615661564b144fa36d3",
+ "commit": "6f08bb8669babfdcf629a6e1f0d2e0ba62a64a72",
+ "hash_parametros": "8866b51449f119568d5012acb47487d37d411b66fda8d615661564b144fa36d3",
+ "ficha": "§12.3.4",
+ "parametros": {
+  "familia": "tendencia",
+  "temporalidades": {
+   "contexto": "4h",
+   "senal": "1h",
+   "ejecucion": "15m"
+  },
+  "regimen": {
+   "adx": 14,
+   "adx_tendencia": "25",
+   "adx_rango": "20",
+   "atr": 14,
+   "bollinger": 20,
+   "bollinger_k": "2",
+   "ventana": 100,
+   "expansion_mayor_que": "80",
+   "compresion_menor_que": "80"
+  },
+  "contexto": {
+   "ema_rapida": 20,
+   "ema_lenta": 50
+  },
+  "senal": {
+   "ema_rapida": 20,
+   "ema_lenta": 50,
+   "retroceso": 5,
+   "macd": [
+    12,
+    26,
+    9
+   ],
+   "atr": 14
+  },
+  "ejecucion": {
+   "velas": 4
+  },
+  "stop": {
+   "multiplo_atr": "2"
+  },
+  "arrastre": {
+   "multiplo_atr": "3"
+  }
+ },
+ "particion": "desarrollo",
+ "particiones_consultadas": [
+  "desarrollo"
+ ],
+ "decisiones_tomadas": "ninguna todavía: el propietario decide qué familias siguen con los informes del desarrollo (§12.5.7).",
+ "tramos": [
+  {
+   "nombre": "tramo 1",
+   "desde": "2024-11-19T00:00:00+00:00",
+   "hasta": "2025-03-09T00:00:00+00:00",
+   "calentamiento_desde": "2024-11-19T00:00:00+00:00"
+  },
+  {
+   "nombre": "tramo 2",
+   "desde": "2025-03-09T00:00:00+00:00",
+   "hasta": "2025-06-27T00:00:00+00:00",
+   "calentamiento_desde": "2025-02-07T00:00:00+00:00"
+  },
+  {
+   "nombre": "tramo 3",
+   "desde": "2025-06-27T00:00:00+00:00",
+   "hasta": "2025-10-14T00:00:00+00:00",
+   "calentamiento_desde": "2025-05-28T00:00:00+00:00"
+  },
+  {
+   "nombre": "tramo 4",
+   "desde": "2025-10-14T00:00:00+00:00",
+   "hasta": "2026-02-01T00:00:00+00:00",
+   "calentamiento_desde": "2025-09-14T00:00:00+00:00"
+  }
+ ],
+ "universo": "docs/f3/universo_2026-11-18.json",
+ "costes": {
+  "comisiones": [
+   {
+    "mercado": "FUTURES",
+    "simbolo": "ASTERUSDTM",
+    "comision_tomador": "0.0006",
+    "origen": "takerFeeRate 0.00060",
+    "leida": "2026-11-23T10:47:49.993144+00:00"
+   },
+   {
+    "mercado": "FUTURES",
+    "simbolo": "AVAXUSDTM",
+    "comision_tomador": "0.0006",
+    "origen": "takerFeeRate 0.00060",
+    "leida": "2026-11-23T10:47:52.390817+00:00"
+   },
+   {
+    "mercado": "FUTURES",
+    "simbolo": "BCHUSDTM",
+    "comision_tomador": "0.0006",
+    "origen": "takerFeeRate 0.00060",
+    "leida": "2026-11-23T10:47:50.538092+00:00"
+   },
+   {
+    "mercado": "FUTURES",
+    "simbolo": "ENAUSDTM",
+    "comision_tomador": "0.0006",
+    "origen": "takerFeeRate 0.00060",
+    "leida": "2026-11-23T10:47:52.918736+00:00"
+   },
+   {
+    "mercado": "FUTURES",
+    "simbolo": "ETHUSDTM",
+    "comision_tomador": "0.0006",
+    "origen": "takerFeeRate 0.00060",
+    "leida": "2026-11-23T10:47:47.650812+00:00"
+   },
+   {
+    "mercado": "FUTURES",
+    "simbolo": "EVAAUSDTM",
+    "comision_tomador": "0.0006",
+    "origen": "takerFeeRate 0.00060",
+    "leida": "2026-11-23T10:47:48.244242+00:00"
+   },
+   {
+    "mercado": "FUTURES",
+    "simbolo": "FHEUSDTM",
+    "comision_tomador": "0.0006",
+    "origen": "takerFeeRate 0.00060",
+    "leida": "2026-11-23T10:47:52.656275+00:00"
+   },
+   {
+    "mercado": "FUTURES",
+    "simbolo": "HYPEUSDTM",
+    "comision_tomador": "0.0006",
+    "origen": "takerFeeRate 0.00060",
+    "leida": "2026-11-23T10:47:49.406709+00:00"
+   },
+   {
+    "mercado": "FUTURES",
+    "simbolo": "ICPUSDTM",
+    "comision_tomador": "0.0006",
+    "origen": "takerFeeRate 0.00060",
+    "leida": "2026-11-23T10:47:50.799260+00:00"
+   },
+   {
+    "mercado": "FUTURES",
+    "simbolo": "INJUSDTM",
+    "comision_tomador": "0.0006",
+    "origen": "takerFeeRate 0.00060",
+    "leida": "2026-11-23T10:47:51.606367+00:00"
+   },
+   {
+    "mercado": "FUTURES",
+    "simbolo": "LINKUSDTM",
+    "comision_tomador": "0.0006",
+    "origen": "takerFeeRate 0.00060",
+    "leida": "2026-11-23T10:47:52.127280+00:00"
+   },
+   {
+    "mercado": "FUTURES",
+    "simbolo": "NIGHTUSDTM",
+    "comision_tomador": "0.0006",
+    "origen": "takerFeeRate 0.00060",
+    "leida": "2026-11-23T10:47:51.339370+00:00"
+   },
+   {
+    "mercado": "FUTURES",
+    "simbolo": "PEPEUSDTM",
+    "comision_tomador": "0.0006",
+    "origen": "takerFeeRate 0.00060",
+    "leida": "2026-11-23T10:47:50.255279+00:00"
+   },
+   {
+    "mercado": "FUTURES",
+    "simbolo": "PIEVERSEUSDTM",
+    "comision_tomador": "0.0006",
+    "origen": "takerFeeRate 0.00060",
+    "leida": "2026-11-23T10:47:49.715416+00:00"
+   },
+   {
+    "mercado": "FUTURES",
+    "simbolo": "SOLUSDTM",
+    "comision_tomador": "0.0006",
+    "origen": "takerFeeRate 0.00060",
+    "leida": "2026-11-23T10:47:48.542950+00:00"
+   },
+   {
+    "mercado": "FUTURES",
+    "simbolo": "SOXLUSDTM",
+    "comision_tomador": "0.0006",
+    "origen": "takerFeeRate 0.00060",
+    "leida": "2026-11-23T10:47:51.069556+00:00"
+   },
+   {
+    "mercado": "FUTURES",
+    "simbolo": "UNIUSDTM",
+    "comision_tomador": "0.0006",
+    "origen": "takerFeeRate 0.00060",
+    "leida": "2026-11-23T10:47:51.866588+00:00"
+   },
+   {
+    "mercado": "FUTURES",
+    "simbolo": "XBTUSDTM",
+    "comision_tomador": "0.0006",
+    "origen": "takerFeeRate 0.00060",
+    "leida": "2026-11-23T10:47:47.915220+00:00"
+   },
+   {
+    "mercado": "FUTURES",
+    "simbolo": "XRPUSDTM",
+    "comision_tomador": "0.0006",
+    "origen": "takerFeeRate 0.00060",
+    "leida": "2026-11-23T10:47:49.140016+00:00"
+   },
+   {
+    "mercado": "FUTURES",
+    "simbolo": "ZECUSDTM",
+    "comision_tomador": "0.0006",
+    "origen": "takerFeeRate 0.00060",
+    "leida": "2026-11-23T10:47:48.842746+00:00"
+   },
+   {
+    "mercado": "SPOT",
+    "simbolo": "ASTER-USDT",
+    "comision_tomador": "0.001",
+    "origen": "classA 0.001 x takerFeeCoefficient 1.00",
+    "leida": "2026-11-23T10:47:43.790609+00:00"
+   },
+   {
+    "mercado": "SPOT",
+    "simbolo": "AVAX-USDT",
+    "comision_tomador": "0.001",
+    "origen": "classA 0.001 x takerFeeCoefficient 1.00",
+    "leida": "2026-11-23T10:47:47.112595+00:00"
+   },
+   {
+    "mercado": "SPOT",
+    "simbolo": "BNB-USDT",
+    "comision_tomador": "0.001",
+    "origen": "classA 0.001 x takerFeeCoefficient 1.00",
+    "leida": "2026-11-23T10:47:45.748811+00:00"
+   },
+   {
+    "mercado": "SPOT",
+    "simbolo": "BTC-USDT",
+    "comision_tomador": "0.001",
+    "origen": "classA 0.001 x takerFeeCoefficient 1.00",
+    "leida": "2026-11-23T10:47:41.457480+00:00"
+   },
+   {
+    "mercado": "SPOT",
+    "simbolo": "DOGE-USDT",
+    "comision_tomador": "0.001",
+    "origen": "classA 0.001 x takerFeeCoefficient 1.00",
+    "leida": "2026-11-23T10:47:46.022685+00:00"
+   },
+   {
+    "mercado": "SPOT",
+    "simbolo": "DOT-USDT",
+    "comision_tomador": "0.001",
+    "origen": "classA 0.001 x takerFeeCoefficient 1.00",
+    "leida": "2026-11-23T10:47:46.565484+00:00"
+   },
+   {
+    "mercado": "SPOT",
+    "simbolo": "ETH-USDT",
+    "comision_tomador": "0.001",
+    "origen": "classA 0.001 x takerFeeCoefficient 1.00",
+    "leida": "2026-11-23T10:47:41.729277+00:00"
+   },
+   {
+    "mercado": "SPOT",
+    "simbolo": "EVAA-USDT",
+    "comision_tomador": "0.003",
+    "origen": "classC 0.003 x takerFeeCoefficient 1.00",
+    "leida": "2026-11-23T10:47:44.478227+00:00"
+   },
+   {
+    "mercado": "SPOT",
+    "simbolo": "LTC-USDT",
+    "comision_tomador": "0.001",
+    "origen": "classA 0.001 x takerFeeCoefficient 1.00",
+    "leida": "2026-11-23T10:47:45.480417+00:00"
+   },
+   {
+    "mercado": "SPOT",
+    "simbolo": "NEAR-USDT",
+    "comision_tomador": "0.001",
+    "origen": "classA 0.001 x takerFeeCoefficient 1.00",
+    "leida": "2026-11-23T10:47:44.787115+00:00"
+   },
+   {
+    "mercado": "SPOT",
+    "simbolo": "PEPE-USDT",
+    "comision_tomador": "0.001",
+    "origen": "classA 0.001 x takerFeeCoefficient 1.00",
+    "leida": "2026-11-23T10:47:44.081741+00:00"
+   },
+   {
+    "mercado": "SPOT",
+    "simbolo": "PIEVERSE-USDT",
+    "comision_tomador": "0.002",
+    "origen": "classB 0.002 x takerFeeCoefficient 1.00",
+    "leida": "2026-11-23T10:47:46.288262+00:00"
+   },
+   {
+    "mercado": "SPOT",
+    "simbolo": "SOL-USDT",
+    "comision_tomador": "0.001",
+    "origen": "classA 0.001 x takerFeeCoefficient 1.00",
+    "leida": "2026-11-23T10:47:43.248381+00:00"
+   },
+   {
+    "mercado": "SPOT",
+    "simbolo": "SUI-USDT",
+    "comision_tomador": "0.001",
+    "origen": "classA 0.001 x takerFeeCoefficient 1.00",
+    "leida": "2026-11-23T10:47:46.835457+00:00"
+   },
+   {
+    "mercado": "SPOT",
+    "simbolo": "TAO-USDT",
+    "comision_tomador": "0.001",
+    "origen": "classA 0.001 x takerFeeCoefficient 1.00",
+    "leida": "2026-11-23T10:47:45.190432+00:00"
+   },
+   {
+    "mercado": "SPOT",
+    "simbolo": "UNI-USDT",
+    "comision_tomador": "0.001",
+    "origen": "classA 0.001 x takerFeeCoefficient 1.00",
+    "leida": "2026-11-23T10:47:47.377325+00:00"
+   },
+   {
+    "mercado": "SPOT",
+    "simbolo": "XLM-USDT",
+    "comision_tomador": "0.001",
+    "origen": "classA 0.001 x takerFeeCoefficient 1.00",
+    "leida": "2026-11-23T10:47:42.500483+00:00"
+   },
+   {
+    "mercado": "SPOT",
+    "simbolo": "XMR-USDT",
+    "comision_tomador": "0.001",
+    "origen": "classA 0.001 x takerFeeCoefficient 1.00",
+    "leida": "2026-11-23T10:47:42.922244+00:00"
+   },
+   {
+    "mercado": "SPOT",
+    "simbolo": "XRP-USDT",
+    "comision_tomador": "0.001",
+    "origen": "classA 0.001 x takerFeeCoefficient 1.00",
+    "leida": "2026-11-23T10:47:42.023267+00:00"
+   },
+   {
+    "mercado": "SPOT",
+    "simbolo": "ZEC-USDT",
+    "comision_tomador": "0.001",
+    "origen": "classA 0.001 x takerFeeCoefficient 1.00",
+    "leida": "2026-11-23T10:47:43.519823+00:00"
+   }
+  ],
+  "deslizamiento": "0.0005",
+  "prueba_de_esfuerzo": "comisión y deslizamiento por 2",
+  "funding": "sin funding (§12.4.4)"
+ },
+ "cobertura": [
+  {
+   "mercado": "FUTURES",
+   "simbolo": "ASTERUSDTM",
+   "presentes": 182680,
+   "minutos": 632160,
+   "dias_no_validos": []
+  },
+  {
+   "mercado": "FUTURES",
+   "simbolo": "AVAXUSDTM",
+   "presentes": 489033,
+   "minutos": 632160,
+   "dias_no_validos": []
+  },
+  {
+   "mercado": "FUTURES",
+   "simbolo": "BCHUSDTM",
+   "presentes": 465180,
+   "minutos": 632160,
+   "dias_no_validos": []
+  },
+  {
+   "mercado": "FUTURES",
+   "simbolo": "ENAUSDTM",
+   "presentes": 531239,
+   "minutos": 632160,
+   "dias_no_validos": []
+  },
+  {
+   "mercado": "FUTURES",
+   "simbolo": "ETHUSDTM",
+   "presentes": 569038,
+   "minutos": 632160,
+   "dias_no_validos": []
+  },
+  {
+   "mercado": "FUTURES",
+   "simbolo": "EVAAUSDTM",
+   "presentes": 173150,
+   "minutos": 632160,
+   "dias_no_validos": []
+  },
+  {
+   "mercado": "FUTURES",
+   "simbolo": "FHEUSDTM",
+   "presentes": 75477,
+   "minutos": 632160,
+   "dias_no_validos": []
+  },
+  {
+   "mercado": "FUTURES",
+   "simbolo": "HYPEUSDTM",
+   "presentes": 539115,
+   "minutos": 632160,
+   "dias_no_validos": []
+  },
+  {
+   "mercado": "FUTURES",
+   "simbolo": "ICPUSDTM",
+   "presentes": 453547,
+   "minutos": 632160,
+   "dias_no_validos": []
+  },
+  {
+   "mercado": "FUTURES",
+   "simbolo": "INJUSDTM",
+   "presentes": 509944,
+   "minutos": 632160,
+   "dias_no_validos": []
+  },
+  {
+   "mercado": "FUTURES",
+   "simbolo": "LINKUSDTM",
+   "presentes": 559145,
+   "minutos": 632160,
+   "dias_no_validos": []
+  },
+  {
+   "mercado": "FUTURES",
+   "simbolo": "NIGHTUSDTM",
+   "presentes": 73280,
+   "minutos": 632160,
+   "dias_no_validos": []
+  },
+  {
+   "mercado": "FUTURES",
+   "simbolo": "PEPEUSDTM",
+   "presentes": 568306,
+   "minutos": 632160,
+   "dias_no_validos": []
+  },
+  {
+   "mercado": "FUTURES",
+   "simbolo": "PIEVERSEUSDTM",
+   "presentes": 74445,
+   "minutos": 632160,
+   "dias_no_validos": []
+  },
+  {
+   "mercado": "FUTURES",
+   "simbolo": "SOLUSDTM",
+   "presentes": 569832,
+   "minutos": 632160,
+   "dias_no_validos": []
+  },
+  {
+   "mercado": "FUTURES",
+   "simbolo": "SOXLUSDTM",
+   "presentes": 0,
+   "minutos": 632160,
+   "dias_no_validos": []
+  },
+  {
+   "mercado": "FUTURES",
+   "simbolo": "UNIUSDTM",
+   "presentes": 462679,
+   "minutos": 632160,
+   "dias_no_validos": []
+  },
+  {
+   "mercado": "FUTURES",
+   "simbolo": "XBTUSDTM",
+   "presentes": 566630,
+   "minutos": 632160,
+   "dias_no_validos": []
+  },
+  {
+   "mercado": "FUTURES",
+   "simbolo": "XRPUSDTM",
+   "presentes": 568307,
+   "minutos": 632160,
+   "dias_no_validos": []
+  },
+  {
+   "mercado": "FUTURES",
+   "simbolo": "ZECUSDTM",
+   "presentes": 408316,
+   "minutos": 632160,
+   "dias_no_validos": []
+  },
+  {
+   "mercado": "SPOT",
+   "simbolo": "ASTER-USDT",
+   "presentes": 186660,
+   "minutos": 632160,
+   "dias_no_validos": []
+  },
+  {
+   "mercado": "SPOT",
+   "simbolo": "AVAX-USDT",
+   "presentes": 632160,
+   "minutos": 632160,
+   "dias_no_validos": []
+  },
+  {
+   "mercado": "SPOT",
+   "simbolo": "BNB-USDT",
+   "presentes": 632160,
+   "minutos": 632160,
+   "dias_no_validos": []
+  },
+  {
+   "mercado": "SPOT",
+   "simbolo": "BTC-USDT",
+   "presentes": 632160,
+   "minutos": 632160,
+   "dias_no_validos": []
+  },
+  {
+   "mercado": "SPOT",
+   "simbolo": "DOGE-USDT",
+   "presentes": 632160,
+   "minutos": 632160,
+   "dias_no_validos": []
+  },
+  {
+   "mercado": "SPOT",
+   "simbolo": "DOT-USDT",
+   "presentes": 632160,
+   "minutos": 632160,
+   "dias_no_validos": []
+  },
+  {
+   "mercado": "SPOT",
+   "simbolo": "ETH-USDT",
+   "presentes": 632160,
+   "minutos": 632160,
+   "dias_no_validos": []
+  },
+  {
+   "mercado": "SPOT",
+   "simbolo": "EVAA-USDT",
+   "presentes": 0,
+   "minutos": 632160,
+   "dias_no_validos": []
+  },
+  {
+   "mercado": "SPOT",
+   "simbolo": "LTC-USDT",
+   "presentes": 632160,
+   "minutos": 632160,
+   "dias_no_validos": []
+  },
+  {
+   "mercado": "SPOT",
+   "simbolo": "NEAR-USDT",
+   "presentes": 632160,
+   "minutos": 632160,
+   "dias_no_validos": []
+  },
+  {
+   "mercado": "SPOT",
+   "simbolo": "PEPE-USDT",
+   "presentes": 632160,
+   "minutos": 632160,
+   "dias_no_validos": []
+  },
+  {
+   "mercado": "SPOT",
+   "simbolo": "PIEVERSE-USDT",
+   "presentes": 0,
+   "minutos": 632160,
+   "dias_no_validos": []
+  },
+  {
+   "mercado": "SPOT",
+   "simbolo": "SOL-USDT",
+   "presentes": 632160,
+   "minutos": 632160,
+   "dias_no_validos": []
+  },
+  {
+   "mercado": "SPOT",
+   "simbolo": "SUI-USDT",
+   "presentes": 632160,
+   "minutos": 632160,
+   "dias_no_validos": []
+  },
+  {
+   "mercado": "SPOT",
+   "simbolo": "TAO-USDT",
+   "presentes": 632160,
+   "minutos": 632160,
+   "dias_no_validos": []
+  },
+  {
+   "mercado": "SPOT",
+   "simbolo": "UNI-USDT",
+   "presentes": 632160,
+   "minutos": 632160,
+   "dias_no_validos": []
+  },
+  {
+   "mercado": "SPOT",
+   "simbolo": "XLM-USDT",
+   "presentes": 632160,
+   "minutos": 632160,
+   "dias_no_validos": []
+  },
+  {
+   "mercado": "SPOT",
+   "simbolo": "XMR-USDT",
+   "presentes": 632160,
+   "minutos": 632160,
+   "dias_no_validos": []
+  },
+  {
+   "mercado": "SPOT",
+   "simbolo": "XRP-USDT",
+   "presentes": 632160,
+   "minutos": 632160,
+   "dias_no_validos": []
+  },
+  {
+   "mercado": "SPOT",
+   "simbolo": "ZEC-USDT",
+   "presentes": 632160,
+   "minutos": 632160,
+   "dias_no_validos": []
+  }
+ ],
+ "total": {
+  "recuentos": {
+   "senales": {
+    "largos": 796,
+    "cortos": 50
+   },
+   "decisiones": 376,
+   "ejecutadas": 318,
+   "operaciones": 318,
+   "caducadas": {
+    "caduca_vela_no_utilizable": 0,
+    "caduca_contexto": 2,
+    "caduca_sin_disparo": 468
+   },
+   "no_ejecutadas": {
+    "ocupado": 58,
+    "opuestas": 0,
+    "fin_de_ventana": 0,
+    "posicion_tomada": 0,
+    "caduca_sin_minuto": 0,
+    "no_entra": 0
+   }
+  },
+  "resultados": {
+   "bruto": {
+    "operaciones": 318,
+    "positivas": 96,
+    "media": -0.0841184300781582,
+    "mediana": -0.8715588732469127,
+    "suma": -26.749660764854305,
+    "peor": -1.014339572073805,
+    "mejor": 17.269929762984486,
+    "caida_maxima": 39.88145100989642
+   },
+   "neto": {
+    "operaciones": 318,
+    "positivas": 85,
+    "media": -0.21513005069342156,
+    "mediana": -0.9301277501245622,
+    "suma": -68.41135612050806,
+    "peor": -1.6617806680778244,
+    "mejor": 16.994601179408626,
+    "caida_maxima": 71.81097173127834
+   },
+   "neto_costes_dobles": {
+    "operaciones": 318,
+    "positivas": 84,
+    "media": -0.34614173239628254,
+    "mediana": -1.07374077981938,
+    "suma": -110.07307090201785,
+    "peor": -2.3235623361556765,
+    "mejor": 16.719289865762487,
+    "caida_maxima": 112.6325110168609
+   }
+  },
+  "regimen": {
+   "contexto": {
+    "tendencia/expansion": {
+     "operaciones": 82,
+     "r_bruto_medio": -0.03193163567609411,
+     "r_neto_medio": -0.13602308097623145
+    },
+    "tendencia/compresion": {
+     "operaciones": 38,
+     "r_bruto_medio": 0.07838696843989335,
+     "r_neto_medio": -0.09697391166616802
+    },
+    "tendencia/normal": {
+     "operaciones": 148,
+     "r_bruto_medio": -0.11067882888602085,
+     "r_neto_medio": -0.2636391012208965
+    },
+    "tendencia/sin_etiqueta": {
+     "operaciones": 50,
+     "r_bruto_medio": -0.214590095299989,
+     "r_neto_medio": -0.2910773571290004
+    }
+   },
+   "senal": {
+    "tendencia/expansion": {
+     "operaciones": 30,
+     "r_bruto_medio": -0.403936687276595,
+     "r_neto_medio": -0.5223049450689281
+    },
+    "tendencia/compresion": {
+     "operaciones": 25,
+     "r_bruto_medio": 0.1972633389302081,
+     "r_neto_medio": 0.08822485025279636
+    },
+    "tendencia/normal": {
+     "operaciones": 37,
+     "r_bruto_medio": 0.08635009507727653,
+     "r_neto_medio": -0.05206059583662565
+    },
+    "rango/expansion": {
+     "operaciones": 23,
+     "r_bruto_medio": -0.2735523211513948,
+     "r_neto_medio": -0.38975660339688883
+    },
+    "rango/compresion": {
+     "operaciones": 68,
+     "r_bruto_medio": -0.07054963687664928,
+     "r_neto_medio": -0.21869946412971258
+    },
+    "rango/normal": {
+     "operaciones": 66,
+     "r_bruto_medio": 0.02529569829647193,
+     "r_neto_medio": -0.1070875717345759
+    },
+    "transicion/expansion": {
+     "operaciones": 15,
+     "r_bruto_medio": -0.5453835779208672,
+     "r_neto_medio": -0.6498637611259466
+    },
+    "transicion/compresion": {
+     "operaciones": 20,
+     "r_bruto_medio": -0.5562533225887374,
+     "r_neto_medio": -0.6784951417834202
+    },
+    "transicion/normal": {
+     "operaciones": 34,
+     "r_bruto_medio": 0.17550839968952797,
+     "r_neto_medio": 0.035294630799515586
+    }
+   }
+  },
+  "salidas": {
+   "stop": 317,
+   "objetivo": 0,
+   "invalidacion": 1,
+   "tiempo": 0,
+   "liquidacion_fin_de_ventana": 0
+  },
+  "solo_rest": {
+   "decisiones": {
+    "minutos": 30856005,
+    "solo_rest": 30856005
+   },
+   "resultados": {
+    "minutos": 31240893,
+    "solo_rest": 31240893
+   }
+  }
+ },
+ "por_tramo": {
+  "tramo 1": {
+   "recuentos": {
+    "senales": {
+     "largos": 137,
+     "cortos": 5
+    },
+    "decisiones": 59,
+    "ejecutadas": 51,
+    "operaciones": 51,
+    "caducadas": {
+     "caduca_vela_no_utilizable": 0,
+     "caduca_contexto": 0,
+     "caduca_sin_disparo": 83
+    },
+    "no_ejecutadas": {
+     "ocupado": 8,
+     "opuestas": 0,
+     "fin_de_ventana": 0,
+     "posicion_tomada": 0,
+     "caduca_sin_minuto": 0,
+     "no_entra": 0
+    }
+   },
+   "resultados": {
+    "bruto": {
+     "operaciones": 51,
+     "positivas": 14,
+     "media": -0.29268091771118293,
+     "mediana": -1.0,
+     "suma": -14.926726803270329,
+     "peor": -1.0004260095232116,
+     "mejor": 3.7214723294879426,
+     "caida_maxima": 19.16652214976316
+    },
+    "neto": {
+     "operaciones": 51,
+     "positivas": 12,
+     "media": -0.39776259864130104,
+     "mediana": -1.042404687478545,
+     "suma": -20.285892530706352,
+     "peor": -1.2884430695439053,
+     "mejor": 3.5731129601839995,
+     "caida_maxima": 23.68550814147662
+    },
+    "neto_costes_dobles": {
+     "operaciones": 51,
+     "positivas": 12,
+     "media": -0.5028445440039111,
+     "mediana": -1.0977293084583217,
+     "suma": -25.645071744199466,
+     "peor": -1.5768871390878103,
+     "mejor": 3.424757312352386,
+     "caida_maxima": 28.204511859042505
+    }
+   },
+   "regimen": {
+    "contexto": {
+     "tendencia/expansion": {
+      "operaciones": 3,
+      "r_bruto_medio": -1.0,
+      "r_neto_medio": -1.0515802692530989
+     },
+     "tendencia/compresion": {
+      "operaciones": 5,
+      "r_bruto_medio": -0.7663610521864371,
+      "r_neto_medio": -0.9155680084267264
+     },
+     "tendencia/normal": {
+      "operaciones": 19,
+      "r_bruto_medio": -0.39755133855976377,
+      "r_neto_medio": -0.5378474566637044
+     },
+     "tendencia/sin_etiqueta": {
+      "operaciones": 24,
+      "r_bruto_medio": -0.02256025457094296,
+      "r_neto_medio": -0.09725875017512663
+     }
+    },
+    "senal": {
+     "tendencia/expansion": {
+      "operaciones": 4,
+      "r_bruto_medio": -0.8076749996906741,
+      "r_neto_medio": -0.880729772747017
+     },
+     "tendencia/compresion": {
+      "operaciones": 4,
+      "r_bruto_medio": -0.5849428384335953,
+      "r_neto_medio": -0.6732599570147922
+     },
+     "tendencia/normal": {
+      "operaciones": 4,
+      "r_bruto_medio": 0.22370065759105004,
+      "r_neto_medio": 0.1409070629663306
+     },
+     "rango/expansion": {
+      "operaciones": 5,
+      "r_bruto_medio": 0.060982031469107856,
+      "r_neto_medio": -0.03414773941149911
+     },
+     "rango/compresion": {
+      "operaciones": 17,
+      "r_bruto_medio": -0.4798200685431838,
+      "r_neto_medio": -0.6110747842198601
+     },
+     "rango/normal": {
+      "operaciones": 7,
+      "r_bruto_medio": 0.15252129412268703,
+      "r_neto_medio": 0.027987985908761958
+     },
+     "transicion/expansion": {
+      "operaciones": 1,
+      "r_bruto_medio": -1.0,
+      "r_neto_medio": -1.042404687478545
+     },
+     "transicion/compresion": {
+      "operaciones": 7,
+      "r_bruto_medio": -0.06666801887252494,
+      "r_neto_medio": -0.15843765206843238
+     },
+     "transicion/normal": {
+      "operaciones": 2,
+      "r_bruto_medio": -1.0,
+      "r_neto_medio": -1.059499742066541
+     }
+    }
+   },
+   "salidas": {
+    "stop": 51,
+    "objetivo": 0,
+    "invalidacion": 0,
+    "tiempo": 0,
+    "liquidacion_fin_de_ventana": 0
+   },
+   "solo_rest": {
+    "decisiones": {
+     "minutos": 2408070,
+     "solo_rest": 2408070
+    },
+    "resultados": {
+     "minutos": 2466116,
+     "solo_rest": 2466116
+    }
+   }
+  },
+  "tramo 2": {
+   "recuentos": {
+    "senales": {
+     "largos": 228,
+     "cortos": 12
+    },
+    "decisiones": 107,
+    "ejecutadas": 89,
+    "operaciones": 89,
+    "caducadas": {
+     "caduca_vela_no_utilizable": 0,
+     "caduca_contexto": 1,
+     "caduca_sin_disparo": 132
+    },
+    "no_ejecutadas": {
+     "ocupado": 18,
+     "opuestas": 0,
+     "fin_de_ventana": 0,
+     "posicion_tomada": 0,
+     "caduca_sin_minuto": 0,
+     "no_entra": 0
+    }
+   },
+   "resultados": {
+    "bruto": {
+     "operaciones": 89,
+     "positivas": 22,
+     "media": -0.16612529331815862,
+     "mediana": -0.9044028218518279,
+     "suma": -14.785151105316116,
+     "peor": -1.0,
+     "mejor": 17.269929762984486,
+     "caida_maxima": 16.945396931505407
+    },
+    "neto": {
+     "operaciones": 89,
+     "positivas": 19,
+     "media": -0.2875599377028177,
+     "mediana": -1.056692767144691,
+     "suma": -25.592834455550772,
+     "peor": -1.4201537272560816,
+     "mejor": 16.994601179408626,
+     "caida_maxima": 25.59283445555076
+    },
+    "neto_costes_dobles": {
+     "operaciones": 89,
+     "positivas": 19,
+     "media": -0.40899471765513595,
+     "mediana": -1.1232164311706567,
+     "suma": -36.4005298713071,
+     "peor": -1.8403084545121846,
+     "mejor": 16.719289865762487,
+     "caida_maxima": 36.40052987130711
+    }
+   },
+   "regimen": {
+    "contexto": {
+     "tendencia/expansion": {
+      "operaciones": 17,
+      "r_bruto_medio": -0.46420911058175224,
+      "r_neto_medio": -0.5634780472664487
+     },
+     "tendencia/compresion": {
+      "operaciones": 19,
+      "r_bruto_medio": 0.2378266808228476,
+      "r_neto_medio": 0.05794976391305513
+     },
+     "tendencia/normal": {
+      "operaciones": 47,
+      "r_bruto_medio": -0.11943039179117197,
+      "r_neto_medio": -0.23075239353731974
+     },
+     "tendencia/sin_etiqueta": {
+      "operaciones": 6,
+      "r_bruto_medio": -0.9665124578125582,
+      "r_neto_medio": -1.0448984450191943
+     }
+    },
+    "senal": {
+     "tendencia/expansion": {
+      "operaciones": 8,
+      "r_bruto_medio": -0.5217420960566416,
+      "r_neto_medio": -0.6188594961047604
+     },
+     "tendencia/compresion": {
+      "operaciones": 7,
+      "r_bruto_medio": -0.08747336254548319,
+      "r_neto_medio": -0.19407601174327457
+     },
+     "tendencia/normal": {
+      "operaciones": 10,
+      "r_bruto_medio": -0.46023382245341793,
+      "r_neto_medio": -0.5548300362445604
+     },
+     "rango/expansion": {
+      "operaciones": 4,
+      "r_bruto_medio": -0.44628436434690133,
+      "r_neto_medio": -0.5284487197199856
+     },
+     "rango/compresion": {
+      "operaciones": 19,
+      "r_bruto_medio": -0.47301392164691203,
+      "r_neto_medio": -0.6059433416965531
+     },
+     "rango/normal": {
+      "operaciones": 19,
+      "r_bruto_medio": 0.6143442148477456,
+      "r_neto_medio": 0.4980343437657665
+     },
+     "transicion/expansion": {
+      "operaciones": 5,
+      "r_bruto_medio": -0.24681487928608048,
+      "r_neto_medio": -0.37967804751624074
+     },
+     "transicion/compresion": {
+      "operaciones": 5,
+      "r_bruto_medio": -1.0,
+      "r_neto_medio": -1.1726357644635805
+     },
+     "transicion/normal": {
+      "operaciones": 12,
+      "r_bruto_medio": -0.005218857625687787,
+      "r_neto_medio": -0.15079092855001427
+     }
+    }
+   },
+   "salidas": {
+    "stop": 88,
+    "objetivo": 0,
+    "invalidacion": 1,
+    "tiempo": 0,
+    "liquidacion_fin_de_ventana": 0
+   },
+   "solo_rest": {
+    "decisiones": {
+     "minutos": 9682395,
+     "solo_rest": 9682395
+    },
+    "resultados": {
+     "minutos": 9795708,
+     "solo_rest": 9795708
+    }
+   }
+  },
+  "tramo 3": {
+   "recuentos": {
+    "senales": {
+     "largos": 286,
+     "cortos": 8
+    },
+    "decisiones": 142,
+    "ejecutadas": 120,
+    "operaciones": 120,
+    "caducadas": {
+     "caduca_vela_no_utilizable": 0,
+     "caduca_contexto": 1,
+     "caduca_sin_disparo": 151
+    },
+    "no_ejecutadas": {
+     "ocupado": 22,
+     "opuestas": 0,
+     "fin_de_ventana": 0,
+     "posicion_tomada": 0,
+     "caduca_sin_minuto": 0,
+     "no_entra": 0
+    }
+   },
+   "resultados": {
+    "bruto": {
+     "operaciones": 120,
+     "positivas": 42,
+     "media": 0.037691513762639205,
+     "mediana": -0.6437166811596046,
+     "suma": 4.522981651516704,
+     "peor": -1.014339572073805,
+     "mejor": 6.205884737894116,
+     "caida_maxima": 20.07683056225932
+    },
+    "neto": {
+     "operaciones": 120,
+     "positivas": 38,
+     "media": -0.11274863812136397,
+     "mediana": -0.764004914995073,
+     "suma": -13.529836574563676,
+     "peor": -1.6617806680778244,
+     "mejor": 6.08440898828536,
+     "caida_maxima": 28.215142921029436
+    },
+    "neto_costes_dobles": {
+     "operaciones": 120,
+     "positivas": 37,
+     "media": -0.26318872937660376,
+     "mediana": -0.8771104375108867,
+     "suma": -31.58264752519245,
+     "peor": -2.3235623361556765,
+     "mejor": 5.962939444561339,
+     "caida_maxima": 38.77973771673018
+    }
+   },
+   "regimen": {
+    "contexto": {
+     "tendencia/expansion": {
+      "operaciones": 48,
+      "r_bruto_medio": 0.10017084631562978,
+      "r_neto_medio": -0.010167660334213223
+     },
+     "tendencia/compresion": {
+      "operaciones": 8,
+      "r_bruto_medio": 0.37453367400970905,
+      "r_neto_medio": 0.15761581630776625
+     },
+     "tendencia/normal": {
+      "operaciones": 57,
+      "r_bruto_medio": 0.045608568134231725,
+      "r_neto_medio": -0.13833306780276694
+     },
+     "tendencia/sin_etiqueta": {
+      "operaciones": 7,
+      "r_bruto_medio": -0.8401681067660579,
+      "r_neto_medio": -0.9168186491751223
+     }
+    },
+    "senal": {
+     "tendencia/expansion": {
+      "operaciones": 13,
+      "r_bruto_medio": -0.2706977019599666,
+      "r_neto_medio": -0.40380955572000704
+     },
+     "tendencia/compresion": {
+      "operaciones": 9,
+      "r_bruto_medio": 0.2967737087834811,
+      "r_neto_medio": 0.16607257600237316
+     },
+     "tendencia/normal": {
+      "operaciones": 19,
+      "r_bruto_medio": 0.57381521642259,
+      "r_neto_medio": 0.4202514428140275
+     },
+     "rango/expansion": {
+      "operaciones": 9,
+      "r_bruto_medio": -0.12378800278753145,
+      "r_neto_medio": -0.23627617942630808
+     },
+     "rango/compresion": {
+      "operaciones": 22,
+      "r_bruto_medio": 0.2307365328774966,
+      "r_neto_medio": 0.054551242464993877
+     },
+     "rango/normal": {
+      "operaciones": 23,
+      "r_bruto_medio": -0.08492996599979227,
+      "r_neto_medio": -0.2718373218323946
+     },
+     "transicion/expansion": {
+      "operaciones": 6,
+      "r_bruto_medio": -0.6273992037293215,
+      "r_neto_medio": -0.6987346590352829
+     },
+     "transicion/compresion": {
+      "operaciones": 6,
+      "r_bruto_medio": -0.9593210327986076,
+      "r_neto_medio": -1.0661930485250575
+     },
+     "transicion/normal": {
+      "operaciones": 13,
+      "r_bruto_medio": 0.1523229403739526,
+      "r_neto_medio": 0.0006492292632737992
+     }
+    }
+   },
+   "salidas": {
+    "stop": 120,
+    "objetivo": 0,
+    "invalidacion": 0,
+    "tiempo": 0,
+    "liquidacion_fin_de_ventana": 0
+   },
+   "solo_rest": {
+    "decisiones": {
+     "minutos": 13043640,
+     "solo_rest": 13043640
+    },
+    "resultados": {
+     "minutos": 13193080,
+     "solo_rest": 13193080
+    }
+   }
+  },
+  "tramo 4": {
+   "recuentos": {
+    "senales": {
+     "largos": 145,
+     "cortos": 25
+    },
+    "decisiones": 68,
+    "ejecutadas": 58,
+    "operaciones": 58,
+    "caducadas": {
+     "caduca_vela_no_utilizable": 0,
+     "caduca_contexto": 0,
+     "caduca_sin_disparo": 102
+    },
+    "no_ejecutadas": {
+     "ocupado": 10,
+     "opuestas": 0,
+     "fin_de_ventana": 0,
+     "posicion_tomada": 0,
+     "caduca_sin_minuto": 0,
+     "no_entra": 0
+    }
+   },
+   "resultados": {
+    "bruto": {
+     "operaciones": 58,
+     "positivas": 18,
+     "media": -0.026909732892837348,
+     "mediana": -0.9907041675974556,
+     "suma": -1.5607645077845662,
+     "peor": -1.0,
+     "mejor": 10.379976889293099,
+     "caida_maxima": 14.385399114104704
+    },
+    "neto": {
+     "operaciones": 58,
+     "positivas": 16,
+     "media": -0.15522056137391835,
+     "mediana": -1.047875705010795,
+     "suma": -9.002792559687265,
+     "peor": -1.4301932749032882,
+     "mejor": 10.2695871534136,
+     "caida_maxima": 20.30921330236718
+    },
+    "neto_costes_dobles": {
+     "operaciones": 58,
+     "positivas": 16,
+     "media": -0.28353140967791096,
+     "mediana": -1.1075035811430558,
+     "suma": -16.444821761318835,
+     "peor": -1.8603875498065539,
+     "mejor": 10.159207797510987,
+     "caida_maxima": 26.23304087392097
+    }
+   },
+   "regimen": {
+    "contexto": {
+     "tendencia/expansion": {
+      "operaciones": 14,
+      "r_bruto_medio": 0.24749715223570298,
+      "r_neto_medio": 0.14771590480572713
+     },
+     "tendencia/compresion": {
+      "operaciones": 6,
+      "r_bruto_medio": -0.11741104434394056,
+      "r_neto_medio": -0.24485677433182176
+     },
+     "tendencia/normal": {
+      "operaciones": 25,
+      "r_bruto_medio": -0.23253804847846804,
+      "r_neto_medio": -0.4027655177228222
+     },
+     "tendencia/sin_etiqueta": {
+      "operaciones": 13,
+      "r_bruto_medio": 0.11478406453391819,
+      "r_neto_medio": 0.03595872016108012
+     }
+    },
+    "senal": {
+     "tendencia/expansion": {
+      "operaciones": 5,
+      "r_bruto_medio": -0.23887874512049107,
+      "r_neto_medio": -0.38916581357632013
+     },
+     "tendencia/compresion": {
+      "operaciones": 5,
+      "r_bruto_medio": 1.042540997151327,
+      "r_neto_medio": 0.9525079965121284
+     },
+     "tendencia/normal": {
+      "operaciones": 4,
+      "r_bruto_medio": -1.0,
+      "r_neto_medio": -1.2315868372103478
+     },
+     "rango/expansion": {
+      "operaciones": 5,
+      "r_bruto_medio": -0.739476812270446,
+      "r_neto_medio": -0.9106765374708466
+     },
+     "rango/compresion": {
+      "operaciones": 10,
+      "r_bruto_medio": 0.7270626645608377,
+      "r_neto_medio": 0.5829503928921811
+     },
+     "rango/normal": {
+      "operaciones": 17,
+      "r_bruto_medio": -0.5363108138472711,
+      "r_neto_medio": -0.6161229273675195
+     },
+     "transicion/expansion": {
+      "operaciones": 3,
+      "r_bruto_medio": -0.7274280166688926,
+      "r_neto_medio": -0.8715845125392513
+     },
+     "transicion/compresion": {
+      "operaciones": 2,
+      "r_bruto_medio": 0.048767938562285784,
+      "r_neto_medio": -0.10025107886056467
+     },
+     "transicion/normal": {
+      "operaciones": 7,
+      "r_bruto_medio": 0.8642448080129743,
+      "r_neto_medio": 0.7314382990706034
+     }
+    }
+   },
+   "salidas": {
+    "stop": 58,
+    "objetivo": 0,
+    "invalidacion": 0,
+    "tiempo": 0,
+    "liquidacion_fin_de_ventana": 0
+   },
+   "solo_rest": {
+    "decisiones": {
+     "minutos": 5721900,
+     "solo_rest": 5721900
+    },
+    "resultados": {
+     "minutos": 5785989,
+     "solo_rest": 5785989
+    }
+   }
+  }
+ },
+ "tramos_con_r_neto_positivo": [],
+ "por_instrumento": {
+  "FUTURES ASTERUSDTM": {
+   "recuentos": {
+    "senales": {
+     "largos": 0,
+     "cortos": 0
+    },
+    "decisiones": 0,
+    "ejecutadas": 0,
+    "operaciones": 0,
+    "caducadas": {
+     "caduca_vela_no_utilizable": 0,
+     "caduca_contexto": 0,
+     "caduca_sin_disparo": 0
+    },
+    "no_ejecutadas": {
+     "ocupado": 0,
+     "opuestas": 0,
+     "fin_de_ventana": 0,
+     "posicion_tomada": 0,
+     "caduca_sin_minuto": 0,
+     "no_entra": 0
+    }
+   },
+   "resultados": {
+    "bruto": {
+     "operaciones": 0,
+     "positivas": 0,
+     "media": null,
+     "mediana": null,
+     "suma": 0.0,
+     "peor": null,
+     "mejor": null,
+     "caida_maxima": 0.0
+    },
+    "neto": {
+     "operaciones": 0,
+     "positivas": 0,
+     "media": null,
+     "mediana": null,
+     "suma": 0.0,
+     "peor": null,
+     "mejor": null,
+     "caida_maxima": 0.0
+    },
+    "neto_costes_dobles": {
+     "operaciones": 0,
+     "positivas": 0,
+     "media": null,
+     "mediana": null,
+     "suma": 0.0,
+     "peor": null,
+     "mejor": null,
+     "caida_maxima": 0.0
+    }
+   },
+   "regimen": {
+    "contexto": {},
+    "senal": {}
+   },
+   "salidas": {
+    "stop": 0,
+    "objetivo": 0,
+    "invalidacion": 0,
+    "tiempo": 0,
+    "liquidacion_fin_de_ventana": 0
+   },
+   "solo_rest": {
+    "decisiones": {
+     "minutos": 0,
+     "solo_rest": 0
+    },
+    "resultados": {
+     "minutos": 0,
+     "solo_rest": 0
+    }
+   }
+  },
+  "FUTURES AVAXUSDTM": {
+   "recuentos": {
+    "senales": {
+     "largos": 0,
+     "cortos": 0
+    },
+    "decisiones": 0,
+    "ejecutadas": 0,
+    "operaciones": 0,
+    "caducadas": {
+     "caduca_vela_no_utilizable": 0,
+     "caduca_contexto": 0,
+     "caduca_sin_disparo": 0
+    },
+    "no_ejecutadas": {
+     "ocupado": 0,
+     "opuestas": 0,
+     "fin_de_ventana": 0,
+     "posicion_tomada": 0,
+     "caduca_sin_minuto": 0,
+     "no_entra": 0
+    }
+   },
+   "resultados": {
+    "bruto": {
+     "operaciones": 0,
+     "positivas": 0,
+     "media": null,
+     "mediana": null,
+     "suma": 0.0,
+     "peor": null,
+     "mejor": null,
+     "caida_maxima": 0.0
+    },
+    "neto": {
+     "operaciones": 0,
+     "positivas": 0,
+     "media": null,
+     "mediana": null,
+     "suma": 0.0,
+     "peor": null,
+     "mejor": null,
+     "caida_maxima": 0.0
+    },
+    "neto_costes_dobles": {
+     "operaciones": 0,
+     "positivas": 0,
+     "media": null,
+     "mediana": null,
+     "suma": 0.0,
+     "peor": null,
+     "mejor": null,
+     "caida_maxima": 0.0
+    }
+   },
+   "regimen": {
+    "contexto": {},
+    "senal": {}
+   },
+   "salidas": {
+    "stop": 0,
+    "objetivo": 0,
+    "invalidacion": 0,
+    "tiempo": 0,
+    "liquidacion_fin_de_ventana": 0
+   },
+   "solo_rest": {
+    "decisiones": {
+     "minutos": 0,
+     "solo_rest": 0
+    },
+    "resultados": {
+     "minutos": 0,
+     "solo_rest": 0
+    }
+   }
+  },
+  "FUTURES BCHUSDTM": {
+   "recuentos": {
+    "senales": {
+     "largos": 0,
+     "cortos": 0
+    },
+    "decisiones": 0,
+    "ejecutadas": 0,
+    "operaciones": 0,
+    "caducadas": {
+     "caduca_vela_no_utilizable": 0,
+     "caduca_contexto": 0,
+     "caduca_sin_disparo": 0
+    },
+    "no_ejecutadas": {
+     "ocupado": 0,
+     "opuestas": 0,
+     "fin_de_ventana": 0,
+     "posicion_tomada": 0,
+     "caduca_sin_minuto": 0,
+     "no_entra": 0
+    }
+   },
+   "resultados": {
+    "bruto": {
+     "operaciones": 0,
+     "positivas": 0,
+     "media": null,
+     "mediana": null,
+     "suma": 0.0,
+     "peor": null,
+     "mejor": null,
+     "caida_maxima": 0.0
+    },
+    "neto": {
+     "operaciones": 0,
+     "positivas": 0,
+     "media": null,
+     "mediana": null,
+     "suma": 0.0,
+     "peor": null,
+     "mejor": null,
+     "caida_maxima": 0.0
+    },
+    "neto_costes_dobles": {
+     "operaciones": 0,
+     "positivas": 0,
+     "media": null,
+     "mediana": null,
+     "suma": 0.0,
+     "peor": null,
+     "mejor": null,
+     "caida_maxima": 0.0
+    }
+   },
+   "regimen": {
+    "contexto": {},
+    "senal": {}
+   },
+   "salidas": {
+    "stop": 0,
+    "objetivo": 0,
+    "invalidacion": 0,
+    "tiempo": 0,
+    "liquidacion_fin_de_ventana": 0
+   },
+   "solo_rest": {
+    "decisiones": {
+     "minutos": 0,
+     "solo_rest": 0
+    },
+    "resultados": {
+     "minutos": 0,
+     "solo_rest": 0
+    }
+   }
+  },
+  "FUTURES ENAUSDTM": {
+   "recuentos": {
+    "senales": {
+     "largos": 0,
+     "cortos": 0
+    },
+    "decisiones": 0,
+    "ejecutadas": 0,
+    "operaciones": 0,
+    "caducadas": {
+     "caduca_vela_no_utilizable": 0,
+     "caduca_contexto": 0,
+     "caduca_sin_disparo": 0
+    },
+    "no_ejecutadas": {
+     "ocupado": 0,
+     "opuestas": 0,
+     "fin_de_ventana": 0,
+     "posicion_tomada": 0,
+     "caduca_sin_minuto": 0,
+     "no_entra": 0
+    }
+   },
+   "resultados": {
+    "bruto": {
+     "operaciones": 0,
+     "positivas": 0,
+     "media": null,
+     "mediana": null,
+     "suma": 0.0,
+     "peor": null,
+     "mejor": null,
+     "caida_maxima": 0.0
+    },
+    "neto": {
+     "operaciones": 0,
+     "positivas": 0,
+     "media": null,
+     "mediana": null,
+     "suma": 0.0,
+     "peor": null,
+     "mejor": null,
+     "caida_maxima": 0.0
+    },
+    "neto_costes_dobles": {
+     "operaciones": 0,
+     "positivas": 0,
+     "media": null,
+     "mediana": null,
+     "suma": 0.0,
+     "peor": null,
+     "mejor": null,
+     "caida_maxima": 0.0
+    }
+   },
+   "regimen": {
+    "contexto": {},
+    "senal": {}
+   },
+   "salidas": {
+    "stop": 0,
+    "objetivo": 0,
+    "invalidacion": 0,
+    "tiempo": 0,
+    "liquidacion_fin_de_ventana": 0
+   },
+   "solo_rest": {
+    "decisiones": {
+     "minutos": 0,
+     "solo_rest": 0
+    },
+    "resultados": {
+     "minutos": 0,
+     "solo_rest": 0
+    }
+   }
+  },
+  "FUTURES ETHUSDTM": {
+   "recuentos": {
+    "senales": {
+     "largos": 3,
+     "cortos": 16
+    },
+    "decisiones": 14,
+    "ejecutadas": 12,
+    "operaciones": 12,
+    "caducadas": {
+     "caduca_vela_no_utilizable": 0,
+     "caduca_contexto": 0,
+     "caduca_sin_disparo": 5
+    },
+    "no_ejecutadas": {
+     "ocupado": 2,
+     "opuestas": 0,
+     "fin_de_ventana": 0,
+     "posicion_tomada": 0,
+     "caduca_sin_minuto": 0,
+     "no_entra": 0
+    }
+   },
+   "resultados": {
+    "bruto": {
+     "operaciones": 12,
+     "positivas": 2,
+     "media": -0.6592594144776028,
+     "mediana": -1.0,
+     "suma": -7.9111129737312345,
+     "peor": -1.0,
+     "mejor": 0.9107245964252255,
+     "caida_maxima": 8.450191164165544
+    },
+    "neto": {
+     "operaciones": 12,
+     "positivas": 2,
+     "media": -0.740316755942051,
+     "mediana": -1.065671052380993,
+     "suma": -8.883801071304612,
+     "peor": -1.1069914573617545,
+     "mejor": 0.8275039523351679,
+     "caida_maxima": 9.148273252066675
+    },
+    "neto_costes_dobles": {
+     "operaciones": 12,
+     "positivas": 2,
+     "media": -0.8213744929621528,
+     "mediana": -1.1313427047619888,
+     "suma": -9.856493915545833,
+     "peor": -1.2139835147235165,
+     "mejor": 0.7442838546798562,
+     "caida_maxima": 9.856493915545832
+    }
+   },
+   "regimen": {
+    "contexto": {
+     "tendencia/normal": {
+      "operaciones": 1,
+      "r_bruto_medio": -1.0,
+      "r_neto_medio": -1.1069914573617545
+     },
+     "tendencia/sin_etiqueta": {
+      "operaciones": 11,
+      "r_bruto_medio": -0.6282829976119304,
+      "r_neto_medio": -0.7069826921766235
+     }
+    },
+    "senal": {
+     "tendencia/compresion": {
+      "operaciones": 1,
+      "r_bruto_medio": -1.0,
+      "r_neto_medio": -1.1069914573617545
+     },
+     "tendencia/normal": {
+      "operaciones": 1,
+      "r_bruto_medio": -1.0,
+      "r_neto_medio": -1.0783834110972623
+     },
+     "rango/compresion": {
+      "operaciones": 5,
+      "r_bruto_medio": -0.6178550807149549,
+      "r_neto_medio": -0.7004849971292793
+     },
+     "rango/normal": {
+      "operaciones": 3,
+      "r_bruto_medio": -0.8167303880551814,
+      "r_neto_medio": -0.8916067235781663
+     },
+     "transicion/compresion": {
+      "operaciones": 1,
+      "r_bruto_medio": -1.0,
+      "r_neto_medio": -1.0651407322533493
+     },
+     "transicion/normal": {
+      "operaciones": 1,
+      "r_bruto_medio": 0.6283535940090845,
+      "r_neto_medio": 0.5439596857886495
+     }
+    }
+   },
+   "salidas": {
+    "stop": 12,
+    "objetivo": 0,
+    "invalidacion": 0,
+    "tiempo": 0,
+    "liquidacion_fin_de_ventana": 0
+   },
+   "solo_rest": {
+    "decisiones": {
+     "minutos": 272430,
+     "solo_rest": 272430
+    },
+    "resultados": {
+     "minutos": 283165,
+     "solo_rest": 283165
+    }
+   }
+  },
+  "FUTURES EVAAUSDTM": {
+   "recuentos": {
+    "senales": {
+     "largos": 8,
+     "cortos": 2
+    },
+    "decisiones": 1,
+    "ejecutadas": 1,
+    "operaciones": 1,
+    "caducadas": {
+     "caduca_vela_no_utilizable": 0,
+     "caduca_contexto": 0,
+     "caduca_sin_disparo": 9
+    },
+    "no_ejecutadas": {
+     "ocupado": 0,
+     "opuestas": 0,
+     "fin_de_ventana": 0,
+     "posicion_tomada": 0,
+     "caduca_sin_minuto": 0,
+     "no_entra": 0
+    }
+   },
+   "resultados": {
+    "bruto": {
+     "operaciones": 1,
+     "positivas": 1,
+     "media": 2.157153563875082,
+     "mediana": 2.157153563875082,
+     "suma": 2.157153563875082,
+     "peor": 2.157153563875082,
+     "mejor": 2.157153563875082,
+     "caida_maxima": 0.0
+    },
+    "neto": {
+     "operaciones": 1,
+     "positivas": 1,
+     "media": 2.139753250878767,
+     "mediana": 2.139753250878767,
+     "suma": 2.139753250878767,
+     "peor": 2.139753250878767,
+     "mejor": 2.139753250878767,
+     "caida_maxima": 0.0
+    },
+    "neto_costes_dobles": {
+     "operaciones": 1,
+     "positivas": 1,
+     "media": 2.1223542321745903,
+     "mediana": 2.1223542321745903,
+     "suma": 2.1223542321745903,
+     "peor": 2.1223542321745903,
+     "mejor": 2.1223542321745903,
+     "caida_maxima": 0.0
+    }
+   },
+   "regimen": {
+    "contexto": {
+     "tendencia/sin_etiqueta": {
+      "operaciones": 1,
+      "r_bruto_medio": 2.157153563875082,
+      "r_neto_medio": 2.139753250878767
+     }
+    },
+    "senal": {
+     "rango/compresion": {
+      "operaciones": 1,
+      "r_bruto_medio": 2.157153563875082,
+      "r_neto_medio": 2.139753250878767
+     }
+    }
+   },
+   "salidas": {
+    "stop": 1,
+    "objetivo": 0,
+    "invalidacion": 0,
+    "tiempo": 0,
+    "liquidacion_fin_de_ventana": 0
+   },
+   "solo_rest": {
+    "decisiones": {
+     "minutos": 19635,
+     "solo_rest": 19635
+    },
+    "resultados": {
+     "minutos": 20966,
+     "solo_rest": 20966
+    }
+   }
+  },
+  "FUTURES FHEUSDTM": {
+   "recuentos": {
+    "senales": {
+     "largos": 0,
+     "cortos": 0
+    },
+    "decisiones": 0,
+    "ejecutadas": 0,
+    "operaciones": 0,
+    "caducadas": {
+     "caduca_vela_no_utilizable": 0,
+     "caduca_contexto": 0,
+     "caduca_sin_disparo": 0
+    },
+    "no_ejecutadas": {
+     "ocupado": 0,
+     "opuestas": 0,
+     "fin_de_ventana": 0,
+     "posicion_tomada": 0,
+     "caduca_sin_minuto": 0,
+     "no_entra": 0
+    }
+   },
+   "resultados": {
+    "bruto": {
+     "operaciones": 0,
+     "positivas": 0,
+     "media": null,
+     "mediana": null,
+     "suma": 0.0,
+     "peor": null,
+     "mejor": null,
+     "caida_maxima": 0.0
+    },
+    "neto": {
+     "operaciones": 0,
+     "positivas": 0,
+     "media": null,
+     "mediana": null,
+     "suma": 0.0,
+     "peor": null,
+     "mejor": null,
+     "caida_maxima": 0.0
+    },
+    "neto_costes_dobles": {
+     "operaciones": 0,
+     "positivas": 0,
+     "media": null,
+     "mediana": null,
+     "suma": 0.0,
+     "peor": null,
+     "mejor": null,
+     "caida_maxima": 0.0
+    }
+   },
+   "regimen": {
+    "contexto": {},
+    "senal": {}
+   },
+   "salidas": {
+    "stop": 0,
+    "objetivo": 0,
+    "invalidacion": 0,
+    "tiempo": 0,
+    "liquidacion_fin_de_ventana": 0
+   },
+   "solo_rest": {
+    "decisiones": {
+     "minutos": 0,
+     "solo_rest": 0
+    },
+    "resultados": {
+     "minutos": 0,
+     "solo_rest": 0
+    }
+   }
+  },
+  "FUTURES HYPEUSDTM": {
+   "recuentos": {
+    "senales": {
+     "largos": 0,
+     "cortos": 1
+    },
+    "decisiones": 0,
+    "ejecutadas": 0,
+    "operaciones": 0,
+    "caducadas": {
+     "caduca_vela_no_utilizable": 0,
+     "caduca_contexto": 0,
+     "caduca_sin_disparo": 1
+    },
+    "no_ejecutadas": {
+     "ocupado": 0,
+     "opuestas": 0,
+     "fin_de_ventana": 0,
+     "posicion_tomada": 0,
+     "caduca_sin_minuto": 0,
+     "no_entra": 0
+    }
+   },
+   "resultados": {
+    "bruto": {
+     "operaciones": 0,
+     "positivas": 0,
+     "media": null,
+     "mediana": null,
+     "suma": 0.0,
+     "peor": null,
+     "mejor": null,
+     "caida_maxima": 0.0
+    },
+    "neto": {
+     "operaciones": 0,
+     "positivas": 0,
+     "media": null,
+     "mediana": null,
+     "suma": 0.0,
+     "peor": null,
+     "mejor": null,
+     "caida_maxima": 0.0
+    },
+    "neto_costes_dobles": {
+     "operaciones": 0,
+     "positivas": 0,
+     "media": null,
+     "mediana": null,
+     "suma": 0.0,
+     "peor": null,
+     "mejor": null,
+     "caida_maxima": 0.0
+    }
+   },
+   "regimen": {
+    "contexto": {},
+    "senal": {}
+   },
+   "salidas": {
+    "stop": 0,
+    "objetivo": 0,
+    "invalidacion": 0,
+    "tiempo": 0,
+    "liquidacion_fin_de_ventana": 0
+   },
+   "solo_rest": {
+    "decisiones": {
+     "minutos": 0,
+     "solo_rest": 0
+    },
+    "resultados": {
+     "minutos": 0,
+     "solo_rest": 0
+    }
+   }
+  },
+  "FUTURES ICPUSDTM": {
+   "recuentos": {
+    "senales": {
+     "largos": 0,
+     "cortos": 0
+    },
+    "decisiones": 0,
+    "ejecutadas": 0,
+    "operaciones": 0,
+    "caducadas": {
+     "caduca_vela_no_utilizable": 0,
+     "caduca_contexto": 0,
+     "caduca_sin_disparo": 0
+    },
+    "no_ejecutadas": {
+     "ocupado": 0,
+     "opuestas": 0,
+     "fin_de_ventana": 0,
+     "posicion_tomada": 0,
+     "caduca_sin_minuto": 0,
+     "no_entra": 0
+    }
+   },
+   "resultados": {
+    "bruto": {
+     "operaciones": 0,
+     "positivas": 0,
+     "media": null,
+     "mediana": null,
+     "suma": 0.0,
+     "peor": null,
+     "mejor": null,
+     "caida_maxima": 0.0
+    },
+    "neto": {
+     "operaciones": 0,
+     "positivas": 0,
+     "media": null,
+     "mediana": null,
+     "suma": 0.0,
+     "peor": null,
+     "mejor": null,
+     "caida_maxima": 0.0
+    },
+    "neto_costes_dobles": {
+     "operaciones": 0,
+     "positivas": 0,
+     "media": null,
+     "mediana": null,
+     "suma": 0.0,
+     "peor": null,
+     "mejor": null,
+     "caida_maxima": 0.0
+    }
+   },
+   "regimen": {
+    "contexto": {},
+    "senal": {}
+   },
+   "salidas": {
+    "stop": 0,
+    "objetivo": 0,
+    "invalidacion": 0,
+    "tiempo": 0,
+    "liquidacion_fin_de_ventana": 0
+   },
+   "solo_rest": {
+    "decisiones": {
+     "minutos": 0,
+     "solo_rest": 0
+    },
+    "resultados": {
+     "minutos": 0,
+     "solo_rest": 0
+    }
+   }
+  },
+  "FUTURES INJUSDTM": {
+   "recuentos": {
+    "senales": {
+     "largos": 0,
+     "cortos": 0
+    },
+    "decisiones": 0,
+    "ejecutadas": 0,
+    "operaciones": 0,
+    "caducadas": {
+     "caduca_vela_no_utilizable": 0,
+     "caduca_contexto": 0,
+     "caduca_sin_disparo": 0
+    },
+    "no_ejecutadas": {
+     "ocupado": 0,
+     "opuestas": 0,
+     "fin_de_ventana": 0,
+     "posicion_tomada": 0,
+     "caduca_sin_minuto": 0,
+     "no_entra": 0
+    }
+   },
+   "resultados": {
+    "bruto": {
+     "operaciones": 0,
+     "positivas": 0,
+     "media": null,
+     "mediana": null,
+     "suma": 0.0,
+     "peor": null,
+     "mejor": null,
+     "caida_maxima": 0.0
+    },
+    "neto": {
+     "operaciones": 0,
+     "positivas": 0,
+     "media": null,
+     "mediana": null,
+     "suma": 0.0,
+     "peor": null,
+     "mejor": null,
+     "caida_maxima": 0.0
+    },
+    "neto_costes_dobles": {
+     "operaciones": 0,
+     "positivas": 0,
+     "media": null,
+     "mediana": null,
+     "suma": 0.0,
+     "peor": null,
+     "mejor": null,
+     "caida_maxima": 0.0
+    }
+   },
+   "regimen": {
+    "contexto": {},
+    "senal": {}
+   },
+   "salidas": {
+    "stop": 0,
+    "objetivo": 0,
+    "invalidacion": 0,
+    "tiempo": 0,
+    "liquidacion_fin_de_ventana": 0
+   },
+   "solo_rest": {
+    "decisiones": {
+     "minutos": 0,
+     "solo_rest": 0
+    },
+    "resultados": {
+     "minutos": 0,
+     "solo_rest": 0
+    }
+   }
+  },
+  "FUTURES LINKUSDTM": {
+   "recuentos": {
+    "senales": {
+     "largos": 0,
+     "cortos": 0
+    },
+    "decisiones": 0,
+    "ejecutadas": 0,
+    "operaciones": 0,
+    "caducadas": {
+     "caduca_vela_no_utilizable": 0,
+     "caduca_contexto": 0,
+     "caduca_sin_disparo": 0
+    },
+    "no_ejecutadas": {
+     "ocupado": 0,
+     "opuestas": 0,
+     "fin_de_ventana": 0,
+     "posicion_tomada": 0,
+     "caduca_sin_minuto": 0,
+     "no_entra": 0
+    }
+   },
+   "resultados": {
+    "bruto": {
+     "operaciones": 0,
+     "positivas": 0,
+     "media": null,
+     "mediana": null,
+     "suma": 0.0,
+     "peor": null,
+     "mejor": null,
+     "caida_maxima": 0.0
+    },
+    "neto": {
+     "operaciones": 0,
+     "positivas": 0,
+     "media": null,
+     "mediana": null,
+     "suma": 0.0,
+     "peor": null,
+     "mejor": null,
+     "caida_maxima": 0.0
+    },
+    "neto_costes_dobles": {
+     "operaciones": 0,
+     "positivas": 0,
+     "media": null,
+     "mediana": null,
+     "suma": 0.0,
+     "peor": null,
+     "mejor": null,
+     "caida_maxima": 0.0
+    }
+   },
+   "regimen": {
+    "contexto": {},
+    "senal": {}
+   },
+   "salidas": {
+    "stop": 0,
+    "objetivo": 0,
+    "invalidacion": 0,
+    "tiempo": 0,
+    "liquidacion_fin_de_ventana": 0
+   },
+   "solo_rest": {
+    "decisiones": {
+     "minutos": 0,
+     "solo_rest": 0
+    },
+    "resultados": {
+     "minutos": 0,
+     "solo_rest": 0
+    }
+   }
+  },
+  "FUTURES NIGHTUSDTM": {
+   "recuentos": {
+    "senales": {
+     "largos": 0,
+     "cortos": 0
+    },
+    "decisiones": 0,
+    "ejecutadas": 0,
+    "operaciones": 0,
+    "caducadas": {
+     "caduca_vela_no_utilizable": 0,
+     "caduca_contexto": 0,
+     "caduca_sin_disparo": 0
+    },
+    "no_ejecutadas": {
+     "ocupado": 0,
+     "opuestas": 0,
+     "fin_de_ventana": 0,
+     "posicion_tomada": 0,
+     "caduca_sin_minuto": 0,
+     "no_entra": 0
+    }
+   },
+   "resultados": {
+    "bruto": {
+     "operaciones": 0,
+     "positivas": 0,
+     "media": null,
+     "mediana": null,
+     "suma": 0.0,
+     "peor": null,
+     "mejor": null,
+     "caida_maxima": 0.0
+    },
+    "neto": {
+     "operaciones": 0,
+     "positivas": 0,
+     "media": null,
+     "mediana": null,
+     "suma": 0.0,
+     "peor": null,
+     "mejor": null,
+     "caida_maxima": 0.0
+    },
+    "neto_costes_dobles": {
+     "operaciones": 0,
+     "positivas": 0,
+     "media": null,
+     "mediana": null,
+     "suma": 0.0,
+     "peor": null,
+     "mejor": null,
+     "caida_maxima": 0.0
+    }
+   },
+   "regimen": {
+    "contexto": {},
+    "senal": {}
+   },
+   "salidas": {
+    "stop": 0,
+    "objetivo": 0,
+    "invalidacion": 0,
+    "tiempo": 0,
+    "liquidacion_fin_de_ventana": 0
+   },
+   "solo_rest": {
+    "decisiones": {
+     "minutos": 0,
+     "solo_rest": 0
+    },
+    "resultados": {
+     "minutos": 0,
+     "solo_rest": 0
+    }
+   }
+  },
+  "FUTURES PEPEUSDTM": {
+   "recuentos": {
+    "senales": {
+     "largos": 1,
+     "cortos": 2
+    },
+    "decisiones": 1,
+    "ejecutadas": 1,
+    "operaciones": 1,
+    "caducadas": {
+     "caduca_vela_no_utilizable": 0,
+     "caduca_contexto": 0,
+     "caduca_sin_disparo": 2
+    },
+    "no_ejecutadas": {
+     "ocupado": 0,
+     "opuestas": 0,
+     "fin_de_ventana": 0,
+     "posicion_tomada": 0,
+     "caduca_sin_minuto": 0,
+     "no_entra": 0
+    }
+   },
+   "resultados": {
+    "bruto": {
+     "operaciones": 1,
+     "positivas": 0,
+     "media": -1.0,
+     "mediana": -1.0,
+     "suma": -1.0,
+     "peor": -1.0,
+     "mejor": -1.0,
+     "caida_maxima": 1.0
+    },
+    "neto": {
+     "operaciones": 1,
+     "positivas": 0,
+     "media": -1.0486527449613536,
+     "mediana": -1.0486527449613536,
+     "suma": -1.0486527449613536,
+     "peor": -1.0486527449613536,
+     "mejor": -1.0486527449613536,
+     "caida_maxima": 1.0486527449613536
+    },
+    "neto_costes_dobles": {
+     "operaciones": 1,
+     "positivas": 0,
+     "media": -1.09730608992271,
+     "mediana": -1.09730608992271,
+     "suma": -1.09730608992271,
+     "peor": -1.09730608992271,
+     "mejor": -1.09730608992271,
+     "caida_maxima": 1.09730608992271
+    }
+   },
+   "regimen": {
+    "contexto": {
+     "tendencia/sin_etiqueta": {
+      "operaciones": 1,
+      "r_bruto_medio": -1.0,
+      "r_neto_medio": -1.0486527449613536
+     }
+    },
+    "senal": {
+     "tendencia/normal": {
+      "operaciones": 1,
+      "r_bruto_medio": -1.0,
+      "r_neto_medio": -1.0486527449613536
+     }
+    }
+   },
+   "salidas": {
+    "stop": 1,
+    "objetivo": 0,
+    "invalidacion": 0,
+    "tiempo": 0,
+    "liquidacion_fin_de_ventana": 0
+   },
+   "solo_rest": {
+    "decisiones": {
+     "minutos": 25575,
+     "solo_rest": 25575
+    },
+    "resultados": {
+     "minutos": 26977,
+     "solo_rest": 26977
+    }
+   }
+  },
+  "FUTURES PIEVERSEUSDTM": {
+   "recuentos": {
+    "senales": {
+     "largos": 0,
+     "cortos": 0
+    },
+    "decisiones": 0,
+    "ejecutadas": 0,
+    "operaciones": 0,
+    "caducadas": {
+     "caduca_vela_no_utilizable": 0,
+     "caduca_contexto": 0,
+     "caduca_sin_disparo": 0
+    },
+    "no_ejecutadas": {
+     "ocupado": 0,
+     "opuestas": 0,
+     "fin_de_ventana": 0,
+     "posicion_tomada": 0,
+     "caduca_sin_minuto": 0,
+     "no_entra": 0
+    }
+   },
+   "resultados": {
+    "bruto": {
+     "operaciones": 0,
+     "positivas": 0,
+     "media": null,
+     "mediana": null,
+     "suma": 0.0,
+     "peor": null,
+     "mejor": null,
+     "caida_maxima": 0.0
+    },
+    "neto": {
+     "operaciones": 0,
+     "positivas": 0,
+     "media": null,
+     "mediana": null,
+     "suma": 0.0,
+     "peor": null,
+     "mejor": null,
+     "caida_maxima": 0.0
+    },
+    "neto_costes_dobles": {
+     "operaciones": 0,
+     "positivas": 0,
+     "media": null,
+     "mediana": null,
+     "suma": 0.0,
+     "peor": null,
+     "mejor": null,
+     "caida_maxima": 0.0
+    }
+   },
+   "regimen": {
+    "contexto": {},
+    "senal": {}
+   },
+   "salidas": {
+    "stop": 0,
+    "objetivo": 0,
+    "invalidacion": 0,
+    "tiempo": 0,
+    "liquidacion_fin_de_ventana": 0
+   },
+   "solo_rest": {
+    "decisiones": {
+     "minutos": 0,
+     "solo_rest": 0
+    },
+    "resultados": {
+     "minutos": 0,
+     "solo_rest": 0
+    }
+   }
+  },
+  "FUTURES SOLUSDTM": {
+   "recuentos": {
+    "senales": {
+     "largos": 7,
+     "cortos": 21
+    },
+    "decisiones": 14,
+    "ejecutadas": 12,
+    "operaciones": 12,
+    "caducadas": {
+     "caduca_vela_no_utilizable": 0,
+     "caduca_contexto": 0,
+     "caduca_sin_disparo": 14
+    },
+    "no_ejecutadas": {
+     "ocupado": 2,
+     "opuestas": 0,
+     "fin_de_ventana": 0,
+     "posicion_tomada": 0,
+     "caduca_sin_minuto": 0,
+     "no_entra": 0
+    }
+   },
+   "resultados": {
+    "bruto": {
+     "operaciones": 12,
+     "positivas": 1,
+     "media": -0.826710979720983,
+     "mediana": -1.0,
+     "suma": -9.920531756651796,
+     "peor": -1.0,
+     "mejor": 0.07250576520433996,
+     "caida_maxima": 9.920531756651798
+    },
+    "neto": {
+     "operaciones": 12,
+     "positivas": 0,
+     "media": -0.9087020226618024,
+     "mediana": -1.0680929751739574,
+     "suma": -10.904424271941629,
+     "peor": -1.129757362509345,
+     "mejor": -0.00780843328111082,
+     "caida_maxima": 10.90442427194163
+    },
+    "neto_costes_dobles": {
+     "operaciones": 12,
+     "positivas": 0,
+     "media": -0.9906935616292166,
+     "mediana": -1.1361865503479192,
+     "suma": -11.888322739550599,
+     "peor": -1.2595153250187088,
+     "mejor": -0.08812258826310904,
+     "caida_maxima": 11.8883227395506
+    }
+   },
+   "regimen": {
+    "contexto": {
+     "tendencia/expansion": {
+      "operaciones": 2,
+      "r_bruto_medio": -0.46374711739783003,
+      "r_neto_medio": -0.527133763222618
+     },
+     "tendencia/compresion": {
+      "operaciones": 2,
+      "r_bruto_medio": -0.7961441209623209,
+      "r_neto_medio": -0.8604553366015226
+     },
+     "tendencia/normal": {
+      "operaciones": 1,
+      "r_bruto_medio": -1.0,
+      "r_neto_medio": -1.0876360057324483
+     },
+     "tendencia/sin_etiqueta": {
+      "operaciones": 7,
+      "r_bruto_medio": -0.9143927542759279,
+      "r_neto_medio": -1.0059442952229856
+     }
+    },
+    "senal": {
+     "tendencia/expansion": {
+      "operaciones": 3,
+      "r_bruto_medio": -1.0,
+      "r_neto_medio": -1.0742462786826996
+     },
+     "tendencia/compresion": {
+      "operaciones": 2,
+      "r_bruto_medio": -0.8995373734376744,
+      "r_neto_medio": -0.9801931021621246
+     },
+     "tendencia/normal": {
+      "operaciones": 1,
+      "r_bruto_medio": -0.601674533056146,
+      "r_neto_medio": -0.6510841953077285
+     },
+     "rango/expansion": {
+      "operaciones": 1,
+      "r_bruto_medio": -1.0,
+      "r_neto_medio": -1.0804768963866571
+     },
+     "rango/compresion": {
+      "operaciones": 1,
+      "r_bruto_medio": -1.0,
+      "r_neto_medio": -1.1241025615356017
+     },
+     "rango/normal": {
+      "operaciones": 2,
+      "r_bruto_medio": -0.25989123836015093,
+      "r_neto_medio": -0.32412110504874947
+     },
+     "transicion/normal": {
+      "operaciones": 2,
+      "r_bruto_medio": -1.0,
+      "r_neto_medio": -1.1086966841208967
+     }
+    }
+   },
+   "salidas": {
+    "stop": 12,
+    "objetivo": 0,
+    "invalidacion": 0,
+    "tiempo": 0,
+    "liquidacion_fin_de_ventana": 0
+   },
+   "solo_rest": {
+    "decisiones": {
+     "minutos": 373125,
+     "solo_rest": 373125
+    },
+    "resultados": {
+     "minutos": 383543,
+     "solo_rest": 383543
+    }
+   }
+  },
+  "FUTURES SOXLUSDTM": {
+   "recuentos": {
+    "senales": {
+     "largos": 0,
+     "cortos": 0
+    },
+    "decisiones": 0,
+    "ejecutadas": 0,
+    "operaciones": 0,
+    "caducadas": {
+     "caduca_vela_no_utilizable": 0,
+     "caduca_contexto": 0,
+     "caduca_sin_disparo": 0
+    },
+    "no_ejecutadas": {
+     "ocupado": 0,
+     "opuestas": 0,
+     "fin_de_ventana": 0,
+     "posicion_tomada": 0,
+     "caduca_sin_minuto": 0,
+     "no_entra": 0
+    }
+   },
+   "resultados": {
+    "bruto": {
+     "operaciones": 0,
+     "positivas": 0,
+     "media": null,
+     "mediana": null,
+     "suma": 0.0,
+     "peor": null,
+     "mejor": null,
+     "caida_maxima": 0.0
+    },
+    "neto": {
+     "operaciones": 0,
+     "positivas": 0,
+     "media": null,
+     "mediana": null,
+     "suma": 0.0,
+     "peor": null,
+     "mejor": null,
+     "caida_maxima": 0.0
+    },
+    "neto_costes_dobles": {
+     "operaciones": 0,
+     "positivas": 0,
+     "media": null,
+     "mediana": null,
+     "suma": 0.0,
+     "peor": null,
+     "mejor": null,
+     "caida_maxima": 0.0
+    }
+   },
+   "regimen": {
+    "contexto": {},
+    "senal": {}
+   },
+   "salidas": {
+    "stop": 0,
+    "objetivo": 0,
+    "invalidacion": 0,
+    "tiempo": 0,
+    "liquidacion_fin_de_ventana": 0
+   },
+   "solo_rest": {
+    "decisiones": {
+     "minutos": 0,
+     "solo_rest": 0
+    },
+    "resultados": {
+     "minutos": 0,
+     "solo_rest": 0
+    }
+   }
+  },
+  "FUTURES UNIUSDTM": {
+   "recuentos": {
+    "senales": {
+     "largos": 0,
+     "cortos": 0
+    },
+    "decisiones": 0,
+    "ejecutadas": 0,
+    "operaciones": 0,
+    "caducadas": {
+     "caduca_vela_no_utilizable": 0,
+     "caduca_contexto": 0,
+     "caduca_sin_disparo": 0
+    },
+    "no_ejecutadas": {
+     "ocupado": 0,
+     "opuestas": 0,
+     "fin_de_ventana": 0,
+     "posicion_tomada": 0,
+     "caduca_sin_minuto": 0,
+     "no_entra": 0
+    }
+   },
+   "resultados": {
+    "bruto": {
+     "operaciones": 0,
+     "positivas": 0,
+     "media": null,
+     "mediana": null,
+     "suma": 0.0,
+     "peor": null,
+     "mejor": null,
+     "caida_maxima": 0.0
+    },
+    "neto": {
+     "operaciones": 0,
+     "positivas": 0,
+     "media": null,
+     "mediana": null,
+     "suma": 0.0,
+     "peor": null,
+     "mejor": null,
+     "caida_maxima": 0.0
+    },
+    "neto_costes_dobles": {
+     "operaciones": 0,
+     "positivas": 0,
+     "media": null,
+     "mediana": null,
+     "suma": 0.0,
+     "peor": null,
+     "mejor": null,
+     "caida_maxima": 0.0
+    }
+   },
+   "regimen": {
+    "contexto": {},
+    "senal": {}
+   },
+   "salidas": {
+    "stop": 0,
+    "objetivo": 0,
+    "invalidacion": 0,
+    "tiempo": 0,
+    "liquidacion_fin_de_ventana": 0
+   },
+   "solo_rest": {
+    "decisiones": {
+     "minutos": 0,
+     "solo_rest": 0
+    },
+    "resultados": {
+     "minutos": 0,
+     "solo_rest": 0
+    }
+   }
+  },
+  "FUTURES XBTUSDTM": {
+   "recuentos": {
+    "senales": {
+     "largos": 0,
+     "cortos": 0
+    },
+    "decisiones": 0,
+    "ejecutadas": 0,
+    "operaciones": 0,
+    "caducadas": {
+     "caduca_vela_no_utilizable": 0,
+     "caduca_contexto": 0,
+     "caduca_sin_disparo": 0
+    },
+    "no_ejecutadas": {
+     "ocupado": 0,
+     "opuestas": 0,
+     "fin_de_ventana": 0,
+     "posicion_tomada": 0,
+     "caduca_sin_minuto": 0,
+     "no_entra": 0
+    }
+   },
+   "resultados": {
+    "bruto": {
+     "operaciones": 0,
+     "positivas": 0,
+     "media": null,
+     "mediana": null,
+     "suma": 0.0,
+     "peor": null,
+     "mejor": null,
+     "caida_maxima": 0.0
+    },
+    "neto": {
+     "operaciones": 0,
+     "positivas": 0,
+     "media": null,
+     "mediana": null,
+     "suma": 0.0,
+     "peor": null,
+     "mejor": null,
+     "caida_maxima": 0.0
+    },
+    "neto_costes_dobles": {
+     "operaciones": 0,
+     "positivas": 0,
+     "media": null,
+     "mediana": null,
+     "suma": 0.0,
+     "peor": null,
+     "mejor": null,
+     "caida_maxima": 0.0
+    }
+   },
+   "regimen": {
+    "contexto": {},
+    "senal": {}
+   },
+   "salidas": {
+    "stop": 0,
+    "objetivo": 0,
+    "invalidacion": 0,
+    "tiempo": 0,
+    "liquidacion_fin_de_ventana": 0
+   },
+   "solo_rest": {
+    "decisiones": {
+     "minutos": 0,
+     "solo_rest": 0
+    },
+    "resultados": {
+     "minutos": 0,
+     "solo_rest": 0
+    }
+   }
+  },
+  "FUTURES XRPUSDTM": {
+   "recuentos": {
+    "senales": {
+     "largos": 6,
+     "cortos": 6
+    },
+    "decisiones": 7,
+    "ejecutadas": 7,
+    "operaciones": 7,
+    "caducadas": {
+     "caduca_vela_no_utilizable": 0,
+     "caduca_contexto": 0,
+     "caduca_sin_disparo": 5
+    },
+    "no_ejecutadas": {
+     "ocupado": 0,
+     "opuestas": 0,
+     "fin_de_ventana": 0,
+     "posicion_tomada": 0,
+     "caduca_sin_minuto": 0,
+     "no_entra": 0
+    }
+   },
+   "resultados": {
+    "bruto": {
+     "operaciones": 7,
+     "positivas": 2,
+     "media": -0.2840033952799475,
+     "mediana": -0.6899807086258429,
+     "suma": -1.9880237669596326,
+     "peor": -1.0,
+     "mejor": 0.9100411957574793,
+     "caida_maxima": 2.0
+    },
+    "neto": {
+     "operaciones": 7,
+     "positivas": 2,
+     "media": -0.3741178575913341,
+     "mediana": -0.7887715589762374,
+     "suma": -2.6188250031393387,
+     "peor": -1.1394004537989428,
+     "mejor": 0.8205708184717674,
+     "caida_maxima": 2.6188250031393387
+    },
+    "neto_costes_dobles": {
+     "operaciones": 7,
+     "positivas": 2,
+     "media": -0.46423249030476305,
+     "mediana": -0.8807222068860692,
+     "suma": -3.2496274321333414,
+     "peor": -1.2788015075978985,
+     "mejor": 0.7311009872107639,
+     "caida_maxima": 3.249627432133342
+    }
+   },
+   "regimen": {
+    "contexto": {
+     "tendencia/sin_etiqueta": {
+      "operaciones": 7,
+      "r_bruto_medio": -0.2840033952799475,
+      "r_neto_medio": -0.3741178575913341
+     }
+    },
+    "senal": {
+     "rango/compresion": {
+      "operaciones": 3,
+      "r_bruto_medio": -0.1287110554384751,
+      "r_neto_medio": -0.23236450911425835
+     },
+     "rango/normal": {
+      "operaciones": 4,
+      "r_bruto_medio": -0.4004726501610518,
+      "r_neto_medio": -0.48043286894914083
+     }
+    }
+   },
+   "salidas": {
+    "stop": 7,
+    "objetivo": 0,
+    "invalidacion": 0,
+    "tiempo": 0,
+    "liquidacion_fin_de_ventana": 0
+   },
+   "solo_rest": {
+    "decisiones": {
+     "minutos": 126945,
+     "solo_rest": 126945
+    },
+    "resultados": {
+     "minutos": 134443,
+     "solo_rest": 134443
+    }
+   }
+  },
+  "FUTURES ZECUSDTM": {
+   "recuentos": {
+    "senales": {
+     "largos": 11,
+     "cortos": 2
+    },
+    "decisiones": 4,
+    "ejecutadas": 3,
+    "operaciones": 3,
+    "caducadas": {
+     "caduca_vela_no_utilizable": 0,
+     "caduca_contexto": 0,
+     "caduca_sin_disparo": 9
+    },
+    "no_ejecutadas": {
+     "ocupado": 1,
+     "opuestas": 0,
+     "fin_de_ventana": 0,
+     "posicion_tomada": 0,
+     "caduca_sin_minuto": 0,
+     "no_entra": 0
+    }
+   },
+   "resultados": {
+    "bruto": {
+     "operaciones": 3,
+     "positivas": 2,
+     "media": 0.1176664227981053,
+     "mediana": 0.13301976461196746,
+     "suma": 0.3529992683943159,
+     "peor": -0.8950216766636578,
+     "mejor": 1.1150011804460063,
+     "caida_maxima": 0.8950216766636578
+    },
+    "neto": {
+     "operaciones": 3,
+     "positivas": 2,
+     "media": 0.096116990482576,
+     "mediana": 0.1133156319497093,
+     "suma": 0.28835097144772803,
+     "peor": -0.9085260478043061,
+     "mejor": 1.0835613873023249,
+     "caida_maxima": 0.9085260478043061
+    },
+    "neto_costes_dobles": {
+     "operaciones": 3,
+     "positivas": 2,
+     "media": 0.07456762876690087,
+     "mediana": 0.09361157909930991,
+     "suma": 0.22370288630070262,
+     "peor": -0.9220309559579616,
+     "mejor": 1.0521222631593543,
+     "caida_maxima": 0.9220309559579616
+    }
+   },
+   "regimen": {
+    "contexto": {
+     "tendencia/sin_etiqueta": {
+      "operaciones": 3,
+      "r_bruto_medio": 0.1176664227981053,
+      "r_neto_medio": 0.096116990482576
+     }
+    },
+    "senal": {
+     "tendencia/compresion": {
+      "operaciones": 1,
+      "r_bruto_medio": 1.1150011804460063,
+      "r_neto_medio": 1.0835613873023249
+     },
+     "rango/normal": {
+      "operaciones": 1,
+      "r_bruto_medio": 0.13301976461196746,
+      "r_neto_medio": 0.1133156319497093
+     },
+     "transicion/expansion": {
+      "operaciones": 1,
+      "r_bruto_medio": -0.8950216766636578,
+      "r_neto_medio": -0.9085260478043061
+     }
+    }
+   },
+   "salidas": {
+    "stop": 3,
+    "objetivo": 0,
+    "invalidacion": 0,
+    "tiempo": 0,
+    "liquidacion_fin_de_ventana": 0
+   },
+   "solo_rest": {
+    "decisiones": {
+     "minutos": 52710,
+     "solo_rest": 52710
+    },
+    "resultados": {
+     "minutos": 59018,
+     "solo_rest": 59018
+    }
+   }
+  },
+  "SPOT ASTER-USDT": {
+   "recuentos": {
+    "senales": {
+     "largos": 11,
+     "cortos": 0
+    },
+    "decisiones": 5,
+    "ejecutadas": 4,
+    "operaciones": 4,
+    "caducadas": {
+     "caduca_vela_no_utilizable": 0,
+     "caduca_contexto": 0,
+     "caduca_sin_disparo": 6
+    },
+    "no_ejecutadas": {
+     "ocupado": 1,
+     "opuestas": 0,
+     "fin_de_ventana": 0,
+     "posicion_tomada": 0,
+     "caduca_sin_minuto": 0,
+     "no_entra": 0
+    }
+   },
+   "resultados": {
+    "bruto": {
+     "operaciones": 4,
+     "positivas": 0,
+     "media": -1.0,
+     "mediana": -1.0,
+     "suma": -4.0,
+     "peor": -1.0,
+     "mejor": -1.0,
+     "caida_maxima": 4.0
+    },
+    "neto": {
+     "operaciones": 4,
+     "positivas": 0,
+     "media": -1.1041811124278074,
+     "mediana": -1.0909701585913996,
+     "suma": -4.4167244497112295,
+     "peor": -1.1441639205135758,
+     "mejor": -1.090620212014854,
+     "caida_maxima": 4.4167244497112295
+    },
+    "neto_costes_dobles": {
+     "operaciones": 4,
+     "positivas": 0,
+     "media": -1.208363224855619,
+     "mediana": -1.1819413171828064,
+     "suma": -4.833452899422476,
+     "peor": -1.2883288410271518,
+     "mejor": -1.1812414240297122,
+     "caida_maxima": 4.833452899422476
+    }
+   },
+   "regimen": {
+    "contexto": {
+     "tendencia/expansion": {
+      "operaciones": 1,
+      "r_bruto_medio": -1.0,
+      "r_neto_medio": -1.091103979248076
+     },
+     "tendencia/normal": {
+      "operaciones": 3,
+      "r_bruto_medio": -1.0,
+      "r_neto_medio": -1.1085401568210511
+     }
+    },
+    "senal": {
+     "rango/normal": {
+      "operaciones": 3,
+      "r_bruto_medio": -1.0,
+      "r_neto_medio": -1.1085401568210511
+     },
+     "transicion/normal": {
+      "operaciones": 1,
+      "r_bruto_medio": -1.0,
+      "r_neto_medio": -1.091103979248076
+     }
+    }
+   },
+   "salidas": {
+    "stop": 4,
+    "objetivo": 0,
+    "invalidacion": 0,
+    "tiempo": 0,
+    "liquidacion_fin_de_ventana": 0
+   },
+   "solo_rest": {
+    "decisiones": {
+     "minutos": 610410,
+     "solo_rest": 610410
+    },
+    "resultados": {
+     "minutos": 611723,
+     "solo_rest": 611723
+    }
+   }
+  },
+  "SPOT AVAX-USDT": {
+   "recuentos": {
+    "senales": {
+     "largos": 37,
+     "cortos": 0
+    },
+    "decisiones": 17,
+    "ejecutadas": 14,
+    "operaciones": 14,
+    "caducadas": {
+     "caduca_vela_no_utilizable": 0,
+     "caduca_contexto": 0,
+     "caduca_sin_disparo": 20
+    },
+    "no_ejecutadas": {
+     "ocupado": 3,
+     "opuestas": 0,
+     "fin_de_ventana": 0,
+     "posicion_tomada": 0,
+     "caduca_sin_minuto": 0,
+     "no_entra": 0
+    }
+   },
+   "resultados": {
+    "bruto": {
+     "operaciones": 14,
+     "positivas": 4,
+     "media": -0.2983029842535188,
+     "mediana": -0.7859353821601176,
+     "suma": -4.1762417795492635,
+     "peor": -1.0,
+     "mejor": 2.505998484464097,
+     "caida_maxima": 5.682240264013361
+    },
+    "neto": {
+     "operaciones": 14,
+     "positivas": 4,
+     "media": -0.4104361778033651,
+     "mediana": -0.8812904260686256,
+     "suma": -5.746106489247111,
+     "peor": -1.1370695178371577,
+     "mejor": 2.325427975811467,
+     "caida_maxima": 6.93446494722142
+    },
+    "neto_costes_dobles": {
+     "operaciones": 14,
+     "positivas": 3,
+     "media": -0.5225696696561972,
+     "mediana": -0.9766462559125177,
+     "suma": -7.3159753751867616,
+     "peor": -1.2741400356743156,
+     "mejor": 2.1448599731573075,
+     "caida_maxima": 8.186695312669753
+    }
+   },
+   "regimen": {
+    "contexto": {
+     "tendencia/expansion": {
+      "operaciones": 6,
+      "r_bruto_medio": -0.62583517750229,
+      "r_neto_medio": -0.7337846576954782
+     },
+     "tendencia/normal": {
+      "operaciones": 6,
+      "r_bruto_medio": 0.11399584635672048,
+      "r_neto_medio": -0.018502252649861033
+     },
+     "tendencia/sin_etiqueta": {
+      "operaciones": 2,
+      "r_bruto_medio": -0.5526028963379233,
+      "r_neto_medio": -0.6161925135875379
+     }
+    },
+    "senal": {
+     "tendencia/compresion": {
+      "operaciones": 1,
+      "r_bruto_medio": 0.6602286462656191,
+      "r_neto_medio": 0.5282000403014558
+     },
+     "tendencia/normal": {
+      "operaciones": 2,
+      "r_bruto_medio": -0.5526028963379233,
+      "r_neto_medio": -0.6233477321193182
+     },
+     "rango/expansion": {
+      "operaciones": 1,
+      "r_bruto_medio": -0.802140214308435,
+      "r_neto_medio": -0.8888291329113032
+     },
+     "rango/compresion": {
+      "operaciones": 6,
+      "r_bruto_medio": -0.027550083198235886,
+      "r_neto_medio": -0.15419885488721916
+     },
+     "transicion/compresion": {
+      "operaciones": 1,
+      "r_bruto_medio": -1.0,
+      "r_neto_medio": -1.1203242121854446
+     },
+     "transicion/normal": {
+      "operaciones": 3,
+      "r_bruto_medio": -0.5879413065470619,
+      "r_neto_medio": -0.6977548636299561
+     }
+    }
+   },
+   "salidas": {
+    "stop": 14,
+    "objetivo": 0,
+    "invalidacion": 0,
+    "tiempo": 0,
+    "liquidacion_fin_de_ventana": 0
+   },
+   "solo_rest": {
+    "decisiones": {
+     "minutos": 1152390,
+     "solo_rest": 1152390
+    },
+    "resultados": {
+     "minutos": 1168889,
+     "solo_rest": 1168889
+    }
+   }
+  },
+  "SPOT BNB-USDT": {
+   "recuentos": {
+    "senales": {
+     "largos": 40,
+     "cortos": 0
+    },
+    "decisiones": 16,
+    "ejecutadas": 15,
+    "operaciones": 15,
+    "caducadas": {
+     "caduca_vela_no_utilizable": 0,
+     "caduca_contexto": 0,
+     "caduca_sin_disparo": 24
+    },
+    "no_ejecutadas": {
+     "ocupado": 1,
+     "opuestas": 0,
+     "fin_de_ventana": 0,
+     "posicion_tomada": 0,
+     "caduca_sin_minuto": 0,
+     "no_entra": 0
+    }
+   },
+   "resultados": {
+    "bruto": {
+     "operaciones": 15,
+     "positivas": 9,
+     "media": 0.7747459809689937,
+     "mediana": 0.16879427548327133,
+     "suma": 11.621189714534905,
+     "peor": -1.0,
+     "mejor": 5.392281782000036,
+     "caida_maxima": 1.1097884208046536
+    },
+    "neto": {
+     "operaciones": 15,
+     "positivas": 7,
+     "media": 0.5431061888567317,
+     "mediana": -0.0036365567857202428,
+     "suma": 8.146592832850976,
+     "peor": -1.274515883707453,
+     "mejor": 5.09484481062015,
+     "caida_maxima": 1.7878204921779313
+    },
+    "neto_costes_dobles": {
+     "operaciones": 15,
+     "positivas": 7,
+     "media": 0.31146717149044123,
+     "mediana": -0.17606722026044438,
+     "suma": 4.672007572356619,
+     "peor": -1.5490327674149171,
+     "mejor": 4.797413231522013,
+     "caida_maxima": 2.6464531229093984
+    }
+   },
+   "regimen": {
+    "contexto": {
+     "tendencia/expansion": {
+      "operaciones": 6,
+      "r_bruto_medio": 0.8985321685301789,
+      "r_neto_medio": 0.6926582795965883
+     },
+     "tendencia/compresion": {
+      "operaciones": 2,
+      "r_bruto_medio": 0.5295029273393089,
+      "r_neto_medio": 0.35147306245976234
+     },
+     "tendencia/normal": {
+      "operaciones": 7,
+      "r_bruto_medio": 0.7387129783821734,
+      "r_neto_medio": 0.46967100433598874
+     }
+    },
+    "senal": {
+     "tendencia/expansion": {
+      "operaciones": 1,
+      "r_bruto_medio": -1.0,
+      "r_neto_medio": -1.1615512916062982
+     },
+     "tendencia/compresion": {
+      "operaciones": 1,
+      "r_bruto_medio": 0.5493838339276701,
+      "r_neto_medio": 0.3161444113667296
+     },
+     "tendencia/normal": {
+      "operaciones": 1,
+      "r_bruto_medio": -1.0,
+      "r_neto_medio": -1.149596899466559
+     },
+     "rango/expansion": {
+      "operaciones": 2,
+      "r_bruto_medio": -0.41560286225836435,
+      "r_neto_medio": -0.6085344608672277
+     },
+     "rango/compresion": {
+      "operaciones": 4,
+      "r_bruto_medio": 2.6198986941667934,
+      "r_neto_medio": 2.317484098605334
+     },
+     "rango/normal": {
+      "operaciones": 2,
+      "r_bruto_medio": -1.0,
+      "r_neto_medio": -1.211911686329126
+     },
+     "transicion/compresion": {
+      "operaciones": 1,
+      "r_bruto_medio": -1.0,
+      "r_neto_medio": -1.1642583700191398
+     },
+     "transicion/normal": {
+      "operaciones": 3,
+      "r_bruto_medio": 2.14113894281893,
+      "r_neto_medio": 1.8922702941825384
+     }
+    }
+   },
+   "salidas": {
+    "stop": 15,
+    "objetivo": 0,
+    "invalidacion": 0,
+    "tiempo": 0,
+    "liquidacion_fin_de_ventana": 0
+   },
+   "solo_rest": {
+    "decisiones": {
+     "minutos": 1916085,
+     "solo_rest": 1916085
+    },
+    "resultados": {
+     "minutos": 1936077,
+     "solo_rest": 1936077
+    }
+   }
+  },
+  "SPOT BTC-USDT": {
+   "recuentos": {
+    "senales": {
+     "largos": 46,
+     "cortos": 0
+    },
+    "decisiones": 20,
+    "ejecutadas": 17,
+    "operaciones": 17,
+    "caducadas": {
+     "caduca_vela_no_utilizable": 0,
+     "caduca_contexto": 0,
+     "caduca_sin_disparo": 26
+    },
+    "no_ejecutadas": {
+     "ocupado": 3,
+     "opuestas": 0,
+     "fin_de_ventana": 0,
+     "posicion_tomada": 0,
+     "caduca_sin_minuto": 0,
+     "no_entra": 0
+    }
+   },
+   "resultados": {
+    "bruto": {
+     "operaciones": 17,
+     "positivas": 3,
+     "media": -0.4190010175536913,
+     "mediana": -0.6911477327293415,
+     "suma": -7.123017298412752,
+     "peor": -1.0,
+     "mejor": 1.5858508581425315,
+     "caida_maxima": 7.123017298412752
+    },
+    "neto": {
+     "operaciones": 17,
+     "positivas": 2,
+     "media": -0.7649301122841482,
+     "mediana": -0.8864099037604005,
+     "suma": -13.003811908830519,
+     "peor": -1.6617806680778244,
+     "mejor": 1.1776920425823518,
+     "caida_maxima": 13.003811908830519
+    },
+    "neto_costes_dobles": {
+     "operaciones": 17,
+     "positivas": 2,
+     "media": -1.1108596260156378,
+     "mediana": -1.1451314817930236,
+     "suma": -18.884613642265844,
+     "peor": -2.3235623361556765,
+     "mejor": 0.8024383946793748,
+     "caida_maxima": 18.884613642265844
+    }
+   },
+   "regimen": {
+    "contexto": {
+     "tendencia/expansion": {
+      "operaciones": 1,
+      "r_bruto_medio": -1.0,
+      "r_neto_medio": -1.2832097959379247
+     },
+     "tendencia/compresion": {
+      "operaciones": 7,
+      "r_bruto_medio": -0.599705214630636,
+      "r_neto_medio": -0.9317512926408463
+     },
+     "tendencia/normal": {
+      "operaciones": 9,
+      "r_bruto_medio": -0.21389786622203338,
+      "r_neto_medio": -0.5775936738229633
+     }
+    },
+    "senal": {
+     "tendencia/expansion": {
+      "operaciones": 3,
+      "r_bruto_medio": -0.7707950729883081,
+      "r_neto_medio": -1.0317058382899533
+     },
+     "tendencia/normal": {
+      "operaciones": 3,
+      "r_bruto_medio": -0.13804971395248952,
+      "r_neto_medio": -0.5659321544298596
+     },
+     "rango/compresion": {
+      "operaciones": 4,
+      "r_bruto_medio": -0.7533499214728467,
+      "r_neto_medio": -1.0802115141162139
+     },
+     "rango/normal": {
+      "operaciones": 4,
+      "r_bruto_medio": -0.06252803725143194,
+      "r_neto_medio": -0.42781942497608827
+     },
+     "transicion/compresion": {
+      "operaciones": 1,
+      "r_bruto_medio": -1.0,
+      "r_neto_medio": -1.4201537272560816
+     },
+     "transicion/normal": {
+      "operaciones": 2,
+      "r_bruto_medio": -0.06648555134662248,
+      "r_neto_medio": -0.3793102235228952
+     }
+    }
+   },
+   "salidas": {
+    "stop": 17,
+    "objetivo": 0,
+    "invalidacion": 0,
+    "tiempo": 0,
+    "liquidacion_fin_de_ventana": 0
+   },
+   "solo_rest": {
+    "decisiones": {
+     "minutos": 2146635,
+     "solo_rest": 2146635
+    },
+    "resultados": {
+     "minutos": 2163281,
+     "solo_rest": 2163281
+    }
+   }
+  },
+  "SPOT DOGE-USDT": {
+   "recuentos": {
+    "senales": {
+     "largos": 35,
+     "cortos": 0
+    },
+    "decisiones": 15,
+    "ejecutadas": 13,
+    "operaciones": 13,
+    "caducadas": {
+     "caduca_vela_no_utilizable": 0,
+     "caduca_contexto": 0,
+     "caduca_sin_disparo": 20
+    },
+    "no_ejecutadas": {
+     "ocupado": 2,
+     "opuestas": 0,
+     "fin_de_ventana": 0,
+     "posicion_tomada": 0,
+     "caduca_sin_minuto": 0,
+     "no_entra": 0
+    }
+   },
+   "resultados": {
+    "bruto": {
+     "operaciones": 13,
+     "positivas": 7,
+     "media": 0.6579506119610822,
+     "mediana": 0.25732514291701153,
+     "suma": 8.553357955494068,
+     "peor": -1.0,
+     "mejor": 5.11221839547539,
+     "caida_maxima": 2.9160203664136946
+    },
+    "neto": {
+     "operaciones": 13,
+     "positivas": 7,
+     "media": 0.5482150275698299,
+     "mediana": 0.1616370364770333,
+     "suma": 7.126795358407788,
+     "peor": -1.1337750329776914,
+     "mejor": 4.9484920983251985,
+     "caida_maxima": 3.5848287588680936
+    },
+    "neto_costes_dobles": {
+     "operaciones": 13,
+     "positivas": 7,
+     "media": 0.4384801011291846,
+     "mediana": 0.06594918736218829,
+     "suma": 5.7002413146794,
+     "peor": -1.2675510659553968,
+     "mejor": 4.7847709133934115,
+     "caida_maxima": 4.253640067342904
+    }
+   },
+   "regimen": {
+    "contexto": {
+     "tendencia/expansion": {
+      "operaciones": 4,
+      "r_bruto_medio": -0.6539632604539858,
+      "r_neto_medio": -0.7326944451969731
+     },
+     "tendencia/normal": {
+      "operaciones": 9,
+      "r_bruto_medio": 1.241023444145557,
+      "r_neto_medio": 1.117508126577298
+     }
+    },
+    "senal": {
+     "tendencia/expansion": {
+      "operaciones": 2,
+      "r_bruto_medio": -0.17084666279188626,
+      "r_neto_medio": -0.25154978672114103
+     },
+     "tendencia/compresion": {
+      "operaciones": 1,
+      "r_bruto_medio": -0.590105695711709,
+      "r_neto_medio": -0.716503477423297
+     },
+     "tendencia/normal": {
+      "operaciones": 3,
+      "r_bruto_medio": 2.76556640606293,
+      "r_neto_medio": 2.6335914412902666
+     },
+     "rango/compresion": {
+      "operaciones": 1,
+      "r_bruto_medio": -1.0,
+      "r_neto_medio": -1.1337750329776914
+     },
+     "rango/normal": {
+      "operaciones": 2,
+      "r_bruto_medio": -0.2743966128844849,
+      "r_neto_medio": -0.3681267961034369
+     },
+     "transicion/expansion": {
+      "operaciones": 1,
+      "r_bruto_medio": 0.3841469581840571,
+      "r_neto_medio": 0.31225580104632067
+     },
+     "transicion/compresion": {
+      "operaciones": 2,
+      "r_bruto_medio": 1.3607361647439713,
+      "r_neto_medio": 1.249061096726717
+     },
+     "transicion/normal": {
+      "operaciones": 1,
+      "r_bruto_medio": -0.36836830330226983,
+      "r_neto_medio": -0.4947252839126216
+     }
+    }
+   },
+   "salidas": {
+    "stop": 13,
+    "objetivo": 0,
+    "invalidacion": 0,
+    "tiempo": 0,
+    "liquidacion_fin_de_ventana": 0
+   },
+   "solo_rest": {
+    "decisiones": {
+     "minutos": 1319625,
+     "solo_rest": 1319625
+    },
+    "resultados": {
+     "minutos": 1338456,
+     "solo_rest": 1338456
+    }
+   }
+  },
+  "SPOT DOT-USDT": {
+   "recuentos": {
+    "senales": {
+     "largos": 42,
+     "cortos": 0
+    },
+    "decisiones": 19,
+    "ejecutadas": 14,
+    "operaciones": 14,
+    "caducadas": {
+     "caduca_vela_no_utilizable": 0,
+     "caduca_contexto": 0,
+     "caduca_sin_disparo": 23
+    },
+    "no_ejecutadas": {
+     "ocupado": 5,
+     "opuestas": 0,
+     "fin_de_ventana": 0,
+     "posicion_tomada": 0,
+     "caduca_sin_minuto": 0,
+     "no_entra": 0
+    }
+   },
+   "resultados": {
+    "bruto": {
+     "operaciones": 14,
+     "positivas": 4,
+     "media": -0.29609430480093707,
+     "mediana": -0.8451054711531356,
+     "suma": -4.145320267213119,
+     "peor": -1.0,
+     "mejor": 2.793438093575094,
+     "caida_maxima": 5.7372618886753495
+    },
+    "neto": {
+     "operaciones": 14,
+     "positivas": 4,
+     "media": -0.4116307415109241,
+     "mediana": -0.9393590035347139,
+     "suma": -5.762830381152938,
+     "peor": -1.1853217531232632,
+     "mejor": 2.6029284508455195,
+     "caida_maxima": 7.166589480632883
+    },
+    "neto_costes_dobles": {
+     "operaciones": 14,
+     "positivas": 4,
+     "media": -0.5271674743152192,
+     "mediana": -1.0228551806250596,
+     "suma": -7.3803446404130675,
+     "peor": -1.3706445062465396,
+     "mejor": 2.412421601554051,
+     "caida_maxima": 8.699149857894026
+    }
+   },
+   "regimen": {
+    "contexto": {
+     "tendencia/expansion": {
+      "operaciones": 4,
+      "r_bruto_medio": -0.48868647413802335,
+      "r_neto_medio": -0.5807311992319937
+     },
+     "tendencia/compresion": {
+      "operaciones": 1,
+      "r_bruto_medio": -1.0,
+      "r_neto_medio": -1.1227595352319983
+     },
+     "tendencia/normal": {
+      "operaciones": 7,
+      "r_bruto_medio": -0.23989840583634764,
+      "r_neto_medio": -0.3817201420348217
+     },
+     "tendencia/sin_etiqueta": {
+      "operaciones": 2,
+      "r_bruto_medio": 0.24435723509670393,
+      "r_neto_medio": 0.1774474726253935
+     }
+    },
+    "senal": {
+     "tendencia/expansion": {
+      "operaciones": 1,
+      "r_bruto_medio": -1.0,
+      "r_neto_medio": -1.122845122461303
+     },
+     "rango/expansion": {
+      "operaciones": 3,
+      "r_bruto_medio": -0.14395756300605336,
+      "r_neto_medio": -0.25139391588327875
+     },
+     "rango/compresion": {
+      "operaciones": 3,
+      "r_bruto_medio": -0.7684630665523965,
+      "r_neto_medio": -0.8990163810952886
+     },
+     "rango/normal": {
+      "operaciones": 4,
+      "r_bruto_medio": 0.6479854053655576,
+      "r_neto_medio": 0.5319923858140092
+     },
+     "transicion/expansion": {
+      "operaciones": 1,
+      "r_bruto_medio": -1.0,
+      "r_neto_medio": -1.1349496121006268
+     },
+     "transicion/compresion": {
+      "operaciones": 1,
+      "r_bruto_medio": -1.0,
+      "r_neto_medio": -1.1329101446821845
+     },
+     "transicion/normal": {
+      "operaciones": 1,
+      "r_bruto_medio": -1.0,
+      "r_neto_medio": -1.0488641542291581
+     }
+    }
+   },
+   "salidas": {
+    "stop": 14,
+    "objetivo": 0,
+    "invalidacion": 0,
+    "tiempo": 0,
+    "liquidacion_fin_de_ventana": 0
+   },
+   "solo_rest": {
+    "decisiones": {
+     "minutos": 1493280,
+     "solo_rest": 1493280
+    },
+    "resultados": {
+     "minutos": 1512159,
+     "solo_rest": 1512159
+    }
+   }
+  },
+  "SPOT ETH-USDT": {
+   "recuentos": {
+    "senales": {
+     "largos": 47,
+     "cortos": 0
+    },
+    "decisiones": 23,
+    "ejecutadas": 20,
+    "operaciones": 20,
+    "caducadas": {
+     "caduca_vela_no_utilizable": 0,
+     "caduca_contexto": 0,
+     "caduca_sin_disparo": 24
+    },
+    "no_ejecutadas": {
+     "ocupado": 3,
+     "opuestas": 0,
+     "fin_de_ventana": 0,
+     "posicion_tomada": 0,
+     "caduca_sin_minuto": 0,
+     "no_entra": 0
+    }
+   },
+   "resultados": {
+    "bruto": {
+     "operaciones": 20,
+     "positivas": 5,
+     "media": -0.26034058024973206,
+     "mediana": -1.0,
+     "suma": -5.206811604994641,
+     "peor": -1.0,
+     "mejor": 3.468094373221678,
+     "caida_maxima": 5.631599988513187
+    },
+    "neto": {
+     "operaciones": 20,
+     "positivas": 5,
+     "media": -0.4399513276724745,
+     "mediana": -1.153759857241778,
+     "suma": -8.79902655344949,
+     "peor": -1.3188199918195098,
+     "mejor": 3.3196062637042196,
+     "caida_maxima": 8.799026553449492
+    },
+    "neto_costes_dobles": {
+     "operaciones": 20,
+     "positivas": 5,
+     "media": -0.6195623354358023,
+     "mediana": -1.30752071448357,
+     "suma": -12.391246708716046,
+     "peor": -1.6376409836390045,
+     "mejor": 3.1711216222811247,
+     "caida_maxima": 12.391246708716046
+    }
+   },
+   "regimen": {
+    "contexto": {
+     "tendencia/expansion": {
+      "operaciones": 6,
+      "r_bruto_medio": 0.26801695639629025,
+      "r_neto_medio": 0.12058746136982608
+     },
+     "tendencia/compresion": {
+      "operaciones": 2,
+      "r_bruto_medio": -0.7059888210159581,
+      "r_neto_medio": -0.8739187953244715
+     },
+     "tendencia/normal": {
+      "operaciones": 11,
+      "r_bruto_medio": -0.4836341461325672,
+      "r_neto_medio": -0.6834578361925187
+     },
+     "tendencia/sin_etiqueta": {
+      "operaciones": 1,
+      "r_bruto_medio": -0.08296009388222661,
+      "r_neto_medio": -0.25667753290179807
+     }
+    },
+    "senal": {
+     "tendencia/expansion": {
+      "operaciones": 4,
+      "r_bruto_medio": 0.15160672467282144,
+      "r_neto_medio": 0.003441862421782238
+     },
+     "tendencia/normal": {
+      "operaciones": 3,
+      "r_bruto_medio": -1.0,
+      "r_neto_medio": -1.1534234390209583
+     },
+     "rango/expansion": {
+      "operaciones": 1,
+      "r_bruto_medio": 3.468094373221678,
+      "r_neto_medio": 3.3196062637042196
+     },
+     "rango/compresion": {
+      "operaciones": 5,
+      "r_bruto_medio": 0.026128953024862372,
+      "r_neto_medio": -0.17408029862476931
+     },
+     "rango/normal": {
+      "operaciones": 3,
+      "r_bruto_medio": -1.0,
+      "r_neto_medio": -1.19851112152496
+     },
+     "transicion/expansion": {
+      "operaciones": 1,
+      "r_bruto_medio": -1.0,
+      "r_neto_medio": -1.1655888895241797
+     },
+     "transicion/normal": {
+      "operaciones": 3,
+      "r_bruto_medio": -0.803992547343972,
+      "r_neto_medio": -1.013535400851686
+     }
+    }
+   },
+   "salidas": {
+    "stop": 20,
+    "objetivo": 0,
+    "invalidacion": 0,
+    "tiempo": 0,
+    "liquidacion_fin_de_ventana": 0
+   },
+   "solo_rest": {
+    "decisiones": {
+     "minutos": 2085405,
+     "solo_rest": 2085405
+    },
+    "resultados": {
+     "minutos": 2109222,
+     "solo_rest": 2109222
+    }
+   }
+  },
+  "SPOT EVAA-USDT": {
+   "recuentos": {
+    "senales": {
+     "largos": 0,
+     "cortos": 0
+    },
+    "decisiones": 0,
+    "ejecutadas": 0,
+    "operaciones": 0,
+    "caducadas": {
+     "caduca_vela_no_utilizable": 0,
+     "caduca_contexto": 0,
+     "caduca_sin_disparo": 0
+    },
+    "no_ejecutadas": {
+     "ocupado": 0,
+     "opuestas": 0,
+     "fin_de_ventana": 0,
+     "posicion_tomada": 0,
+     "caduca_sin_minuto": 0,
+     "no_entra": 0
+    }
+   },
+   "resultados": {
+    "bruto": {
+     "operaciones": 0,
+     "positivas": 0,
+     "media": null,
+     "mediana": null,
+     "suma": 0.0,
+     "peor": null,
+     "mejor": null,
+     "caida_maxima": 0.0
+    },
+    "neto": {
+     "operaciones": 0,
+     "positivas": 0,
+     "media": null,
+     "mediana": null,
+     "suma": 0.0,
+     "peor": null,
+     "mejor": null,
+     "caida_maxima": 0.0
+    },
+    "neto_costes_dobles": {
+     "operaciones": 0,
+     "positivas": 0,
+     "media": null,
+     "mediana": null,
+     "suma": 0.0,
+     "peor": null,
+     "mejor": null,
+     "caida_maxima": 0.0
+    }
+   },
+   "regimen": {
+    "contexto": {},
+    "senal": {}
+   },
+   "salidas": {
+    "stop": 0,
+    "objetivo": 0,
+    "invalidacion": 0,
+    "tiempo": 0,
+    "liquidacion_fin_de_ventana": 0
+   },
+   "solo_rest": {
+    "decisiones": {
+     "minutos": 0,
+     "solo_rest": 0
+    },
+    "resultados": {
+     "minutos": 0,
+     "solo_rest": 0
+    }
+   }
+  },
+  "SPOT LTC-USDT": {
+   "recuentos": {
+    "senales": {
+     "largos": 44,
+     "cortos": 0
+    },
+    "decisiones": 18,
+    "ejecutadas": 15,
+    "operaciones": 15,
+    "caducadas": {
+     "caduca_vela_no_utilizable": 0,
+     "caduca_contexto": 0,
+     "caduca_sin_disparo": 26
+    },
+    "no_ejecutadas": {
+     "ocupado": 3,
+     "opuestas": 0,
+     "fin_de_ventana": 0,
+     "posicion_tomada": 0,
+     "caduca_sin_minuto": 0,
+     "no_entra": 0
+    }
+   },
+   "resultados": {
+    "bruto": {
+     "operaciones": 15,
+     "positivas": 2,
+     "media": -0.6511607040463967,
+     "mediana": -1.0,
+     "suma": -9.76741056069595,
+     "peor": -1.0,
+     "mejor": 0.8815402409834728,
+     "caida_maxima": 9.76741056069595
+    },
+    "neto": {
+     "operaciones": 15,
+     "positivas": 1,
+     "media": -0.771757143234425,
+     "mediana": -1.041135488096484,
+     "suma": -11.576357148516376,
+     "peor": -1.1808492849668792,
+     "mejor": 0.6584852336582275,
+     "caida_maxima": 11.576357148516376
+    },
+    "neto_costes_dobles": {
+     "operaciones": 15,
+     "positivas": 1,
+     "media": -0.8923542335831591,
+     "mediana": -1.0822719761929709,
+     "suma": -13.385313503747387,
+     "peor": -1.3616995699337657,
+     "mejor": 0.4354311078732057,
+     "caida_maxima": 13.385313503747389
+    }
+   },
+   "regimen": {
+    "contexto": {
+     "tendencia/expansion": {
+      "operaciones": 5,
+      "r_bruto_medio": -0.8373954072198739,
+      "r_neto_medio": -0.9570132627519659
+     },
+     "tendencia/compresion": {
+      "operaciones": 1,
+      "r_bruto_medio": -1.0,
+      "r_neto_medio": -1.1543932974391173
+     },
+     "tendencia/normal": {
+      "operaciones": 6,
+      "r_bruto_medio": -0.43072980562869406,
+      "r_neto_medio": -0.5779091420246688
+     },
+     "tendencia/sin_etiqueta": {
+      "operaciones": 3,
+      "r_bruto_medio": -0.6653515636081387,
+      "r_neto_medio": -0.7231475617231391
+     }
+    },
+    "senal": {
+     "tendencia/expansion": {
+      "operaciones": 2,
+      "r_bruto_medio": -0.7619138047569678,
+      "r_neto_medio": -0.8157014772033283
+     },
+     "tendencia/compresion": {
+      "operaciones": 3,
+      "r_bruto_medio": -0.6488973472192671,
+      "r_neto_medio": -0.7502829330375915
+     },
+     "tendencia/normal": {
+      "operaciones": 1,
+      "r_bruto_medio": -1.0,
+      "r_neto_medio": -1.1808492849668792
+     },
+     "rango/expansion": {
+      "operaciones": 4,
+      "r_bruto_medio": -0.7955941149208174,
+      "r_neto_medio": -0.9290884963680774
+     },
+     "rango/compresion": {
+      "operaciones": 1,
+      "r_bruto_medio": 0.8815402409834728,
+      "r_neto_medio": 0.6584852336582275
+     },
+     "rango/normal": {
+      "operaciones": 1,
+      "r_bruto_medio": 0.0039453091755838835,
+      "r_neto_medio": -0.05201925795122205
+     },
+     "transicion/expansion": {
+      "operaciones": 1,
+      "r_bruto_medio": -1.0,
+      "r_neto_medio": -1.1656579772486106
+     },
+     "transicion/compresion": {
+      "operaciones": 1,
+      "r_bruto_medio": -1.0,
+      "r_neto_medio": -1.076287939121711
+     },
+     "transicion/normal": {
+      "operaciones": 1,
+      "r_bruto_medio": -1.0,
+      "r_neto_medio": -1.16142218389444
+     }
+    }
+   },
+   "salidas": {
+    "stop": 15,
+    "objetivo": 0,
+    "invalidacion": 0,
+    "tiempo": 0,
+    "liquidacion_fin_de_ventana": 0
+   },
+   "solo_rest": {
+    "decisiones": {
+     "minutos": 1658490,
+     "solo_rest": 1658490
+    },
+    "resultados": {
+     "minutos": 1673018,
+     "solo_rest": 1673018
+    }
+   }
+  },
+  "SPOT NEAR-USDT": {
+   "recuentos": {
+    "senales": {
+     "largos": 34,
+     "cortos": 0
+    },
+    "decisiones": 22,
+    "ejecutadas": 21,
+    "operaciones": 21,
+    "caducadas": {
+     "caduca_vela_no_utilizable": 0,
+     "caduca_contexto": 0,
+     "caduca_sin_disparo": 12
+    },
+    "no_ejecutadas": {
+     "ocupado": 1,
+     "opuestas": 0,
+     "fin_de_ventana": 0,
+     "posicion_tomada": 0,
+     "caduca_sin_minuto": 0,
+     "no_entra": 0
+    }
+   },
+   "resultados": {
+    "bruto": {
+     "operaciones": 21,
+     "positivas": 6,
+     "media": -0.3798866802277996,
+     "mediana": -0.993048122656089,
+     "suma": -7.977620284783791,
+     "peor": -1.0004260095232116,
+     "mejor": 2.7542048763399634,
+     "caida_maxima": 8.731399151600543
+    },
+    "neto": {
+     "operaciones": 21,
+     "positivas": 4,
+     "media": -0.49376745492553265,
+     "mediana": -1.0812196402841345,
+     "suma": -10.369116553436186,
+     "peor": -1.179887497552074,
+     "mejor": 2.6324615859274463,
+     "caida_maxima": 10.755608789633785
+    },
+    "neto_costes_dobles": {
+     "operaciones": 21,
+     "positivas": 4,
+     "media": -0.6076486095099491,
+     "mediana": -1.1624402805682765,
+     "suma": -12.760620799708931,
+     "peor": -1.3667278654961912,
+     "mejor": 2.510721049719806,
+     "caida_maxima": 12.779827159066237
+    }
+   },
+   "regimen": {
+    "contexto": {
+     "tendencia/expansion": {
+      "operaciones": 9,
+      "r_bruto_medio": -0.48622199632801316,
+      "r_neto_medio": -0.5748379947772705
+     },
+     "tendencia/compresion": {
+      "operaciones": 2,
+      "r_bruto_medio": -0.12588024736431758,
+      "r_neto_medio": -0.2747978183537578
+     },
+     "tendencia/normal": {
+      "operaciones": 10,
+      "r_bruto_medio": -0.33498618231030375,
+      "r_neto_medio": -0.4645978963733236
+     }
+    },
+    "senal": {
+     "tendencia/expansion": {
+      "operaciones": 3,
+      "r_bruto_medio": -0.3429513701921902,
+      "r_neto_medio": -0.43720965393218963
+     },
+     "tendencia/compresion": {
+      "operaciones": 1,
+      "r_bruto_medio": 0.04901701321007403,
+      "r_neto_medio": -0.1379746076926504
+     },
+     "tendencia/normal": {
+      "operaciones": 1,
+      "r_bruto_medio": -1.0,
+      "r_neto_medio": -1.0949523683337037
+     },
+     "rango/expansion": {
+      "operaciones": 2,
+      "r_bruto_medio": -0.6784119460642692,
+      "r_neto_medio": -0.7843278956772912
+     },
+     "rango/compresion": {
+      "operaciones": 6,
+      "r_bruto_medio": -0.3794186257367284,
+      "r_neto_medio": -0.5063737328579799
+     },
+     "rango/normal": {
+      "operaciones": 2,
+      "r_bruto_medio": -1.0,
+      "r_neto_medio": -1.1170637644916361
+     },
+     "transicion/expansion": {
+      "operaciones": 3,
+      "r_bruto_medio": 0.523973608777762,
+      "r_neto_medio": 0.4070887401672323
+     },
+     "transicion/normal": {
+      "operaciones": 3,
+      "r_bruto_medio": -0.6454561224005573,
+      "r_neto_medio": -0.734933706209742
+     }
+    }
+   },
+   "salidas": {
+    "stop": 21,
+    "objetivo": 0,
+    "invalidacion": 0,
+    "tiempo": 0,
+    "liquidacion_fin_de_ventana": 0
+   },
+   "solo_rest": {
+    "decisiones": {
+     "minutos": 2458965,
+     "solo_rest": 2458965
+    },
+    "resultados": {
+     "minutos": 2478287,
+     "solo_rest": 2478287
+    }
+   }
+  },
+  "SPOT PEPE-USDT": {
+   "recuentos": {
+    "senales": {
+     "largos": 34,
+     "cortos": 0
+    },
+    "decisiones": 23,
+    "ejecutadas": 17,
+    "operaciones": 17,
+    "caducadas": {
+     "caduca_vela_no_utilizable": 0,
+     "caduca_contexto": 0,
+     "caduca_sin_disparo": 11
+    },
+    "no_ejecutadas": {
+     "ocupado": 6,
+     "opuestas": 0,
+     "fin_de_ventana": 0,
+     "posicion_tomada": 0,
+     "caduca_sin_minuto": 0,
+     "no_entra": 0
+    }
+   },
+   "resultados": {
+    "bruto": {
+     "operaciones": 17,
+     "positivas": 5,
+     "media": -0.2361235386013572,
+     "mediana": -1.0,
+     "suma": -4.014100156223073,
+     "peor": -1.0,
+     "mejor": 3.254286109408274,
+     "caida_maxima": 5.268386265631347
+    },
+    "neto": {
+     "operaciones": 17,
+     "positivas": 5,
+     "media": -0.3273999198230277,
+     "mediana": -1.042404687478545,
+     "suma": -5.56579863699147,
+     "peor": -1.146019748743111,
+     "mejor": 3.1168056804524973,
+     "caida_maxima": 6.47773333064844
+    },
+    "neto_costes_dobles": {
+     "operaciones": 17,
+     "positivas": 5,
+     "media": -0.4186765371682393,
+     "mediana": -1.0848103749570899,
+     "suma": -7.1175011318600685,
+     "peor": -1.2920404974862219,
+     "mejor": 2.9793285057828296,
+     "caida_maxima": 7.68708566405184
+    }
+   },
+   "regimen": {
+    "contexto": {
+     "tendencia/expansion": {
+      "operaciones": 5,
+      "r_bruto_medio": -0.3017824601751379,
+      "r_neto_medio": -0.3689999591552823
+     },
+     "tendencia/compresion": {
+      "operaciones": 4,
+      "r_bruto_medio": 0.13507835407023738,
+      "r_neto_medio": 0.04386818731964462
+     },
+     "tendencia/normal": {
+      "operaciones": 8,
+      "r_bruto_medio": -0.3806876589535416,
+      "r_neto_medio": -0.4870339488117047
+     }
+    },
+    "senal": {
+     "tendencia/expansion": {
+      "operaciones": 1,
+      "r_bruto_medio": -1.0,
+      "r_neto_medio": -1.0654159041783697
+     },
+     "tendencia/compresion": {
+      "operaciones": 2,
+      "r_bruto_medio": -1.0,
+      "r_neto_medio": -1.1003527357945893
+     },
+     "tendencia/normal": {
+      "operaciones": 4,
+      "r_bruto_medio": 0.23290653921490023,
+      "r_neto_medio": 0.149109365834904
+     },
+     "rango/expansion": {
+      "operaciones": 1,
+      "r_bruto_medio": -1.0,
+      "r_neto_medio": -1.1150662344319813
+     },
+     "rango/compresion": {
+      "operaciones": 2,
+      "r_bruto_medio": -0.8569863465636622,
+      "r_neto_medio": -0.9713771313108661
+     },
+     "rango/normal": {
+      "operaciones": 2,
+      "r_bruto_medio": 1.127143054704137,
+      "r_neto_medio": 1.0188115836677847
+     },
+     "transicion/expansion": {
+      "operaciones": 2,
+      "r_bruto_medio": -0.7112092374509545,
+      "r_neto_medio": -0.791415863322675
+     },
+     "transicion/normal": {
+      "operaciones": 3,
+      "r_bruto_medio": -0.021207084820571414,
+      "r_neto_medio": -0.09769522273334802
+     }
+    }
+   },
+   "salidas": {
+    "stop": 17,
+    "objetivo": 0,
+    "invalidacion": 0,
+    "tiempo": 0,
+    "liquidacion_fin_de_ventana": 0
+   },
+   "solo_rest": {
+    "decisiones": {
+     "minutos": 1904640,
+     "solo_rest": 1904640
+    },
+    "resultados": {
+     "minutos": 1922835,
+     "solo_rest": 1922835
+    }
+   }
+  },
+  "SPOT PIEVERSE-USDT": {
+   "recuentos": {
+    "senales": {
+     "largos": 0,
+     "cortos": 0
+    },
+    "decisiones": 0,
+    "ejecutadas": 0,
+    "operaciones": 0,
+    "caducadas": {
+     "caduca_vela_no_utilizable": 0,
+     "caduca_contexto": 0,
+     "caduca_sin_disparo": 0
+    },
+    "no_ejecutadas": {
+     "ocupado": 0,
+     "opuestas": 0,
+     "fin_de_ventana": 0,
+     "posicion_tomada": 0,
+     "caduca_sin_minuto": 0,
+     "no_entra": 0
+    }
+   },
+   "resultados": {
+    "bruto": {
+     "operaciones": 0,
+     "positivas": 0,
+     "media": null,
+     "mediana": null,
+     "suma": 0.0,
+     "peor": null,
+     "mejor": null,
+     "caida_maxima": 0.0
+    },
+    "neto": {
+     "operaciones": 0,
+     "positivas": 0,
+     "media": null,
+     "mediana": null,
+     "suma": 0.0,
+     "peor": null,
+     "mejor": null,
+     "caida_maxima": 0.0
+    },
+    "neto_costes_dobles": {
+     "operaciones": 0,
+     "positivas": 0,
+     "media": null,
+     "mediana": null,
+     "suma": 0.0,
+     "peor": null,
+     "mejor": null,
+     "caida_maxima": 0.0
+    }
+   },
+   "regimen": {
+    "contexto": {},
+    "senal": {}
+   },
+   "salidas": {
+    "stop": 0,
+    "objetivo": 0,
+    "invalidacion": 0,
+    "tiempo": 0,
+    "liquidacion_fin_de_ventana": 0
+   },
+   "solo_rest": {
+    "decisiones": {
+     "minutos": 0,
+     "solo_rest": 0
+    },
+    "resultados": {
+     "minutos": 0,
+     "solo_rest": 0
+    }
+   }
+  },
+  "SPOT SOL-USDT": {
+   "recuentos": {
+    "senales": {
+     "largos": 47,
+     "cortos": 0
+    },
+    "decisiones": 19,
+    "ejecutadas": 19,
+    "operaciones": 19,
+    "caducadas": {
+     "caduca_vela_no_utilizable": 0,
+     "caduca_contexto": 0,
+     "caduca_sin_disparo": 28
+    },
+    "no_ejecutadas": {
+     "ocupado": 0,
+     "opuestas": 0,
+     "fin_de_ventana": 0,
+     "posicion_tomada": 0,
+     "caduca_sin_minuto": 0,
+     "no_entra": 0
+    }
+   },
+   "resultados": {
+    "bruto": {
+     "operaciones": 19,
+     "positivas": 4,
+     "media": -0.4690124290613326,
+     "mediana": -0.9388025869459832,
+     "suma": -8.91123615216532,
+     "peor": -1.0,
+     "mejor": 3.479488629871835,
+     "caida_maxima": 9.09605499570471
+    },
+    "neto": {
+     "operaciones": 19,
+     "positivas": 2,
+     "media": -0.6040260998170895,
+     "mediana": -1.0770930163186663,
+     "suma": -11.476495896524701,
+     "peor": -1.1438998597765029,
+     "mejor": 3.2870660426153626,
+     "caida_maxima": 11.476495896524703
+    },
+    "neto_costes_dobles": {
+     "operaciones": 19,
+     "positivas": 2,
+     "media": -0.7390402395852801,
+     "mediana": -1.178808687518874,
+     "suma": -14.041764552120322,
+     "peor": -1.3047078770817553,
+     "mejor": 3.094646934847512,
+     "caida_maxima": 14.041764552120322
+    }
+   },
+   "regimen": {
+    "contexto": {
+     "tendencia/expansion": {
+      "operaciones": 8,
+      "r_bruto_medio": -0.6486043560050375,
+      "r_neto_medio": -0.7538777852080076
+     },
+     "tendencia/compresion": {
+      "operaciones": 3,
+      "r_bruto_medio": -0.47120100479297505,
+      "r_neto_medio": -0.6601626841067422
+     },
+     "tendencia/normal": {
+      "operaciones": 8,
+      "r_bruto_medio": -0.2885997862182617,
+      "r_neto_medio": -0.43312319531755167
+     }
+    },
+    "senal": {
+     "tendencia/expansion": {
+      "operaciones": 4,
+      "r_bruto_medio": -0.9207620079117965,
+      "r_neto_medio": -1.0206533650351108
+     },
+     "tendencia/compresion": {
+      "operaciones": 2,
+      "r_bruto_medio": -0.43195313580282235,
+      "r_neto_medio": -0.5454662482848807
+     },
+     "tendencia/normal": {
+      "operaciones": 5,
+      "r_bruto_medio": -0.09186279141482963,
+      "r_neto_medio": -0.24291139609829412
+     },
+     "rango/expansion": {
+      "operaciones": 2,
+      "r_bruto_medio": -0.548870271246579,
+      "r_neto_medio": -0.6862376211011466
+     },
+     "rango/normal": {
+      "operaciones": 4,
+      "r_bruto_medio": -0.28891629712472744,
+      "r_neto_medio": -0.4507850300244417
+     },
+     "transicion/expansion": {
+      "operaciones": 1,
+      "r_bruto_medio": -0.9882792727703658,
+      "r_neto_medio": -1.1030067260841223
+     },
+     "transicion/normal": {
+      "operaciones": 1,
+      "r_bruto_medio": -0.6632828880759072,
+      "r_neto_medio": -0.8097708709388436
+     }
+    }
+   },
+   "salidas": {
+    "stop": 19,
+    "objetivo": 0,
+    "invalidacion": 0,
+    "tiempo": 0,
+    "liquidacion_fin_de_ventana": 0
+   },
+   "solo_rest": {
+    "decisiones": {
+     "minutos": 2375970,
+     "solo_rest": 2375970
+    },
+    "resultados": {
+     "minutos": 2396463,
+     "solo_rest": 2396463
+    }
+   }
+  },
+  "SPOT SUI-USDT": {
+   "recuentos": {
+    "senales": {
+     "largos": 30,
+     "cortos": 0
+    },
+    "decisiones": 13,
+    "ejecutadas": 9,
+    "operaciones": 9,
+    "caducadas": {
+     "caduca_vela_no_utilizable": 0,
+     "caduca_contexto": 0,
+     "caduca_sin_disparo": 17
+    },
+    "no_ejecutadas": {
+     "ocupado": 4,
+     "opuestas": 0,
+     "fin_de_ventana": 0,
+     "posicion_tomada": 0,
+     "caduca_sin_minuto": 0,
+     "no_entra": 0
+    }
+   },
+   "resultados": {
+    "bruto": {
+     "operaciones": 9,
+     "positivas": 4,
+     "media": 0.7211605453434122,
+     "mediana": -0.6630900307512639,
+     "suma": 6.49044490809071,
+     "peor": -1.0,
+     "mejor": 6.205884737894116,
+     "caida_maxima": 4.313742378099358
+    },
+    "neto": {
+     "operaciones": 9,
+     "positivas": 4,
+     "media": 0.6180237133921451,
+     "mediana": -0.743850351050207,
+     "suma": 5.562213420529306,
+     "peor": -1.1015617802414015,
+     "mejor": 6.08440898828536,
+     "caida_maxima": 4.802952541780211
+    },
+    "neto_costes_dobles": {
+     "operaciones": 9,
+     "positivas": 4,
+     "media": 0.514887602601421,
+     "mediana": -0.8246113344391841,
+     "suma": 4.633988423412789,
+     "peor": -1.2031245604828116,
+     "mejor": 5.962939444561339,
+     "caida_maxima": 5.292167019203456
+    }
+   },
+   "regimen": {
+    "contexto": {
+     "tendencia/expansion": {
+      "operaciones": 1,
+      "r_bruto_medio": 6.205884737894116,
+      "r_neto_medio": 6.08440898828536
+     },
+     "tendencia/normal": {
+      "operaciones": 7,
+      "r_bruto_medio": 0.18350859574237063,
+      "r_neto_medio": 0.07950968784305194
+     },
+     "tendencia/sin_etiqueta": {
+      "operaciones": 1,
+      "r_bruto_medio": -1.0,
+      "r_neto_medio": -1.078763382657417
+     }
+    },
+    "senal": {
+     "tendencia/expansion": {
+      "operaciones": 1,
+      "r_bruto_medio": 0.34934765265190604,
+      "r_neto_medio": 0.2967906109075291
+     },
+     "tendencia/compresion": {
+      "operaciones": 1,
+      "r_bruto_medio": -1.0,
+      "r_neto_medio": -1.0908451423913301
+     },
+     "tendencia/normal": {
+      "operaciones": 1,
+      "r_bruto_medio": 6.205884737894116,
+      "r_neto_medio": 6.08440898828536
+     },
+     "rango/compresion": {
+      "operaciones": 4,
+      "r_bruto_medio": 0.16157069141439784,
+      "r_neto_medio": 0.06128776432202593
+     },
+     "rango/normal": {
+      "operaciones": 2,
+      "r_bruto_medio": 0.1444648759435485,
+      "r_neto_medio": 0.013353953219821968
+     }
+    }
+   },
+   "salidas": {
+    "stop": 9,
+    "objetivo": 0,
+    "invalidacion": 0,
+    "tiempo": 0,
+    "liquidacion_fin_de_ventana": 0
+   },
+   "solo_rest": {
+    "decisiones": {
+     "minutos": 920970,
+     "solo_rest": 920970
+    },
+    "resultados": {
+     "minutos": 937785,
+     "solo_rest": 937785
+    }
+   }
+  },
+  "SPOT TAO-USDT": {
+   "recuentos": {
+    "senales": {
+     "largos": 39,
+     "cortos": 0
+    },
+    "decisiones": 16,
+    "ejecutadas": 14,
+    "operaciones": 14,
+    "caducadas": {
+     "caduca_vela_no_utilizable": 0,
+     "caduca_contexto": 1,
+     "caduca_sin_disparo": 22
+    },
+    "no_ejecutadas": {
+     "ocupado": 2,
+     "opuestas": 0,
+     "fin_de_ventana": 0,
+     "posicion_tomada": 0,
+     "caduca_sin_minuto": 0,
+     "no_entra": 0
+    }
+   },
+   "resultados": {
+    "bruto": {
+     "operaciones": 14,
+     "positivas": 3,
+     "media": -0.2942525988714535,
+     "mediana": -0.5291780558982726,
+     "suma": -4.119536384200349,
+     "peor": -1.0,
+     "mejor": 1.7232582674126249,
+     "caida_maxima": 5.084029675463818
+    },
+    "neto": {
+     "operaciones": 14,
+     "positivas": 3,
+     "media": -0.3893168518778424,
+     "mediana": -0.6138336740501807,
+     "suma": -5.450435926289793,
+     "peor": -1.131735058447058,
+     "mejor": 1.6111797161090629,
+     "caida_maxima": 5.991879890859095
+    },
+    "neto_costes_dobles": {
+     "operaciones": 14,
+     "positivas": 3,
+     "media": -0.48438139913683254,
+     "mediana": -0.6984898213801437,
+     "suma": -6.781339587915656,
+     "peor": -1.2634711168941224,
+     "mejor": 1.499102888063763,
+     "caida_maxima": 6.899735190284069
+    }
+   },
+   "regimen": {
+    "contexto": {
+     "tendencia/expansion": {
+      "operaciones": 2,
+      "r_bruto_medio": 0.844259160099608,
+      "r_neto_medio": 0.7496358050301596
+     },
+     "tendencia/compresion": {
+      "operaciones": 3,
+      "r_bruto_medio": -0.8671258634493468,
+      "r_neto_medio": -0.9661221983979423
+     },
+     "tendencia/normal": {
+      "operaciones": 8,
+      "r_bruto_medio": -0.4353315106394723,
+      "r_neto_medio": -0.5281560442640407
+     },
+     "tendencia/sin_etiqueta": {
+      "operaciones": 1,
+      "r_bruto_medio": 0.2759749710642536,
+      "r_neto_medio": 0.17390741295604048
+     }
+    },
+    "senal": {
+     "tendencia/expansion": {
+      "operaciones": 1,
+      "r_bruto_medio": 1.476715578894961,
+      "r_neto_medio": 1.3955640256873711
+     },
+     "tendencia/compresion": {
+      "operaciones": 1,
+      "r_bruto_medio": -0.4569785214485047,
+      "r_neto_medio": -0.5307253141421823
+     },
+     "tendencia/normal": {
+      "operaciones": 3,
+      "r_bruto_medio": -0.4841508570413094,
+      "r_neto_medio": -0.5742885754169461
+     },
+     "rango/compresion": {
+      "operaciones": 2,
+      "r_bruto_medio": -0.8792505078776747,
+      "r_neto_medio": -0.9866905011050977
+     },
+     "rango/normal": {
+      "operaciones": 3,
+      "r_bruto_medio": -0.6425176977481356,
+      "r_neto_medio": -0.7281697195974886
+     },
+     "transicion/compresion": {
+      "operaciones": 2,
+      "r_bruto_medio": -0.3620125144678732,
+      "r_neto_medio": -0.4648021986996349
+     },
+     "transicion/normal": {
+      "operaciones": 2,
+      "r_bruto_medio": 0.36162913370631244,
+      "r_neto_medio": 0.24754282340889355
+     }
+    }
+   },
+   "salidas": {
+    "stop": 14,
+    "objetivo": 0,
+    "invalidacion": 0,
+    "tiempo": 0,
+    "liquidacion_fin_de_ventana": 0
+   },
+   "solo_rest": {
+    "decisiones": {
+     "minutos": 1295610,
+     "solo_rest": 1295610
+    },
+    "resultados": {
+     "minutos": 1313994,
+     "solo_rest": 1313994
+    }
+   }
+  },
+  "SPOT UNI-USDT": {
+   "recuentos": {
+    "senales": {
+     "largos": 40,
+     "cortos": 0
+    },
+    "decisiones": 14,
+    "ejecutadas": 14,
+    "operaciones": 14,
+    "caducadas": {
+     "caduca_vela_no_utilizable": 0,
+     "caduca_contexto": 0,
+     "caduca_sin_disparo": 26
+    },
+    "no_ejecutadas": {
+     "ocupado": 0,
+     "opuestas": 0,
+     "fin_de_ventana": 0,
+     "posicion_tomada": 0,
+     "caduca_sin_minuto": 0,
+     "no_entra": 0
+    }
+   },
+   "resultados": {
+    "bruto": {
+     "operaciones": 14,
+     "positivas": 5,
+     "media": 0.5014009064001116,
+     "mediana": -0.8432514691064374,
+     "suma": 7.019612689601563,
+     "peor": -1.0,
+     "mejor": 10.379976889293099,
+     "caida_maxima": 3.9421506261895183
+    },
+    "neto": {
+     "operaciones": 14,
+     "positivas": 5,
+     "media": 0.40500767346033445,
+     "mediana": -0.9558718472493184,
+     "suma": 5.670107428444682,
+     "peor": -1.1214870929011598,
+     "mejor": 10.2695871534136,
+     "caida_maxima": 4.867502469304254
+    },
+    "neto_costes_dobles": {
+     "operaciones": 14,
+     "positivas": 5,
+     "media": 0.3086149419214622,
+     "mediana": -1.0684930686436713,
+     "suma": 4.320609186900471,
+     "peor": -1.242975185802325,
+     "mejor": 10.159207797510987,
+     "caida_maxima": 5.838598610610516
+    }
+   },
+   "regimen": {
+    "contexto": {
+     "tendencia/expansion": {
+      "operaciones": 5,
+      "r_bruto_medio": 1.400811042318381,
+      "r_neto_medio": 1.316568611261448
+     },
+     "tendencia/compresion": {
+      "operaciones": 1,
+      "r_bruto_medio": 1.5821176943830686,
+      "r_neto_medio": 1.4639599611274772
+     },
+     "tendencia/normal": {
+      "operaciones": 4,
+      "r_bruto_medio": -0.5370866607178483,
+      "r_neto_medio": -0.6611795833313427
+     },
+     "tendencia/sin_etiqueta": {
+      "operaciones": 4,
+      "r_bruto_medio": 0.1454466066244957,
+      "r_neto_medio": 0.06700568608383417
+     }
+    },
+    "senal": {
+     "tendencia/normal": {
+      "operaciones": 3,
+      "r_bruto_medio": 0.06873200556062492,
+      "r_neto_medio": -0.03821467090051615
+     },
+     "rango/expansion": {
+      "operaciones": 2,
+      "r_bruto_medio": -0.4122910522004044,
+      "r_neto_medio": -0.4755667692564183
+     },
+     "rango/compresion": {
+      "operaciones": 2,
+      "r_bruto_medio": -0.8432514691064374,
+      "r_neto_medio": -0.9720506553266974
+     },
+     "rango/normal": {
+      "operaciones": 2,
+      "r_bruto_medio": 1.4722624131201367,
+      "r_neto_medio": 1.3903669921963997
+     },
+     "transicion/expansion": {
+      "operaciones": 1,
+      "r_bruto_medio": -1.0,
+      "r_neto_medio": -1.0718814313867302
+     },
+     "transicion/compresion": {
+      "operaciones": 3,
+      "r_bruto_medio": -1.0,
+      "r_neto_medio": -1.0994844720357355
+     },
+     "transicion/normal": {
+      "operaciones": 1,
+      "r_bruto_medio": 10.379976889293099,
+      "r_neto_medio": 10.2695871534136
+     }
+    }
+   },
+   "salidas": {
+    "stop": 14,
+    "objetivo": 0,
+    "invalidacion": 0,
+    "tiempo": 0,
+    "liquidacion_fin_de_ventana": 0
+   },
+   "solo_rest": {
+    "decisiones": {
+     "minutos": 958470,
+     "solo_rest": 958470
+    },
+    "resultados": {
+     "minutos": 976091,
+     "solo_rest": 976091
+    }
+   }
+  },
+  "SPOT XLM-USDT": {
+   "recuentos": {
+    "senales": {
+     "largos": 38,
+     "cortos": 0
+    },
+    "decisiones": 12,
+    "ejecutadas": 9,
+    "operaciones": 9,
+    "caducadas": {
+     "caduca_vela_no_utilizable": 0,
+     "caduca_contexto": 0,
+     "caduca_sin_disparo": 26
+    },
+    "no_ejecutadas": {
+     "ocupado": 3,
+     "opuestas": 0,
+     "fin_de_ventana": 0,
+     "posicion_tomada": 0,
+     "caduca_sin_minuto": 0,
+     "no_entra": 0
+    }
+   },
+   "resultados": {
+    "bruto": {
+     "operaciones": 9,
+     "positivas": 3,
+     "media": -0.3563950634235382,
+     "mediana": -0.6871878485488194,
+     "suma": -3.207555570811844,
+     "peor": -1.0,
+     "mejor": 0.5765435272597365,
+     "caida_maxima": 4.32851495068355
+    },
+    "neto": {
+     "operaciones": 9,
+     "positivas": 2,
+     "media": -0.4868887477862449,
+     "mediana": -0.7833924021942856,
+     "suma": -4.381998730076204,
+     "peor": -1.1416251735166478,
+     "mejor": 0.5172350539973838,
+     "caida_maxima": 5.04887163561498
+    },
+    "neto_costes_dobles": {
+     "operaciones": 9,
+     "positivas": 2,
+     "media": -0.6173827885440217,
+     "mediana": -0.8795976430276063,
+     "suma": -5.556445096896196,
+     "peor": -1.2832513470333045,
+     "mejor": 0.4579271572785585,
+     "caida_maxima": 5.769232649061392
+    }
+   },
+   "regimen": {
+    "contexto": {
+     "tendencia/expansion": {
+      "operaciones": 3,
+      "r_bruto_medio": -0.010708313988517223,
+      "r_neto_medio": -0.10104530542547856
+     },
+     "tendencia/compresion": {
+      "operaciones": 1,
+      "r_bruto_medio": -1.0,
+      "r_neto_medio": -1.1416251735166478
+     },
+     "tendencia/normal": {
+      "operaciones": 5,
+      "r_bruto_medio": -0.4350861257692585,
+      "r_neto_medio": -0.587447528056624
+     }
+    },
+    "senal": {
+     "tendencia/compresion": {
+      "operaciones": 2,
+      "r_bruto_medio": -0.8599232407291306,
+      "r_neto_medio": -0.9816246561490111
+     },
+     "tendencia/normal": {
+      "operaciones": 1,
+      "r_bruto_medio": -1.0,
+      "r_neto_medio": -1.1236261795264904
+     },
+     "rango/compresion": {
+      "operaciones": 3,
+      "r_bruto_medio": 0.4053372143682416,
+      "r_neto_medio": 0.2861752415053233
+     },
+     "rango/normal": {
+      "operaciones": 2,
+      "r_bruto_medio": -0.35186036622915384,
+      "r_neto_medio": -0.5060118946255068
+     },
+     "transicion/expansion": {
+      "operaciones": 1,
+      "r_bruto_medio": -1.0,
+      "r_neto_medio": -1.1416251735166478
+     }
+    }
+   },
+   "salidas": {
+    "stop": 9,
+    "objetivo": 0,
+    "invalidacion": 0,
+    "tiempo": 0,
+    "liquidacion_fin_de_ventana": 0
+   },
+   "solo_rest": {
+    "decisiones": {
+     "minutos": 1063830,
+     "solo_rest": 1063830
+    },
+    "resultados": {
+     "minutos": 1074933,
+     "solo_rest": 1074933
+    }
+   }
+  },
+  "SPOT XMR-USDT": {
+   "recuentos": {
+    "senales": {
+     "largos": 77,
+     "cortos": 0
+    },
+    "decisiones": 35,
+    "ejecutadas": 26,
+    "operaciones": 26,
+    "caducadas": {
+     "caduca_vela_no_utilizable": 0,
+     "caduca_contexto": 1,
+     "caduca_sin_disparo": 41
+    },
+    "no_ejecutadas": {
+     "ocupado": 9,
+     "opuestas": 0,
+     "fin_de_ventana": 0,
+     "posicion_tomada": 0,
+     "caduca_sin_minuto": 0,
+     "no_entra": 0
+    }
+   },
+   "resultados": {
+    "bruto": {
+     "operaciones": 26,
+     "positivas": 11,
+     "media": 0.7496654452838278,
+     "mediana": -0.5813410517932787,
+     "suma": 19.491301577379524,
+     "peor": -1.0,
+     "mejor": 17.269929762984486,
+     "caida_maxima": 5.354509611443074
+    },
+    "neto": {
+     "operaciones": 26,
+     "positivas": 11,
+     "media": 0.6171150948246068,
+     "mediana": -0.661663054703509,
+     "suma": 16.044992465439776,
+     "peor": -1.1816861373187355,
+     "mejor": 16.994601179408626,
+     "caida_maxima": 6.913627763523248
+    },
+    "neto_costes_dobles": {
+     "operaciones": 26,
+     "positivas": 11,
+     "media": 0.4845654940308227,
+     "mediana": -0.7419856389547936,
+     "suma": 12.598702844801391,
+     "peor": -1.376235665981341,
+     "mejor": 16.719289865762487,
+     "caida_maxima": 8.472751270113129
+    }
+   },
+   "regimen": {
+    "contexto": {
+     "tendencia/expansion": {
+      "operaciones": 4,
+      "r_bruto_medio": -0.9246396677316716,
+      "r_neto_medio": -0.994779045618944
+     },
+     "tendencia/compresion": {
+      "operaciones": 4,
+      "r_bruto_medio": 3.594597336334731,
+      "r_neto_medio": 3.4028077995825945
+     },
+     "tendencia/normal": {
+      "operaciones": 16,
+      "r_bruto_medio": 0.4095780618316596,
+      "r_neto_medio": 0.2684579233793135
+     },
+     "tendencia/sin_etiqueta": {
+      "operaciones": 2,
+      "r_bruto_medio": 1.1291109568303668,
+      "r_neto_medio": 1.0587753377580793
+     }
+    },
+    "senal": {
+     "tendencia/normal": {
+      "operaciones": 1,
+      "r_bruto_medio": -1.0,
+      "r_neto_medio": -1.0616077155853263
+     },
+     "rango/expansion": {
+      "operaciones": 2,
+      "r_bruto_medio": 1.0649591356347798,
+      "r_neto_medio": 0.9775647245892017
+     },
+     "rango/compresion": {
+      "operaciones": 7,
+      "r_bruto_medio": -0.14080937347055827,
+      "r_neto_medio": -0.2901468487266395
+     },
+     "rango/normal": {
+      "operaciones": 9,
+      "r_bruto_medio": 2.127325998347553,
+      "r_neto_medio": 1.984685157454364
+     },
+     "transicion/compresion": {
+      "operaciones": 4,
+      "r_bruto_medio": -0.3416468888838248,
+      "r_neto_medio": -0.4548688626561425
+     },
+     "transicion/normal": {
+      "operaciones": 3,
+      "r_bruto_medio": 0.5225674969370661,
+      "r_neto_medio": 0.3799359021561561
+     }
+    }
+   },
+   "salidas": {
+    "stop": 25,
+    "objetivo": 0,
+    "invalidacion": 1,
+    "tiempo": 0,
+    "liquidacion_fin_de_ventana": 0
+   },
+   "solo_rest": {
+    "decisiones": {
+     "minutos": 2454885,
+     "solo_rest": 2454885
+    },
+    "resultados": {
+     "minutos": 2498988,
+     "solo_rest": 2498988
+    }
+   }
+  },
+  "SPOT XRP-USDT": {
+   "recuentos": {
+    "senales": {
+     "largos": 43,
+     "cortos": 0
+    },
+    "decisiones": 20,
+    "ejecutadas": 17,
+    "operaciones": 17,
+    "caducadas": {
+     "caduca_vela_no_utilizable": 0,
+     "caduca_contexto": 0,
+     "caduca_sin_disparo": 23
+    },
+    "no_ejecutadas": {
+     "ocupado": 3,
+     "opuestas": 0,
+     "fin_de_ventana": 0,
+     "posicion_tomada": 0,
+     "caduca_sin_minuto": 0,
+     "no_entra": 0
+    }
+   },
+   "resultados": {
+    "bruto": {
+     "operaciones": 17,
+     "positivas": 4,
+     "media": -0.021734122484142943,
+     "mediana": -0.9183147797977723,
+     "suma": -0.36948008223043005,
+     "peor": -1.0,
+     "mejor": 5.029312744945763,
+     "caida_maxima": 5.655668690594448
+    },
+    "neto": {
+     "operaciones": 17,
+     "positivas": 4,
+     "media": -0.16239518343985854,
+     "mediana": -0.9517294524448181,
+     "suma": -2.760718118477595,
+     "peor": -1.2101275728967205,
+     "mejor": 4.9312907590216835,
+     "caida_maxima": 7.447776789592304
+    },
+    "neto_costes_dobles": {
+     "operaciones": 17,
+     "positivas": 4,
+     "media": -0.3030562661297013,
+     "mediana": -0.9851450434066438,
+     "suma": -5.151956524204922,
+     "peor": -1.4202561457934515,
+     "mejor": 4.833273802410349,
+     "caida_maxima": 9.594961957543479
+    }
+   },
+   "regimen": {
+    "contexto": {
+     "tendencia/expansion": {
+      "operaciones": 3,
+      "r_bruto_medio": 2.200940144021866,
+      "r_neto_medio": 2.075204088183304
+     },
+     "tendencia/compresion": {
+      "operaciones": 3,
+      "r_bruto_medio": -1.0,
+      "r_neto_medio": -1.1630705783607125
+     },
+     "tendencia/normal": {
+      "operaciones": 9,
+      "r_bruto_medio": -0.628407632288272,
+      "r_neto_medio": -0.7857720266012571
+     },
+     "tendencia/sin_etiqueta": {
+      "operaciones": 2,
+      "r_bruto_medio": 0.8416840881492103,
+      "r_neto_medio": 0.7874147957329719
+     }
+    },
+    "senal": {
+     "tendencia/expansion": {
+      "operaciones": 3,
+      "r_bruto_medio": 0.137039701371236,
+      "r_neto_medio": -0.0004524660458640935
+     },
+     "tendencia/compresion": {
+      "operaciones": 2,
+      "r_bruto_medio": 2.7611417770494073,
+      "r_neto_medio": 2.619037363676235
+     },
+     "tendencia/normal": {
+      "operaciones": 1,
+      "r_bruto_medio": 2.6016829560961927,
+      "r_neto_medio": 2.526559043910762
+     },
+     "rango/expansion": {
+      "operaciones": 1,
+      "r_bruto_medio": -1.0,
+      "r_neto_medio": -1.1528441144062909
+     },
+     "rango/compresion": {
+      "operaciones": 4,
+      "r_bruto_medio": -0.8211166672919895,
+      "r_neto_medio": -0.968659409611478
+     },
+     "rango/normal": {
+      "operaciones": 4,
+      "r_bruto_medio": -0.7160432076448855,
+      "r_neto_medio": -0.8679508469370553
+     },
+     "transicion/expansion": {
+      "operaciones": 1,
+      "r_bruto_medio": -1.0,
+      "r_neto_medio": -1.158531229327094
+     },
+     "transicion/compresion": {
+      "operaciones": 1,
+      "r_bruto_medio": -0.7559261967916454,
+      "r_neto_medio": -0.8661781216757173
+     }
+    }
+   },
+   "salidas": {
+    "stop": 17,
+    "objetivo": 0,
+    "invalidacion": 0,
+    "tiempo": 0,
+    "liquidacion_fin_de_ventana": 0
+   },
+   "solo_rest": {
+    "decisiones": {
+     "minutos": 1588635,
+     "solo_rest": 1588635
+    },
+    "resultados": {
+     "minutos": 1606842,
+     "solo_rest": 1606842
+    }
+   }
+  },
+  "SPOT ZEC-USDT": {
+   "recuentos": {
+    "senales": {
+     "largos": 76,
+     "cortos": 0
+    },
+    "decisiones": 28,
+    "ejecutadas": 24,
+    "operaciones": 24,
+    "caducadas": {
+     "caduca_vela_no_utilizable": 0,
+     "caduca_contexto": 0,
+     "caduca_sin_disparo": 48
+    },
+    "no_ejecutadas": {
+     "ocupado": 4,
+     "opuestas": 0,
+     "fin_de_ventana": 0,
+     "posicion_tomada": 0,
+     "caduca_sin_minuto": 0,
+     "no_entra": 0
+    }
+   },
+   "resultados": {
+    "bruto": {
+     "operaciones": 24,
+     "positivas": 9,
+     "media": 0.05842825818328001,
+     "mediana": -0.3558757312690851,
+     "suma": 1.4022781963987203,
+     "peor": -1.014339572073805,
+     "mejor": 4.3635862119637325,
+     "caida_maxima": 8.288168725881679
+    },
+    "neto": {
+     "operaciones": 24,
+     "positivas": 8,
+     "media": -0.02604324851902264,
+     "mediana": -0.43325498990846417,
+     "suma": -0.6250379644565434,
+     "peor": -1.1888401020814363,
+     "mejor": 4.204437842910315,
+     "caida_maxima": 9.552389457820071
+    },
+    "neto_costes_dobles": {
+     "operaciones": 24,
+     "positivas": 8,
+     "media": -0.1105146967930688,
+     "mediana": -0.5106346044235764,
+     "suma": -2.652352723033651,
+     "peor": -1.3633416464286396,
+     "mejor": 4.04529383744311,
+     "caida_maxima": 10.816618477927209
+    }
+   },
+   "regimen": {
+    "contexto": {
+     "tendencia/expansion": {
+      "operaciones": 7,
+      "r_bruto_medio": -0.12492251053031633,
+      "r_neto_medio": -0.1748041052263392
+     },
+     "tendencia/compresion": {
+      "operaciones": 2,
+      "r_bruto_medio": 1.4439109879304992,
+      "r_neto_medio": 1.3444143304295202
+     },
+     "tendencia/normal": {
+      "operaciones": 13,
+      "r_bruto_medio": -0.1974976345208669,
+      "r_neto_medio": -0.29555588437989105
+     },
+     "tendencia/sin_etiqueta": {
+      "operaciones": 2,
+      "r_bruto_medio": 0.9781915215106031,
+      "r_neto_medio": 0.8759943041036872
+     }
+    },
+    "senal": {
+     "tendencia/expansion": {
+      "operaciones": 1,
+      "r_bruto_medio": -0.0719015563633226,
+      "r_neto_medio": -0.17749942126240004
+     },
+     "tendencia/compresion": {
+      "operaciones": 4,
+      "r_bruto_medio": 2.103068251016072,
+      "r_neto_medio": 2.022200743225532
+     },
+     "tendencia/normal": {
+      "operaciones": 1,
+      "r_bruto_medio": -1.014339572073805,
+      "r_neto_medio": -1.1888401020814363
+     },
+     "rango/expansion": {
+      "operaciones": 1,
+      "r_bruto_medio": -0.36297440442421747,
+      "r_neto_medio": -0.42205198594852067
+     },
+     "rango/compresion": {
+      "operaciones": 4,
+      "r_bruto_medio": 0.589128894145367,
+      "r_neto_medio": 0.5079038150707698
+     },
+     "rango/normal": {
+      "operaciones": 7,
+      "r_bruto_medio": -0.524454831322905,
+      "r_neto_medio": -0.603052969383573
+     },
+     "transicion/expansion": {
+      "operaciones": 1,
+      "r_bruto_medio": -0.8311020289944188,
+      "r_neto_medio": -0.8488796247995499
+     },
+     "transicion/compresion": {
+      "operaciones": 2,
+      "r_bruto_medio": -1.0,
+      "r_neto_medio": -1.0876192588985811
+     },
+     "transicion/normal": {
+      "operaciones": 3,
+      "r_bruto_medio": -0.4716696677103116,
+      "r_neto_medio": -0.5705252533558903
+     }
+    }
+   },
+   "salidas": {
+    "stop": 24,
+    "objetivo": 0,
+    "invalidacion": 0,
+    "tiempo": 0,
+    "liquidacion_fin_de_ventana": 0
+   },
+   "solo_rest": {
+    "decisiones": {
+     "minutos": 2581290,
+     "solo_rest": 2581290
+    },
+    "resultados": {
+     "minutos": 2613738,
+     "solo_rest": 2613738
+    }
+   }
+  }
+ }
+}

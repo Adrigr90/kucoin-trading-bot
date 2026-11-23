@@ -2282,6 +2282,35 @@ El desarrollo se parte en **cuatro tramos consecutivos**, cada corte en la media
 - Esta sección no decide D12, D16, D22, D28 ni D30.
 - **Sigue en F3-E5b:** la migración `0004` y `svc-strategy` (F3-A10).
 
+#### 12.5.8 Lo que muestran los primeros informes del desarrollo [23 nov 2026; **pregunta abierta**, sin decidir]
+
+Los tres informes del desarrollo, hechos con `6f08bb8` (§18), están en `docs/informes/exploratorio/`.
+
+- **Muchos contratos de Futures no dan ninguna señal:** 13 de los 20 en la tendencia, 11 en el breakout y 3 en la reversión a la media. En Spot solo callan EVAA-USDT y PIEVERSE-USDT, que no tienen minutos en el desarrollo.
+- **La causa es la combinación de tres reglas aprobadas:**
+  - en Futures, KuCoin no da vela de un minuto sin operaciones (§3.2 [H]);
+  - el histórico deja ese minuto como `ausente`, nunca «sin operaciones» (§12.1);
+  - una vela incompleta no la usa ningún indicador, y un hueco reinicia los recursivos (CD-02 y CD-08).
+
+  Los huecos de Futures son sobre todo de un minuto suelto, y con uno basta para que una vela de 4 h no sea utilizable.
+- **Medido en el tramo 3** [27 jun 2025, 14 oct 2025):
+
+| Instrumento | Minutos presentes | Huecos (de un minuto) | Velas de 4 h completas |
+|---|---|---|---|
+| FUTURES XBTUSDTM | 99,13 % | 1.234 (1.122) | 60,1 % |
+| FUTURES SOLUSDTM | 99,96 % | 64 (62) | 95,1 % |
+| FUTURES AVAXUSDTM | 87,62 % | 12.678 (8.828) | 6,3 % |
+| SPOT BTC-USDT | 100 % | 0 | 100 % |
+
+  En Spot, KuCoin publica una vela de volumen 0 cuando no hay operaciones: BTC-USDT tiene 7 en ese tramo.
+- **Los informes son correctos con el contrato aprobado,** pero sus conclusiones de Futures descansan en pocos contratos. Todas las señales de Futures tuvieron completas sus velas de disparo. Las señales solo aparecen en tramos de datos continuos: por eso no caduca ninguna por una vela no utilizable.
+- **Pregunta abierta, para el revisor y el propietario.** Hay tres posibilidades:
+  - mantener la regla;
+  - tratar como minuto sin operaciones un minuto de Futures que KuCoin contestó sin vela: una vela plana al cierre anterior, de volumen 0 y marcada aparte;
+  - aceptar una vela superior con algunos minutos ausentes, hasta un límite.
+
+  Cualquier cambio sería una enmienda del contrato (§12.1), con su revisión, y daría versiones nuevas de los informes. Hasta entonces, nada cambia.
+
 ## 13. Infraestructura, monitorización y alertas
 
 | Componente | RAM | Prioridad |
@@ -2848,3 +2877,5 @@ $$\Delta Cap=\underbrace{8}_{\text{distancia mark-stop de lo cerrado}}+\underbra
 | 21 nov 2026 | **El 17 nov, el primer día con datos reales, archivado en el servidor en el formato 2.** El temporizador diario corrió a las 00:23 UTC: selló el 17 nov a las 00:23:01 y lo archivó a las 00:24:36 (generación `83b9274d-ce92-43a0-bed4-3b109165c45a`, esquema `0003`, formato 2). La comprobación de las 00:25:19 dio «archived days checked: all match». El día tiene 62.496 velas, 23.562 velas del WebSocket, 206.730 métricas de profundidad y 35.010 instantáneas del libro: unos 40 MB en total. El servicio terminó bien, con un pico de 495 MB de memoria y 2 min 15 s de CPU, y el grabador siguió sin reinicios. El 18 nov no se selló, porque aún no habían pasado 72 h desde su final | Claude |
 | 23 nov 2026 | **Segunda revisión del diseño de F3-E5a (commit `7eab2b4`): APROBADO.** F3E5-01, RESUELTO: la reserva es atómica, persistente y anterior a la lectura; cualquier estado impide repetir la consulta, y hay pruebas de fallo y de concurrencia. F3E5-02, RESUELTO: la curva parte de cero y agrupa las salidas por minuto, y el ejemplo da 1 R de caída máxima en cualquier orden. F3E5-03, RESUELTO: las 130 actualizaciones y $(49/51)^{130} \approx 0{,}00551274$ son correctas. F3E5-04, RESUELTO: la muestra adicional empieza el 19 nov 2026 a las 22:10 UTC y excluye el solapamiento con las particiones. El diff, el ZIP y el paquete coinciden. Sin residuales ni hallazgos nuevos. La aprobación es del diseño: las pruebas de F3-A11 se acreditarán con la implementación, y F3-E5b tiene su propia revisión | Revisor |
 | 23 nov 2026 | **F3-E5a programada** (rama `fase-3-e5`, **pendiente de la revisión del código**). Los módulos están en `src/kbot/backtest/`: `partitions` (las particiones, los cuatro tramos con su calentamiento y la muestra adicional); `reader` (los minutos del histórico, sin abrir nunca un día de la prueba); `reservation` (la reserva atómica de la validación, con sus tres estados y su copia); `fees` (la comisión de cada instrumento leída de KuCoin, el deslizamiento y la prueba de esfuerzo); `report` (las cifras, la caída máxima por minuto de salida y el informe en Markdown y JSON); y `explore`, la herramienta. Hay 37 pruebas nuevas en `tests/unit/backtest/` para §12.5.6, entre ellas cuatro procesos que piden la misma reserva a la vez, el fallo provocado tras leer la validación, la caída máxima en cualquier orden y la EMA(50) tras 130 actualizaciones. En local pasan 1.306. La tarifa de Spot de cada clase se leyó de la tabla VIP de KuCoin y ya es [H] (§12.5.3), y §12.5.5 anota siete precisiones de la implementación. Medido con un instrumento y un tramo reales del desarrollo: unos 80 s con las tres familias, y menos de 0,1 MB de registro por ejecución | Claude |
+| 23 nov 2026 | **El 18 y el 19 nov, archivados en el servidor en el formato 2:** el 22 nov a las 00:26 UTC (generación `25ec0499-17fd-4bd6-8212-497b39c0ce9b`) y el 23 nov a las 00:23 UTC (`bf66eb50-3de0-42f3-a261-c0cc168fa009`). Las dos comprobaciones dieron «archived days checked: all match». Son los primeros días grabados enteros: unos 94 MB cada uno, con unas 115.000 velas y 505.000 métricas de profundidad. El grabador sigue sin reinicios desde el 20 nov, y la copia de las 10:45 UTC terminó bien. Ese día el acceso SSH desde el PC falló por dos motivos del PC, que el propietario resolvió: su IP de casa había cambiado (la regla de la lista de seguridad de Oracle) y el servicio `ssh-agent` de Windows estaba parado | Claude |
+| 23 nov 2026 | **Primeros informes del desarrollo** (§12.5.8), hechos con `python -m kbot.backtest.explore --familia todas --particion desarrollo` sobre el árbol limpio de `6f08bb8`. Tardó 1 h 14 min con los 40 instrumentos, los cuatro tramos y las tres familias. Las comisiones leídas de KuCoin son: en Futures, 0,06 % todas; en Spot, la clase A con coeficiente 1,00 (0,1 %), salvo EVAA-USDT (clase C, 0,3 %) y PIEVERSE-USDT (clase B, 0,2 %). Los hashes coinciden con los aprobados. Resultados, en R por operación: **tendencia**, 318 operaciones, bruto −0,084 y neto −0,215, sin ningún tramo con R neto positivo; **breakout**, 259 operaciones, bruto +0,075 y neto −0,079, y solo gana en el tramo 4; **reversión a la media**, 832 operaciones, bruto +0,057 y neto −0,240, sin ningún tramo positivo. **Observación:** muchos contratos de Futures no dan ninguna señal, por la regla de las velas completas con los minutos sin operaciones que KuCoin no publica. Queda como pregunta abierta en §12.5.8, sin decidir. No se ha consultado la validación | Claude |

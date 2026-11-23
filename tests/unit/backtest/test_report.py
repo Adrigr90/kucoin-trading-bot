@@ -3,16 +3,21 @@ and the costs doubled (``02`` §12.5.4 and §12.5.6)."""
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from itertools import permutations
 
 import pytest
 
 from kbot.backtest.execution import net_r
 from kbot.backtest.fees import STRESS
+from kbot.backtest.partitions import DEVELOPMENT, FOLDS
 from kbot.backtest.position import ExitReason, Trade
-from kbot.backtest.report import max_drawdown, stressed_r, summary
+from kbot.backtest.report import Evaluation, content, max_drawdown, stressed_r, summary
 from kbot.strategies.rules import LONG, SHORT
+from kbot.strategies.trend import TrendParams
+from kbot.strategies.version import params_hash, strategy_version
 from tests.unit.backtest.history import fee
 
 T0 = datetime(2025, 6, 2, 10, 0, tzinfo=UTC)
@@ -107,3 +112,22 @@ def test_the_net_r_with_the_costs_doubled(d: int) -> None:
     again = net_r(d, once.entry(d, entry), once.exit(d, exit_), t.r, once.fee)
     assert again == t.net_r
     assert STRESS == 2
+
+
+APPROVED_TREND = "8866b51449f119568d5012acb47487d37d411b66fda8d615661564b144fa36d3"
+
+
+def test_f3e5_07_the_parameters_of_the_report_rebuild_their_hash() -> None:
+    """2 and 2.00 are the same multiple: the same hash, the same text in the report, and
+    the hash rebuilt from that text."""
+    texts = []
+    for stop in ("2", "2.00"):
+        params = TrendParams(stop_atr=Decimal(stop)).as_json()
+        version = strategy_version("c" * 40, params)
+        evaluation = Evaluation("tendencia", version, params, DEVELOPMENT, FOLDS[:1], (), "u", "d")
+        data = content(evaluation)
+        assert data["hash_parametros"] == APPROVED_TREND
+        assert params_hash(data["parametros"]) == APPROVED_TREND
+        assert data["parametros"]["stop"] == {"multiplo_atr": "2"}
+        texts.append(json.dumps(data["parametros"], sort_keys=True))
+    assert texts[0] == texts[1]

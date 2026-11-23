@@ -8,6 +8,9 @@
   With a followed file changed there is no version, and no report.
 * **Data:** the minutes of each instrument from F3-E1, only those of each window and of its
   warm-up, and never one of the test (``reader``).
+* **Coverage** (F3E5-05): that of the contract (§12.1, point 2), with the presence of each
+  minute asked and the evidence of eligibility of F3-E1. The minutes present over the whole
+  calendar of the windows are another measure, named apart.
 * **Bounded memory:** the engine runs by instrument and window, with about 140 days of
   minutes at once. Each family runs alone (the mode by family, §12.4.3) over the same
   minutes, read once.
@@ -40,11 +43,15 @@ import structlog
 from kbot.backtest import report
 from kbot.backtest.engine import run
 from kbot.backtest.fees import Fee, read_fees
-from kbot.backtest.partitions import DEVELOPMENT, VALIDATION, Segment, segments
+from kbot.backtest.partitions import DEVELOPMENT, HISTORY_END, VALIDATION, Segment, segments
 from kbot.backtest.reader import Read, read_minutes
 from kbot.backtest.report import Evaluation, Piece
 from kbot.backtest.reservation import validation_query
 from kbot.core.clock import SystemClock
+from kbot.core.decimal import to_canonical
+from kbot.history.__main__ import load_contracts
+from kbot.history.coverage import EligibilitySpan, coverage
+from kbot.history.universe import evidence as eligibility_evidence
 from kbot.history.universe import load
 from kbot.kucoin.rest import KucoinRestClient
 from kbot.market.timeutil import MINUTE
@@ -85,13 +92,16 @@ def evaluate(
     *,
     universe: str,
     decisions: str = NO_DECISIONS,
+    evidence: Mapping[tuple[str, str], Sequence[EligibilitySpan]] | None = None,
     windows: Sequence[Segment] | None = None,
     reader: Reader = read_minutes,
     now: Callable[[], datetime] = CLOCK.now,
     copy: Path | None = None,
 ) -> list[Evaluation]:
     """Run each family alone over every instrument and window of ``partition``.
-    ``windows`` replaces the fixed ones of the partition, for the tests."""
+    ``evidence`` is the evidence of eligibility of each instrument, for the coverage
+    (F3E5-05); without it every minute is of unknown eligibility. ``windows`` replaces
+    the fixed ones of the partition, for the tests."""
     if partition not in (DEVELOPMENT, VALIDATION):
         segments(partition)  # the test is sealed: it raises
         raise ValueError(f"unknown partition {partition!r}")
@@ -111,6 +121,7 @@ def evaluate(
             root,
             instruments,
             fees,
+            evidence or {},
             chosen,
             reader,
             universe,
@@ -141,6 +152,7 @@ def _evaluate(
     root: Path,
     instruments: Sequence[tuple[str, str]],
     fees: Mapping[tuple[str, str], Fee],
+    evidence: Mapping[tuple[str, str], Sequence[EligibilitySpan]],
     chosen: Sequence[Segment],
     reader: Reader,
     universe: str,
@@ -149,11 +161,15 @@ def _evaluate(
     pieces: dict[str, list[Piece]] = {f.family: [] for f in fichas}
     for market, symbol in sorted(instruments):
         fee = fees[(market, symbol)]
+        spans = evidence.get((market, symbol), ())
         for segment in chosen:
             window = segment.window
             read = reader(root, market, symbol, segment.warmup_from, window.end)
             present = sum(1 for m in read.minutes if window.holds(m.candle.open_time))
             expected = (window.end - window.start) // MINUTE
+            # The coverage of the contract (§12.1, point 2), over the minutes asked.
+            asked = {m: s for m, s in read.states.items() if window.holds(m)}
+            counted = coverage(asked, spans)
             for ficha in fichas:
                 family = ficha.family
                 done = None
@@ -171,6 +187,8 @@ def _evaluate(
                         expected,
                         read.invalid_days,
                         fee,
+                        counted,
+                        expected - len(asked),
                     )
                 )
             log.info(
@@ -211,6 +229,11 @@ def write_record(evaluation: Evaluation, folder: Path) -> Path:
                 "simbolo": piece.symbol,
                 "presentes": piece.present,
                 "minutos": piece.expected,
+                "cobertura": {
+                    "numerador": piece.coverage.numerator,
+                    "denominador": piece.coverage.denominator,
+                    "fuera_de_lo_solicitado": piece.outside,
+                },
                 "dias_no_validos": piece.invalid_days,
                 "ejecucion": asdict(piece.run) if piece.run is not None else None,
             }
@@ -222,7 +245,7 @@ def _plain(value: object) -> object:
     if isinstance(value, datetime | date):
         return value.isoformat()
     if isinstance(value, Decimal):
-        return format(value, "f")
+        return to_canonical(value)
     raise TypeError(f"not in the record: {type(value).__name__}")
 
 
@@ -260,6 +283,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     fichas = [FAMILIES[name]() for name in names]
     universe = load(arguments.universo)
     instruments = [(m.market, m.symbol) for m in universe.instruments]
+    # The evidence of eligibility of F3-E1: the opening of each Futures contract, what the
+    # recorder saw and the announcements (§12.1, point 2).
+    opened = load_contracts(arguments.carpeta)
+    evidence = {
+        (market, symbol): eligibility_evidence(
+            universe, market, symbol, first_open=opened, until=HISTORY_END
+        )
+        for market, symbol in instruments
+    }
     fees = asyncio.run(_fees(instruments))
     evaluations = evaluate(
         fichas,
@@ -270,6 +302,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         fees,
         universe=arguments.universo.as_posix(),
         decisions=arguments.decisiones,
+        evidence=evidence,
         copy=arguments.repositorio / COPY,
     )
     for evaluation in evaluations:

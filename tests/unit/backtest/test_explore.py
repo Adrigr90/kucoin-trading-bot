@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -16,15 +16,25 @@ import pytest
 from kbot.backtest import report
 from kbot.backtest.explore import evaluate, main, write_record
 from kbot.backtest.fees import Fee
-from kbot.backtest.partitions import DEVELOPMENT, TEST, VALIDATION, SealedPartition, segment
+from kbot.backtest.partitions import (
+    DEVELOPMENT,
+    HISTORY_END,
+    TEST,
+    VALIDATION,
+    SealedPartition,
+    segment,
+)
 from kbot.backtest.position import ExitReason
 from kbot.backtest.reader import Read, read_minutes
 from kbot.backtest.report import FIRST_LINE, Evaluation
 from kbot.backtest.reservation import COMPLETED, FAILED, STARTED, AlreadyReserved
+from kbot.history.coverage import EligibilitySpan
+from kbot.market.last_candles import Ohlcv
+from kbot.market.timeutil import EPOCH
 from kbot.strategies.ficha import Ficha
 from kbot.strategies.rules import LONG
 from kbot.strategies.trend import Trend, TrendParams
-from tests.unit.backtest.history import DAY, fee, write_history
+from tests.unit.backtest.history import DAY, fee, write_days, write_history
 from tests.unit.backtest.support import Fixed, at, decision, flat
 from tests.unit.strategies.support import DAYS, MINUTES, START, short_fichas, walk_minutes
 
@@ -111,11 +121,11 @@ def test_the_report_has_every_section_and_its_first_line(
         # Spot only goes long.
         assert data["por_instrumento"]["SPOT BTC-USDT"]["recuentos"]["senales"]["cortos"] == 0
         coverage = {(c["mercado"], c["simbolo"]): c for c in data["cobertura"]}
-        assert (
-            coverage[("SPOT", "BTC-USDT")]["presentes"]
-            == coverage[("SPOT", "BTC-USDT")]["minutos"]
-            == 3 * 1440
-        )
+        btc = coverage[("SPOT", "BTC-USDT")]
+        # Every minute asked and present; without evidence, of unknown eligibility: in E.
+        assert btc["numerador"] == btc["denominador"] == btc["minutos"] == 3 * 1440
+        assert btc["presentes_sobre_el_calendario"] == 3 * 1440
+        assert (btc["cobertura"], btc["fuera_de_lo_solicitado"]) == (1.0, 0)
         trades += counts["operaciones"]
     assert trades > 0, "the synthetic history must give some trades"
 
@@ -293,3 +303,69 @@ def test_a_missing_fee_stops_before_reading(history: Path) -> None:
     fees: dict[tuple[str, str], Fee] = {("SPOT", "BTC-USDT"): FEES[("SPOT", "BTC-USDT")]}
     with pytest.raises(ValueError, match="no fee"):
         explore(history, fees=fees, reader=lambda *a: pytest.fail("read without a fee"))
+
+
+def coverage_row(evaluation: Evaluation) -> dict[str, Any]:
+    (row,) = report.content(evaluation)["cobertura"]
+    return row
+
+
+def test_f3e5_05_an_instrument_opened_after_the_window_has_no_applicable_coverage(
+    tmp_path: Path,
+) -> None:
+    """Like SOXLUSDTM in the development: asked and answered without candles, and not
+    eligible until it opens, after the window. The day before what was asked is outside
+    the history: it counts nowhere."""
+    first, late = datetime(2026, 1, 5, tzinfo=UTC), datetime(2026, 1, 20, tzinfo=UTC)
+    instrument = ("FUTURES", "TARDEUSDTM")
+    write_days(tmp_path, {(*instrument, (first + i * DAY).date()): [] for i in range(2)})
+    spans = [
+        EligibilitySpan(EPOCH, late, False, "firstOpenDate"),
+        EligibilitySpan(late, HISTORY_END, True, "firstOpenDate"),
+    ]
+    (evaluation,) = explore(
+        tmp_path,
+        [Trend()],
+        windows=(segment("tramo", first - DAY, first + 2 * DAY, warmup=timedelta(0)),),
+        instruments=[instrument],
+        fees={instrument: fee(*instrument, "0.0006")},
+        evidence={instrument: spans},
+    )
+    row = coverage_row(evaluation)
+    assert row["cobertura"] is None
+    assert (row["minutos"], row["fuera_de_lo_solicitado"], row["no_elegibles"]) == (
+        3 * 1440,
+        1440,
+        2 * 1440,
+    )
+    assert (row["denominador"], row["numerador"], row["presentes_sobre_el_calendario"]) == (0, 0, 0)
+    text = report.render(report.content(evaluation))
+    assert (
+        "| FUTURES TARDEUSDTM | 4320 | 1440 | 2880 | 0 | 0 | 0 | 0 | 0 | 0 | no aplicable |" in text
+    )
+
+
+def test_f3e5_05_four_eligible_minutes_present_and_one_not_eligible(tmp_path: Path) -> None:
+    t0 = datetime(2026, 1, 5, 10, 0, tzinfo=UTC)
+    minute = timedelta(minutes=1)
+    one = Decimal("100")
+    candles = [Ohlcv(t0 + i * minute, one, one, one, one, Decimal(1), one) for i in range(1, 5)]
+    instrument = ("FUTURES", "NUEVOUSDTM")
+    write_days(tmp_path, {(*instrument, t0.date()): candles})
+    opened = t0 + minute  # the first minute is not eligible, and KuCoin gave no candle
+    spans = [
+        EligibilitySpan(EPOCH, opened, False, "firstOpenDate"),
+        EligibilitySpan(opened, HISTORY_END, True, "firstOpenDate"),
+    ]
+    (evaluation,) = explore(
+        tmp_path,
+        [Trend()],
+        windows=(segment("tramo", t0, t0 + 5 * minute, warmup=timedelta(0)),),
+        instruments=[instrument],
+        fees={instrument: fee(*instrument, "0.0006")},
+        evidence={instrument: spans},
+    )
+    row = coverage_row(evaluation)
+    assert (row["numerador"], row["denominador"], row["cobertura"]) == (4, 4, 1.0)
+    assert (row["no_elegibles"], row["ausentes"], row["contradicciones"]) == (1, 0, 0)
+    assert (row["presentes_sobre_el_calendario"], row["minutos"]) == (4, 5)

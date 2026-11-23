@@ -100,39 +100,57 @@ def test_a_completed_query_keeps_its_result_and_its_copy(tmp_path: Path) -> None
     assert copy.read_bytes().endswith(b"}\n") and b"\r\n" not in copy.read_bytes()
 
 
-RACER = """
+GO = """
 import sys, time
-from datetime import UTC, datetime
 from pathlib import Path
-from kbot.backtest.reservation import AlreadyReserved, reserve
-folder, go, ready = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3])
+go, ready = Path(sys.argv[1]), Path(sys.argv[2])
 ready.touch()
 deadline = time.monotonic() + 60
 while not go.exists():
     if time.monotonic() > deadline:
         sys.exit(3)
     time.sleep(0.0005)
+"""
+
+RACER = """
+from datetime import UTC, datetime
+from kbot.backtest.reservation import AlreadyReserved, reserve
 try:
-    reserve(folder, "tendencia", sys.argv[4], datetime.now(UTC))
+    reserve(Path(sys.argv[3]), "tendencia", sys.argv[4], datetime.now(UTC))
 except AlreadyReserved:
     print("ocupada")
 else:
     print("reservada")
 """
 
+WRITER = """
+from kbot.backtest.reservation import write_copy
+copy, lock, family = Path(sys.argv[3]), Path(sys.argv[4]), sys.argv[5]
+for i in range(25):
+    entry = {
+        "familia": family,
+        "version": f"v{i:02d}",
+        "estado": "completada",
+        "iniciada": f"2026-11-23T10:{i:02d}:00+00:00",
+    }
+    write_copy(copy, entry, lock)
+print("escrita")
+"""
 
-def test_f3e5_01_of_processes_that_reserve_at_once_only_one_gets_it(tmp_path: Path) -> None:
-    folder, go = tmp_path / "validacion", tmp_path / "ya"
-    folder.mkdir()
-    readies = [tmp_path / f"lista_{i}" for i in range(4)]
+
+def race(tmp_path: Path, code: str, arguments: list[list[str]]) -> list[str]:
+    """Start one process per list of ``arguments``, all running ``code`` at once, and
+    return what each printed."""
+    go = tmp_path / "ya"
+    readies = [tmp_path / f"lista_{i}" for i in range(len(arguments))]
     racers = [
         subprocess.Popen(
-            [sys.executable, "-c", RACER, str(folder), str(go), str(ready), VERSION],
+            [sys.executable, "-c", GO + code, str(go), str(ready), *extra],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
         )
-        for ready in readies
+        for ready, extra in zip(readies, arguments, strict=True)
     ]
     try:
         deadline = time.monotonic() + 60
@@ -140,11 +158,31 @@ def test_f3e5_01_of_processes_that_reserve_at_once_only_one_gets_it(tmp_path: Pa
             assert time.monotonic() < deadline, "the processes did not start"
             time.sleep(0.01)
         go.touch()
-        outputs = [racer.communicate(timeout=60) for racer in racers]
+        outputs = [racer.communicate(timeout=120) for racer in racers]
     finally:
         for racer in racers:
             racer.kill()
     assert all(racer.returncode == 0 for racer in racers), outputs
-    said = sorted(out.strip() for out, _err in outputs)
+    return sorted(out.strip() for out, _err in outputs)
+
+
+def test_f3e5_01_of_processes_that_reserve_at_once_only_one_gets_it(tmp_path: Path) -> None:
+    folder = tmp_path / "validacion"
+    folder.mkdir()
+    said = race(tmp_path, RACER, [[str(folder), VERSION]] * 4)
     assert said == ["ocupada", "ocupada", "ocupada", "reservada"]
     assert len(list(folder.iterdir())) == 1
+
+
+def test_f3e5_06_copies_written_at_once_keep_every_entry(tmp_path: Path) -> None:
+    """Four processes of four families write 25 entries each into the same copy at once:
+    the copy keeps all 100, and it is valid JSON at the end."""
+    copy, lock = tmp_path / "docs" / "consultas.json", tmp_path / "validacion" / "copia.lock"
+    families = ["tendencia", "breakout", "reversion_media", "otra"]
+    said = race(tmp_path, WRITER, [[str(copy), str(lock), f] for f in families])
+    assert said == ["escrita"] * 4
+    held = json.loads(copy.read_text(encoding="utf-8"))
+    assert held["formato"] == COPY_FORMAT
+    found = sorted((e["familia"], e["version"]) for e in held["consultas"])
+    assert found == sorted((f, f"v{i:02d}") for f in families for i in range(25))
+    assert not [p for p in copy.parent.iterdir() if p.name.endswith(".tmp")]

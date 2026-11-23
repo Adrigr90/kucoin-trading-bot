@@ -22,11 +22,19 @@ READ_AT = datetime(2026, 11, 23, 9, 30, tzinfo=UTC)
 
 
 def write_history(root: Path, minutes: Iterable[MinuteCandle]) -> None:
+    """The days of ``minutes``, each asked whole (``solicitado.json`` included) and
+    answered with its candles: a minute without a candle is ``ausente``."""
     days: dict[tuple[str, str, date], list[Ohlcv]] = defaultdict(list)
     for m in minutes:
         days[(m.market, m.symbol, m.candle.open_time.date())].append(m.candle)
+    write_days(root, days)
+
+
+def write_days(root: Path, days: dict[tuple[str, str, date], list[Ohlcv]]) -> None:
+    """Each day asked whole and answered with its candles, maybe none."""
     for (market, symbol, day), candles in sorted(days.items()):
         start = datetime.combine(day, time(), UTC)
+        store.record_request(root, market, symbol, Span(start, start + DAY))
         store.write_day(
             root,
             market,

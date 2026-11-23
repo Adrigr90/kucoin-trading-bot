@@ -9,13 +9,15 @@
 * **Any reservation, in any state, prevents another query** of that family and version; an
   empty or unreadable file too, a reservation whose writing stopped halfway.
 * **Its copy, with the result,** goes to ``docs/f3/consultas_validacion.json``, in the
-  repository: one entry per family and version, in order.
+  repository: one entry per family and version, in order. Reading, merging and publishing
+  it go together under an exclusive lock, and it is replaced whole (F3E5-06).
 """
 
 from __future__ import annotations
 
 import json
 import os
+import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -26,6 +28,7 @@ from typing import Any
 from kbot.archive import parquet
 
 FORMAT = "kbot.backtest reserva 1"
+COPY_LOCK = "copia.lock"  # in the folder of the reservations, outside the repository
 COPY_FORMAT = "kbot.backtest consultas de la validacion 1"
 STARTED = "iniciada"
 COMPLETED = "completada"
@@ -115,33 +118,90 @@ def validation_query(
     """Reserve, then let the caller read. Whatever happens after the reservation, it ends
     ``completada`` or ``fallida``, and its copy goes to ``copy``."""
     query = Query(reserve(folder, family, version, now()), family, version)
+    lock = folder / COPY_LOCK
     try:
         yield query
     except BaseException as error:
         query.record = finish(query.path, FAILED, now(), error=f"{type(error).__name__}: {error}")
         if copy is not None:
-            write_copy(copy, query.record)
+            write_copy(copy, query.record, lock)
         raise
     query.record = finish(query.path, COMPLETED, now(), result=query.result)
     if copy is not None:
-        write_copy(copy, query.record)
+        write_copy(copy, query.record, lock)
 
 
-def write_copy(path: Path, record: dict[str, Any]) -> None:
+def write_copy(path: Path, record: dict[str, Any], lock: Path) -> None:
     """Put the entry of a reservation in the copy of the repository, in place of the one of
-    the same family and version, if there was one."""
-    entries: list[dict[str, Any]] = []
-    if path.exists():
-        held = json.loads(path.read_text(encoding="utf-8"))
-        if held.get("formato") != COPY_FORMAT:
-            raise ValueError(f"unknown format of {path}: {held.get('formato')!r}")
-        entries = list(held["consultas"])
-    key = (record["familia"], record["version"])
-    entries = [e for e in entries if (e["familia"], e["version"]) != key] + [record]
-    entries.sort(key=lambda e: (e["iniciada"], e["familia"], e["version"]))
-    path.parent.mkdir(parents=True, exist_ok=True)
-    content = _text({"formato": COPY_FORMAT, "consultas": entries})
-    path.write_text(content, encoding="utf-8", newline="\n")
+    the same family and version, if there was one (F3E5-06). Reading, merging and
+    publishing go together under ``lock``, an exclusive lock of the operating system, so
+    two queries that end at once keep both entries. The copy is replaced whole, through a
+    temporary file: whoever reads it finds the old one or the new one, always valid."""
+    with exclusive(lock):
+        entries: list[dict[str, Any]] = []
+        if path.exists():
+            held = json.loads(path.read_text(encoding="utf-8"))
+            if held.get("formato") != COPY_FORMAT:
+                raise ValueError(f"unknown format of {path}: {held.get('formato')!r}")
+            entries = list(held["consultas"])
+        key = (record["familia"], record["version"])
+        entries = [e for e in entries if (e["familia"], e["version"]) != key] + [record]
+        entries.sort(key=lambda e: (e["iniciada"], e["familia"], e["version"]))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        with temporary.open("w", encoding="utf-8", newline="\n") as file:
+            file.write(_text({"formato": COPY_FORMAT, "consultas": entries}))
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temporary, path)
+
+
+@contextmanager
+def exclusive(lock: Path, wait: float = 60.0) -> Iterator[None]:
+    """Hold the exclusive lock of the file ``lock`` (the operating system's, which it frees
+    if the process dies), waiting for it at most ``wait`` seconds."""
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        deadline = time.monotonic() + wait
+        while not _try_lock(descriptor):
+            if time.monotonic() > deadline:
+                raise TimeoutError(f"{lock} stayed locked for {wait} s")
+            time.sleep(0.005)
+        try:
+            yield
+        finally:
+            _unlock(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _try_lock(descriptor: int) -> bool:
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return False
+    return True
+
+
+def _unlock(descriptor: int) -> None:
+    if os.name == "nt":
+        import msvcrt
+
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
 
 
 def _text(content: dict[str, Any]) -> str:

@@ -20,7 +20,7 @@ import math
 import statistics
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -31,6 +31,8 @@ from kbot.backtest.execution import net_r
 from kbot.backtest.fees import SLIPPAGE, STRESS, Fee
 from kbot.backtest.partitions import DEVELOPMENT, Segment
 from kbot.backtest.position import EntryFailure, ExitReason, Trade
+from kbot.core.decimal import to_canonical
+from kbot.history.coverage import Coverage, Eligibility, Presence
 from kbot.strategies.combiner import Refusal
 from kbot.strategies.regime import Direction, Volatility
 from kbot.strategies.rules import LONG, Outcome, Signal
@@ -45,6 +47,8 @@ EXPIRIES = tuple(o.value for o in Outcome if o is not Outcome.DECISION)
 NOT_EXECUTED = (*(r.value for r in Refusal), *(f.value for f in EntryFailure))
 EXITS = tuple(reason.value for reason in ExitReason)
 NO_LABEL = "sin_etiqueta"
+# The eligibility of the minutes of E, the denominator of the coverage (§12.1, point 2).
+ELIGIBLE = (Eligibility.ELEGIBLE, Eligibility.DESCONOCIDA)
 FICHAS = {"tendencia": "§12.3.4", "breakout": "§12.3.5", "reversion_media": "§12.3.6"}
 
 
@@ -60,6 +64,10 @@ class Piece:
     expected: int  # minutes of the window
     invalid_days: tuple[tuple[date, str], ...]
     fee: Fee
+    # The coverage of the contract over the minutes of the window asked for the instrument,
+    # and how many minutes of the window were never asked (F3E5-05).
+    coverage: Coverage = field(default_factory=Coverage)
+    outside: int = 0
 
     @property
     def instrument(self) -> str:
@@ -280,13 +288,42 @@ def _consulted(partition: str) -> list[str]:
 
 
 def _coverage(pieces: Sequence[Piece], market: str, symbol: str) -> dict[str, Any]:
+    """The coverage of the contract (§12.1, point 2; F3E5-05) over the windows: E is the set
+    of their minutes asked whose eligibility is not ``no_elegible``, and the coverage is
+    its present minutes over its size, «no aplicable» when it is empty. The minutes present
+    over the whole calendar of the windows are another measure, named apart."""
     mine = [p for p in pieces if (p.market, p.symbol) == (market, symbol)]
     invalid = sorted({day for p in mine for day in p.invalid_days})
+    counts: Counter[tuple[Presence, Eligibility]] = Counter()
+    contradictions = 0
+    for piece in mine:
+        counts.update(piece.coverage.counts)
+        contradictions += len(piece.coverage.contradictions)
+
+    def in_e(presence: Presence) -> int:
+        return sum(n for (p, e), n in counts.items() if p is presence and e in ELIGIBLE)
+
+    numerator, denominator = (
+        in_e(Presence.PRESENTE),
+        sum(n for (_p, e), n in counts.items() if e in ELIGIBLE),
+    )
     return {
         "mercado": market,
         "simbolo": symbol,
-        "presentes": sum(p.present for p in mine),
         "minutos": sum(p.expected for p in mine),
+        "fuera_de_lo_solicitado": sum(p.outside for p in mine),
+        "no_elegibles": sum(n for (_p, e), n in counts.items() if e is Eligibility.NO_ELEGIBLE),
+        "elegibilidad_desconocida": sum(
+            n for (_p, e), n in counts.items() if e is Eligibility.DESCONOCIDA
+        ),
+        "denominador": denominator,
+        "numerador": numerator,
+        "ausentes": in_e(Presence.AUSENTE),
+        "en_conflicto": in_e(Presence.EN_CONFLICTO),
+        "no_descargados": in_e(Presence.NO_DESCARGADO),
+        "contradicciones": contradictions,
+        "cobertura": numerator / denominator if denominator else None,
+        "presentes_sobre_el_calendario": sum(p.present for p in mine),
         "dias_no_validos": [[day.isoformat(), reason] for day, reason in invalid],
     }
 
@@ -350,17 +387,44 @@ def render(data: Mapping[str, Any], record: Path | None = None) -> str:
         "",
         "## Cobertura del histórico",
         "",
-        "Minutos presentes en las ventanas, sin el calentamiento. En Futures no hay velas de "
-        "un minuto antes del 1 ene 2025.",
+        "En las ventanas, sin el calentamiento. **Cobertura** es la del contrato (§12.1, "
+        "punto 2): los minutos presentes de E entre los de E. E son los minutos pedidos a "
+        "KuCoin cuya elegibilidad no es `no_elegible`; los de elegibilidad desconocida "
+        "cuentan. Si E está vacío, es «no aplicable». **Fuera de lo solicitado** son "
+        "minutos que nunca se pidieron, como los de Futures antes del 1 ene 2025, que no "
+        "tienen velas de un minuto: no cuentan en E. **Presentes sobre el calendario** es "
+        "otra medida: los presentes entre todos los minutos de las ventanas.",
         "",
         _table(
-            ["Instrumento", "Presentes", "Minutos", "Cobertura", "Días no válidos"],
+            [
+                "Instrumento",
+                "Minutos",
+                "Fuera de lo solicitado",
+                "No elegibles",
+                "E",
+                "Presentes en E",
+                "Ausentes",
+                "En conflicto",
+                "No descargados",
+                "Contradicciones",
+                "Cobertura",
+                "Presentes sobre el calendario",
+                "Días no válidos",
+            ],
             [
                 [
                     f"{c['mercado']} {c['simbolo']}",
-                    str(c["presentes"]),
                     str(c["minutos"]),
-                    _percent(c["presentes"], c["minutos"]),
+                    str(c["fuera_de_lo_solicitado"]),
+                    str(c["no_elegibles"]),
+                    str(c["denominador"]),
+                    str(c["numerador"]),
+                    str(c["ausentes"]),
+                    str(c["en_conflicto"]),
+                    str(c["no_descargados"]),
+                    str(c["contradicciones"]),
+                    _percent(c["numerador"], c["denominador"], "no aplicable"),
+                    _percent(c["presentes_sobre_el_calendario"], c["minutos"]),
                     ", ".join(f"{d} ({why})" for d, why in c["dias_no_validos"]) or "—",
                 ]
                 for c in data["cobertura"]
@@ -581,8 +645,8 @@ def _r(value: float | None) -> str:
     return "—" if value is None else f"{value:.3f}".replace(".", ",")
 
 
-def _percent(part: int, whole: int) -> str:
-    return "—" if whole == 0 else f"{100 * part / whole:.2f} %".replace(".", ",")
+def _percent(part: int, whole: int, empty: str = "—") -> str:
+    return empty if whole == 0 else f"{100 * part / whole:.2f} %".replace(".", ",")
 
 
 def _fraction(text: str) -> str:
@@ -592,11 +656,15 @@ def _fraction(text: str) -> str:
 
 
 def _plain(value: object) -> object:
-    """A value of the parameters in JSON: ``Decimal`` as canonical text."""
+    """A value of the parameters in JSON: ``Decimal`` as the canonical text of the project
+    (§5.7), the one the hash of the parameters uses, so that ``2`` and ``2.00`` give the
+    same text and the hash can be rebuilt from the report (F3E5-07)."""
     if isinstance(value, Mapping):
         return {str(k): _plain(v) for k, v in value.items()}
     if isinstance(value, list | tuple):
         return [_plain(v) for v in value]
+    if isinstance(value, Decimal):
+        return to_canonical(value)
     if isinstance(value, int | str | bool) or value is None:
         return value
-    return format(value, "f")
+    raise TypeError(f"not a parameter: {type(value).__name__}")

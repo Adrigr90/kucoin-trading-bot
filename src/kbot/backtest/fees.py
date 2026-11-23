@@ -23,6 +23,7 @@ from decimal import Decimal
 from typing import Any
 
 from kbot.backtest.execution import Costs
+from kbot.core.decimal import to_canonical
 from kbot.kucoin.models import InstrumentList, Model, TextDecimal
 from kbot.kucoin.rest import KucoinRestClient
 
@@ -64,7 +65,7 @@ class Fee:
         return {
             "mercado": self.market,
             "simbolo": self.symbol,
-            "comision_tomador": format(self.taker, "f"),
+            "comision_tomador": to_canonical(self.taker),
             "origen": self.origin,
             "leida": self.read_at.isoformat(),
         }

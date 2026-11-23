@@ -2288,7 +2288,7 @@ El desarrollo se parte en **cuatro tramos consecutivos**, cada corte en la media
 - **Tras los informes del desarrollo, el propietario decide qué familias siguen** y si cambia algún parámetro. Un cambio es una versión nueva, que vuelve a pasar por su ficha.
 - Con los datos de los informes se le podrá proponer D15 (filtros opcionales).
 - Esta sección no decide D12, D16, D22, D28 ni D30.
-- **Sigue en F3-E5b:** la migración `0004` y `svc-strategy` (F3-A10).
+- **Sigue en F3-E5b:** la migración `0004` y `svc-strategy` (F3-A10), en §12.6.
 
 #### 12.5.8 Lo que muestran los informes del desarrollo: Futures [23 nov 2026; la regla del contrato se mantiene; **pregunta abierta para el propietario**]
 
@@ -2333,6 +2333,152 @@ Los informes del desarrollo están en `docs/informes/exploratorio/` (§18).
   - Una vela sintética nunca debe convertirse en un precio observado para ejecutar.
   - Su dictamen no aprueba ninguna modificación del contrato.
 - **Estado:** la regla se mantiene. Los informes son correctos con ella, pero sus conclusiones de Futures descansan en pocos contratos. Estudiar una enmienda es decisión del propietario; si la pide, se diseña con esas condiciones y con su propia revisión.
+
+### 12.6 Las señales en la base de datos y `svc-strategy` (F3-E5b) [diseño del 23 nov 2026, **pendiente de revisión**, antes del código]
+
+Fija la migración `0004`, con `trading.signals` y `config.strategy_versions`; los permisos de `kbot_strategy` (F3-A10); y `svc-strategy` como proceso sin red probado en la CI (`08`, F3-E5).
+
+- **No cambia** ninguna regla de §12.1 a §12.5: las señales son las de las fichas aprobadas (§12.3), calculadas con las mismas funciones que el motor (§12.4).
+- **No incluye:**
+  - las intenciones, las decisiones ni las posiciones en la base, que son de la F4;
+  - las noticias;
+  - la rebaja de lo que cuenta un minuto con evidencia tardía (§3.5), que es de la F4 y de D29;
+  - el despliegue de `svc-strategy` en el servidor. Se propondrá con su propia revisión cuando haya una versión aprobada (§12.6.2) y el propietario lo pida.
+
+#### 12.6.1 `trading.signals`: una fila por señal
+
+| Columna | Tipo y regla |
+|---|---|
+| `signal_id` | `uuid`, clave primaria, creado por el servicio. Será el `correlation_id` de la señal al cierre (§1.2) |
+| `family` | `text`: `tendencia`, `breakout` o `reversion_media` |
+| `code_commit` | `text`, 40 caracteres hexadecimales: el commit del código que la calculó |
+| `params_hash` | `text`, 64 caracteres hexadecimales. La versión de §12.3.3 es `code_commit` + `params_hash` |
+| `market`, `symbol` | `text`. `market` es `SPOT` o `FUTURES` |
+| `timeframe` | `text`: la temporalidad de la señal (`5m`, `15m`, `1h`, `4h` o `1d`) |
+| `open_time` | `timestamptz`: la apertura de la vela de señal $t$, alineada al minuto UTC |
+| `direction` | `int2`: +1 o −1, y solo +1 en Spot (§6.2.1) |
+| `signal_at` | `timestamptz`: $D_s$, la última disponibilidad de lo que usa (§12.4.1), posterior a `open_time` |
+| `context_open` | `timestamptz`: la vela de contexto en $D_s$ |
+| `context_direction`, `context_volatility`, `signal_direction`, `signal_volatility` | `text` o nulo: el régimen de §12.3.2 de las dos velas; nulo si no hay etiqueta |
+| `levels` | `jsonb`: los niveles fijados en la señal, como números (el ATR, el extremo de la vela…) |
+| `provenance` | `jsonb`: los intervalos de minutos originales, unidos |
+| `provenance_minutes`, `rest_only_minutes` | `int4`: los minutos de la procedencia y cuántos son solo REST (§12.1, punto 5), con 0 ≤ solo REST ≤ total y total > 0 |
+| `run_id` | `uuid`: la ejecución del servicio que la escribió (§4.2) |
+| `recorded_at` | `timestamptz`, por defecto `clock_timestamp()`, nunca anterior a `signal_at` |
+
+- **Unicidad** (§1.3): (`family`, `code_commit`, `params_hash`, `market`, `symbol`, `timeframe`, `open_time`, `direction`).
+- **Clave foránea** (`family`, `params_hash`) → `config.strategy_versions`: no se puede guardar la señal de una versión no aprobada.
+- **Solo inserciones:** nadie tiene `UPDATE` ni `DELETE` (§8). Sin particiones ni índices extra: son pocas filas.
+- **Las restricciones las impone PostgreSQL** (§0, regla 6): los formatos hexadecimales, las listas de valores, la dirección en Spot, los recuentos, el minuto alineado y `recorded_at ≥ signal_at`.
+
+#### 12.6.2 `config.strategy_versions`: las versiones aprobadas
+
+- **Una fila por versión aprobada de los parámetros de una ficha.** Sus columnas:
+  - `family` y `params_hash`, la clave primaria;
+  - `params`, el texto JSON canónico de RFC 8785 cuyo SHA-256 es `params_hash`;
+  - `ficha`, el apartado de su ficha (por ejemplo, `§12.3.4`);
+  - `approved_on` (`date`) y `approval`, el texto de la aprobación (quién y cómo);
+  - `created_at`.
+- **Solo la escriben las migraciones** (`kbot_owner`), solo con inserciones, como `config.risk_limits` (§6.1). Ningún servicio escribe en `config` (§9).
+- **Aprueba los parámetros, no el commit.** La versión de §12.3.3 incluye el commit del código, pero una migración no puede conocer el commit en el que ella misma entra. El código se aprueba con su revisión y su integración, y cada señal guarda además el commit con el que se calculó (§12.6.1).
+- **La migración `0004` no inserta ninguna fila.** Qué familias siguen lo decide el propietario (§12.5.7).
+  - Cada aprobación llega después en su propia migración, con su fecha y su texto.
+  - `sql_guard` admitirá entonces el `INSERT` en esta tabla, en esa revisión, como hoy en `config.risk_limits`.
+  - Sin fila, `svc-strategy` no da señales de esa familia (§0, regla 1).
+
+#### 12.6.3 Los permisos de `kbot_strategy` (F3-A10)
+
+| Objeto | Privilegio |
+|---|---|
+| Esquemas `market`, `trading` y `config` | `USAGE` |
+| `market.candles` y `market.universe_snapshots` | `SELECT` |
+| `config.strategy_versions` | `SELECT` |
+| `trading.signals` | `INSERT`, y nada más |
+
+- **Nada más:**
+  - ni `SELECT` sobre las señales: la reinserción usa `ON CONFLICT DO NOTHING`, que solo necesita `INSERT`, como en el grabador (§3.8);
+  - ni `UPDATE` ni `DELETE`;
+  - ni otras tablas ni funciones;
+  - ni escribir en `config`.
+- **Ningún otro rol escribe `trading.signals`.**
+- **La política** (`tools/grant_policy.py`) añade una regla de §9: `kbot_strategy` solo escribe señales e intenciones, y nunca aprueba.
+  - `sql_guard` rechaza cualquier otro `GRANT`.
+  - La CI comprueba que la base tiene exactamente esta matriz (`tests/db/test_privileges.py`).
+
+#### 12.6.4 `svc-strategy`
+
+`python -m kbot.strategies`, un proceso que escribe las señales de las versiones aprobadas a partir de las velas del grabador.
+
+- **Versión:** el commit del código que se ejecuta (§12.3.3). Sin versión no arranca.
+- **Familias:** las de las fichas cuyo (`family`, `params_hash`) está en `config.strategy_versions`. Las demás no corren.
+- **Universo:** los instrumentos con `in_universe` de la evaluación de `market.universe_snapshots` que rige en el día de la señal: la última con `evaluated_at` en ese día o antes (§3.8).
+- **Datos:** las velas de 1 minuto de `last` de `market.candles`, con cada fila convertida en un minuto del contrato (§12.1):
+
+| `state` | Evidencia | P | V | T |
+|---|---|---|---|---|
+| `cerrada_cruzada` | `vela_cruzada_consistente` | contrastada | solo REST (el volumen del WebSocket no juzga hasta D26, §3.8) | contrastada |
+| `discrepante` | `vela_cruzada_discrepante` | discrepante: no utilizable | solo REST | contrastada |
+| `cerrada_rest` | `vela_rest_suficiente` | solo REST | solo REST | solo REST |
+
+  - **Disponibilidad de un minuto:** el máximo de su `recorded_at` y su fin más el margen de 15 s. Es la regla «en vivo» de §12.1, punto 4: la vela existe cuando el grabador la escribe ya cerrada.
+  - Un minuto sin fila es una ausencia.
+  - El volumen de Futures va sin multiplicador, como en el histórico.
+- **Las señales de un día:** las de las fichas con $D_s$ en $[d, d+1)$. Se calculan con los minutos desde $d$ − 30 días, la misma regla declarada que el calentamiento de los tramos (§12.5.2). Así cada día tiene un comienzo fijo, que no depende de cuándo corre el servicio. **Con los mismos minutos dan exactamente las señales del motor** (`engine.run` con la ventana $[d, d+1)$), porque son las mismas funciones (§0, principio 3).
+- **Corte de cada ciclo:** al empezar, el ciclo fija su `corte` = la hora actual menos 60 s [R], el margen para que se confirmen las inserciones del grabador.
+  - Solo lee las filas con `recorded_at` ≤ `corte`.
+  - Solo escribe las señales con $D_s$ ≤ `corte`.
+  - Las velas superiores se forman con lo terminado hasta `corte`.
+- **Ciclos:** cada 15 minutos, en los minutos 01, 16, 31 y 46 de cada hora, a los 30 s.
+  - Así entra cada vela de 15 m y de 1 h, cuyo último minuto está disponible unos 15 s después de su fin.
+  - Cada ciclo calcula el día de `corte` y, si `corte` cae en la primera hora del día, también el anterior.
+  - El primero, al arrancar, calcula además los dos días anteriores: tras una parada recupera las señales de las últimas 48 h. Lo más antiguo es cosa del backtest.
+- **Escritura:** cada ciclo inserta sus señales en una transacción, con `ON CONFLICT DO NOTHING`. Repetirlo, o arrancar otra vez, no duplica nada, y una señal escrita nunca se borra ni se cambia.
+- **Lo que llega tarde:** una fila con `recorded_at` ≤ `corte` cuya inserción se confirme después de que el ciclo lea no estaba visible para él.
+  - El ciclo siguiente la ve, y puede añadir señales que el anterior no podía calcular.
+  - Nunca quita ninguna, porque una señal escrita no se borra.
+  - Es un límite declarado del tiempo real: lo cuenta el registro del servicio, y la comparación de la F4 entre lo escrito en vivo y lo recalculado lo medirá.
+- **Sin red** (§1.1):
+  - el proceso solo abre el socket Unix de PostgreSQL, con `peer` como `kbot_strategy`;
+  - nunca importa el cliente de KuCoin;
+  - desplegado, llevará `IPAddressDeny=any` (§9).
+- **Ante un fallo se bloquea** (§0, regla 1). Un ciclo que falla no escribe nada, y el siguiente lo reintenta. Sin universo o sin versiones aprobadas, no hay señales.
+- **Coste:** cada ciclo construye, por instrumento y familia, los marcos de unos 31 días de minutos. En el PC, un tramo de 140 días tarda unos 12 s por familia e instrumento (§18, 23 nov 2026). Se medirá con 31 días en la CI y en el PC antes de proponer el despliegue [P].
+
+#### 12.6.5 Pruebas (F3-A10)
+
+- **Con PostgreSQL, en la CI:**
+  - `0004` se aplica, y la matriz de privilegios de la base es exactamente la de la política, con los nuevos de `kbot_strategy`;
+  - `kbot_strategy` inserta una señal y no puede:
+    - leerla, cambiarla, borrarla ni vaciar la tabla;
+    - escribir en `config.strategy_versions` ni en `market`;
+    - usar otras tablas;
+  - **la unicidad:**
+    - la misma clave dos veces deja una sola fila, y con `ON CONFLICT DO NOTHING` no da error;
+    - con otro commit, es otra señal;
+  - la clave foránea: la señal de una versión no aprobada se rechaza;
+  - **cada restricción, en su frontera:**
+    - la dirección, y Spot solo largo;
+    - los hexadecimales;
+    - los recuentos;
+    - el minuto alineado;
+    - `recorded_at` antes de `signal_at`;
+  - **el servicio, sobre velas sintéticas del grabador** (los tres estados, una ausencia y una fila tardía), con dos instrumentos, un universo y versiones aprobadas de fichas de periodos cortos:
+    - un ciclo como `kbot_strategy` escribe exactamente las señales del motor para ese día;
+    - a mitad del día, escribe exactamente las del motor con $D_s$ ≤ `corte`. Las demás llegan en ciclos posteriores, y al final son las del día entero;
+    - repetirlo no añade nada;
+    - una versión sin aprobar no escribe nada;
+    - una fila con `recorded_at` posterior al corte no se usa;
+  - **sin red:** el ciclo corre en un proceso que rechaza cualquier conexión `AF_INET` o `AF_INET6` y cualquier resolución de nombres, y funciona por el socket Unix.
+- **Sin base, en cualquier máquina:**
+  - la conversión de cada fila (estado, evidencia, dimensiones y disponibilidad);
+  - las fechas de cada ciclo, su corte y sus días;
+  - el texto de `params` de las tres fichas aprobadas, que da sus tres hashes.
+
+#### 12.6.6 Qué decide el propietario
+
+- **Qué versiones se aprueban,** tras §12.5.7. Cada una es una fila de `config.strategy_versions`, en su propia migración.
+- **Cuándo se despliega `svc-strategy`,** con su revisión.
+- Esta sección no decide D12, D16, D22, D28, D29 ni D30.
 
 ## 13. Infraestructura, monitorización y alertas
 
@@ -2906,3 +3052,4 @@ $$\Delta Cap=\underbrace{8}_{\text{distancia mark-stop de lo cerrado}}+\underbra
 | 23 nov 2026 | **F3E5-05 a F3E5-07, corregidos** (§12.5.1, §12.5.4 a §12.5.6). (5) El lector da también la presencia de F3-E1 de cada minuto pedido, sacada de `solicitado.json` y de las peticiones de cada día. Con ella y con la evidencia de elegibilidad de F3-E1, el informe calcula la cobertura del contrato y da aparte E, los presentes en E, los ausentes, lo no descargado, lo que está en conflicto, las contradicciones, los no elegibles y lo que nunca se pidió. La de los presentes sobre el calendario queda rotulada como otra medida. (6) La copia se lee, se mezcla y se publica bajo un cierre exclusivo del sistema operativo (`copia.lock`, en la carpeta de las reservas, fuera del repositorio), y se reemplaza con un archivo temporal. (7) Los decimales de los parámetros van en el informe con `to_canonical`. Hay cuatro pruebas nuevas, las de aceptación del revisor, y en local pasan 1.310 | Claude |
 | 23 nov 2026 | **Informes del desarrollo rehechos con `3490a1c` (en `5829cf1`), y §12.5.8 ampliado.** El primer intento, con `2fd382e`, se detuvo en el primer día de Futures anterior a lo solicitado (antes del 1 ene 2025). El lector construía una ventana invertida para un día que no toca ninguna ventana pedida. `3490a1c` lo salta, con dos pruebas que fallaban con el lector anterior; su CI, en verde, pasa 1.619 pruebas y 223 en aarch64. La nueva ejecución tardó 1 h 08 min. **Todas las cifras coinciden con las de `6f08bb8`:** solo cambian la cobertura, el commit y la hora de lectura de las comisiones, que son las mismas. La cobertura del contrato da «no aplicable» a SOXLUSDTM y 99,37 % a XBTUSDTM, y deja aparte los 61.920 minutos de Futures anteriores al 1 ene 2025, que nunca se pidieron. EVAA-USDT y PIEVERSE-USDT de Spot dan 0 %: no hay evidencia de cuándo empezaron a cotizar, así que sus minutos son de elegibilidad desconocida y cuentan en E, como en el informe de cobertura de F3-E1. Los informes de `6f08bb8` se retiran del repositorio, y siguen en su historia. §12.5.8 añade la opinión del revisor y por qué calla cada contrato: sin periodo elegible (SOXL), el contexto nunca se calienta (8 contratos en la tendencia y en el breakout, 1 en la reversión) o valores a ratos sin señal | Claude |
 | 23 nov 2026 | **Segunda revisión del código de F3-E5a (commit `2ba8e2f`): APROBADO**, con el código y los tres informes del desarrollo. **F3E5-05, RESUELTO:** la cobertura usa la presencia y la elegibilidad de F3-E1 y deja lo no solicitado fuera del denominador. SOXLUSDTM figura como «no aplicable» y XBTUSDTM con 566.630 de 570.240, un 99,37 %, y la ventana invertida de los días anteriores a lo solicitado queda corregida. **F3E5-06, RESUELTO:** el cierre del sistema operativo protege a la vez la lectura, la mezcla y la publicación, y la prueba concurrente conserva las 100 anotaciones, con reemplazo atómico. **F3E5-07, RESUELTO:** los parámetros usan el texto canónico; `2` y `2.00` dan el mismo contenido y permiten rehacer el hash aprobado. **Verificación del revisor:** pasan las 80 pruebas de backtest, las cifras de operaciones y resultados de los 480 registros del desarrollo coinciden exactamente con las anteriores, y los informes en Markdown concuerdan con sus JSON. La separación de causas de Futures es coherente con mantener el contrato vigente; los recuentos de calentamiento son mediciones aportadas, que no recalculó. Sin hallazgos nuevos. El revisor no repitió la ejecución completa sobre el histórico ni consultó datos de la validación o de la prueba. La aprobación es la de la evaluación exploratoria: siguen pendientes F3-E5b y la validación definitiva | Revisor |
+| 23 nov 2026 | **Diseño de F3-E5b: las señales en la base de datos y `svc-strategy`** (§12.6, rama `fase-3-e5b`, **pendiente de revisión**, antes del código). **Migración `0004`:** `trading.signals`, una fila por señal, única por su clave de §1.3, con el commit y el hash de su versión, sus instantes, su régimen, sus niveles, su procedencia y sus recuentos solo REST, y una clave foránea a la versión aprobada; y `config.strategy_versions`, que aprueba los parámetros de una ficha, la escriben solo las migraciones y nace vacía, porque qué familias siguen lo decide el propietario (§12.5.7). **Permisos de `kbot_strategy` (F3-A10):** lee `market.candles`, `market.universe_snapshots` y `config.strategy_versions`, e inserta señales, y nada más. **`svc-strategy`:** calcula cada 15 minutos las señales de cada día con los minutos del grabador desde 30 días antes, con un corte de 60 s, la conversión de cada fila a un minuto del contrato y la disponibilidad en `recorded_at`. Con los mismos minutos da exactamente las señales del motor. Sin red, idempotente y sin desplegar | Claude |

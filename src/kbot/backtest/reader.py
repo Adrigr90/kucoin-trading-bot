@@ -61,9 +61,10 @@ def read_minutes(root: Path, market: str, symbol: str, start: datetime, end: dat
             ]
             minutes.extend(historical_minute(market, symbol, c) for c in candles)
         for window in asked:
-            piece = Window(max(part.start, window.start), min(part.end, window.end))
-            if piece.start >= piece.end:
-                continue
+            first, last = max(part.start, window.start), min(part.end, window.end)
+            if first >= last:
+                continue  # this day holds no minute of that window
+            piece = Window(first, last)
             if record is None:
                 states.update(presence(piece, [], []))
             else:

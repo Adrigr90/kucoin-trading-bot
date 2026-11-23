@@ -3,6 +3,7 @@ its days (``02`` §12.5.1, §12.5.5 and §12.5.6)."""
 
 from __future__ import annotations
 
+from collections import Counter
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
@@ -11,10 +12,12 @@ import pytest
 from kbot.backtest.partitions import TEST_START, SealedPartition
 from kbot.backtest.reader import read_minutes
 from kbot.history import store
+from kbot.history.coverage import Presence
 from tests.unit.backtest.history import write_history
 from tests.unit.strategies.support import walk_minutes
 
 FIRST = datetime(2026, 6, 25, tzinfo=UTC)
+DAY = timedelta(days=1)
 
 
 @pytest.fixture
@@ -68,3 +71,17 @@ def test_a_day_whose_files_are_not_a_valid_pair_gives_no_minute(history: Path) -
     # A day never downloaded is no fault: it simply has no minute.
     empty = read_minutes(history, "SPOT", "BTC-USDT", FIRST, TEST_START)
     assert (empty.minutes, empty.invalid_days) == ([], ())
+
+
+def test_the_presence_of_the_minutes_asked(history: Path) -> None:
+    """Only the minutes asked have a presence (F3E5-05): the days before what was asked,
+    never touched by any request, have none. A day without a valid pair of files leaves its
+    minutes asked ``no_descargado``."""
+    read = read_minutes(history, "FUTURES", "ETHUSDTM", FIRST - 3 * DAY, TEST_START)
+    assert min(read.states) == FIRST and len(read.states) == 2 * 1440
+    assert set(read.states.values()) == {Presence.PRESENTE}
+    _parquet, record = store.paths(history, "FUTURES", "ETHUSDTM", date(2026, 6, 26))
+    record.unlink()
+    read = read_minutes(history, "FUTURES", "ETHUSDTM", FIRST - 3 * DAY, TEST_START)
+    states = Counter(read.states.values())
+    assert states == {Presence.PRESENTE: 1440, Presence.NO_DESCARGADO: 1440}

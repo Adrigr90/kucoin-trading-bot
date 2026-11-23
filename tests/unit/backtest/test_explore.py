@@ -314,8 +314,8 @@ def test_f3e5_05_an_instrument_opened_after_the_window_has_no_applicable_coverag
     tmp_path: Path,
 ) -> None:
     """Like SOXLUSDTM in the development: asked and answered without candles, and not
-    eligible until it opens, after the window. The day before what was asked is outside
-    the history: it counts nowhere."""
+    eligible until it opens, after the window. The two days before what was asked and the
+    one after are outside the history: they count nowhere."""
     first, late = datetime(2026, 1, 5, tzinfo=UTC), datetime(2026, 1, 20, tzinfo=UTC)
     instrument = ("FUTURES", "TARDEUSDTM")
     write_days(tmp_path, {(*instrument, (first + i * DAY).date()): [] for i in range(2)})
@@ -326,7 +326,7 @@ def test_f3e5_05_an_instrument_opened_after_the_window_has_no_applicable_coverag
     (evaluation,) = explore(
         tmp_path,
         [Trend()],
-        windows=(segment("tramo", first - DAY, first + 2 * DAY, warmup=timedelta(0)),),
+        windows=(segment("tramo", first - 2 * DAY, first + 3 * DAY, warmup=timedelta(0)),),
         instruments=[instrument],
         fees={instrument: fee(*instrument, "0.0006")},
         evidence={instrument: spans},
@@ -334,14 +334,14 @@ def test_f3e5_05_an_instrument_opened_after_the_window_has_no_applicable_coverag
     row = coverage_row(evaluation)
     assert row["cobertura"] is None
     assert (row["minutos"], row["fuera_de_lo_solicitado"], row["no_elegibles"]) == (
+        5 * 1440,
         3 * 1440,
-        1440,
         2 * 1440,
     )
     assert (row["denominador"], row["numerador"], row["presentes_sobre_el_calendario"]) == (0, 0, 0)
     text = report.render(report.content(evaluation))
     assert (
-        "| FUTURES TARDEUSDTM | 4320 | 1440 | 2880 | 0 | 0 | 0 | 0 | 0 | 0 | no aplicable |" in text
+        "| FUTURES TARDEUSDTM | 7200 | 4320 | 2880 | 0 | 0 | 0 | 0 | 0 | 0 | no aplicable |" in text
     )
 
 

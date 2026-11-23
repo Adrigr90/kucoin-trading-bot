@@ -1423,7 +1423,7 @@ El diseño del despliegue, las copias y su restauración en la etapa E4 está en
 - decisión en la vela cerrada t y ejecución en t+1, precisadas por la regla causal de §12.3.1;
 - prueba que "envenena" los datos futuros;
 - universo con instrumentos deslistados [P];
-- 60/20/20 más walk-forward;
+- 60/20/20 más walk-forward (las particiones y los tramos, en §12.5);
 - **el sentimiento generado por IA solo se valida en vivo**;
 - **el libro de órdenes solo se valida con profundidad grabada por el propio sistema** [H: no hay histórico].
 
@@ -2165,6 +2165,175 @@ Los costes de los ejemplos, $f$ = 0,06 % y $s$ = 0,05 %, solo sirven para ilustr
   - D30: $T_{max}$;
   - ni D12, D16 ni D28, que son de la F8.
 
+### 12.5 Evaluación exploratoria de F3-E5 [diseño del 21 nov 2026, **APROBADO** por el revisor en la segunda revisión (commit `7eab2b4`): F3E5-01 a F3E5-04 resueltos. Programado en `src/kbot/backtest/` (§18) y **APROBADO** por el revisor en la segunda revisión del código (`2ba8e2f`), con los tres informes del desarrollo: F3E5-05 a F3E5-07 resueltos]
+
+Fija las particiones del histórico y su uso (F3-AL-03), el *walk-forward* dentro del desarrollo, los costes del informe y el informe exploratorio de cada familia (`08`, F3-E5). **La migración `0004` (las señales en la base de datos) y `svc-strategy` son la segunda parte de F3-E5 (F3-E5b)**, con su propio diseño y su propia revisión.
+
+#### 12.5.1 Particiones (F3-AL-03)
+
+Son de calendario UTC y tienen **las mismas fechas para todos los instrumentos**. Parten el histórico descargado, [19 nov 2024 00:00, 19 nov 2026 22:10), por los puntos del 60 % y del 80 % de su duración, cada uno en la medianoche UTC más cercana:
+
+| Partición | Intervalo | Días | Parte |
+|---|---|---|---|
+| Desarrollo | [19 nov 2024, 1 feb 2026) | 439 | 60,06 % |
+| Validación | [1 feb 2026, 27 jun 2026) | 146 | 19,97 % |
+| Prueba | [27 jun 2026, 19 nov 2026 22:10) | 145,92 | 19,96 % |
+
+- **Las mismas fechas en Spot y en Futures**, aunque las velas de Futures empiezan el 1 ene 2025 y su desarrollo tiene 396 días. Los dos mercados se mueven juntos: un día de validación en uno no puede ser de desarrollo en el otro.
+- **Uso** (`08` §3):
+  - **Desarrollo:** toda exploración y toda decisión de la F3, como qué familias siguen o sus parámetros.
+  - **Validación:** como mucho una vez por familia y versión (§12.3.3), **reservada antes de leerla** (F3E5-01):
+    - La herramienta crea la reserva de forma atómica y persistente antes de leer el primer minuto de la validación: un archivo por familia y versión en `C:\kbot_historico\validacion\`, creado solo si no existe. Si dos procesos lo intentan a la vez, solo uno lo crea.
+    - La reserva tiene tres estados: `iniciada` al crearse, y `completada` o `fallida` al terminar. Un fallo después de leer la deja `fallida`, nunca borrada.
+    - Una reserva existente, en cualquier estado, impide otra consulta de esa familia y versión.
+    - Su copia, con el resultado, va en `docs/f3/consultas_validacion.json`, en el repositorio. Se lee, se mezcla y se publica bajo un cierre exclusivo del sistema operativo, y se reemplaza entera con un archivo temporal: dos consultas que terminan a la vez conservan sus dos entradas, y la copia siempre es un JSON válido (F3E5-06).
+  - **Prueba:** sellada hasta la F8. **La herramienta no lee ningún minuto de la prueba:** su lector se detiene el 27 jun 2026, y una ventana que la toque se rechaza con un error.
+  - Cada informe dice qué particiones consultó y qué decisiones se tomaron con ellas. Un periodo usado para elegir nunca se presenta después como prueba independiente.
+- **Los datos que graba el propio sistema** solo son una muestra temporal independiente desde el **19 nov 2026 a las 22:10 UTC**, el final del histórico fijado (F3E5-04; `08` §3). Los grabados del 17 al 19 nov son los mismos instrumentos y minutos que la prueba, por otro canal: no añaden observaciones nuevas y quedan sellados con ella.
+- **Se fijan antes de ver ningún resultado:** hasta hoy, ningún motor ha corrido sobre el histórico real.
+
+#### 12.5.2 *Walk-forward* en el desarrollo
+
+El desarrollo se parte en **cuatro tramos consecutivos**, cada corte en la medianoche UTC más cercana a su cuarto:
+
+| Tramo | Intervalo | Días |
+|---|---|---|
+| 1 | [19 nov 2024, 9 mar 2025) | 110 |
+| 2 | [9 mar 2025, 27 jun 2025) | 110 |
+| 3 | [27 jun 2025, 14 oct 2025) | 109 |
+| 4 | [14 oct 2025, 1 feb 2026) | 110 |
+
+- **Cada tramo es una ventana del motor** (§12.4.4): empieza sin posiciones y calienta los indicadores con los **30 días anteriores**, o desde el primer minuto del histórico si hay menos. Una posición abierta al final del tramo se liquida para evaluarla.
+- **El calentamiento de 30 días es una regla declarada.** Un indicador recursivo calentado más tiempo daría valores algo distintos. Con la EMA(50) de 4 h, 30 días son 180 velas: 50 forman su semilla y quedan 130 actualizaciones. La influencia de la semilla es $(49/51)^{130} \approx 0{,}0055$, un 0,55 % (F3E5-03).
+- **La F3 no ajusta parámetros:** los fijan las fichas aprobadas. Por eso el *walk-forward* mide la **estabilidad**: el informe da cada tramo por separado y señala la familia que solo gana en uno.
+- **Un cambio de parámetros es una versión nueva** (§12.3.3). Se evalúa otra vez en el desarrollo, con los mismos tramos, y solo después, si acaso, en la validación.
+
+#### 12.5.3 Costes del informe
+
+- **La comisión por lado**, como tomador, es la de cada instrumento. La herramienta la lee de KuCoin con el cliente de solo lectura de la E1 el día del informe, y la guarda con él:
+  - **Futures:** el `takerFeeRate` del contrato. Es 0,06 % en la respuesta real guardada en la E1 [H].
+  - **Spot:** la tarifa de tomador del nivel 0 para la clase del par (`feeCategory`), multiplicada por su `takerFeeCoefficient`. El modelo de clase y coeficiente lo comprobó el revisor el 21 nov 2026 en la página de tarifas de KuCoin y en su SDK oficial [H]. La tarifa de cada clase es la de la tabla de tarifas VIP de KuCoin, leída el 23 nov 2026 (https://www.kucoin.com/support/48142946141635): en el nivel VIP 0, 0,1 % en la clase A, 0,2 % en la B y 0,3 % en la C [H]. Una clase que no esté en esa tabla detiene el informe: no se supone ninguna tarifa.
+- **Deslizamiento:** 0,05 % por ejecución, fijo y declarado. La F3 no tiene libro: la profundidad es de F3-E6 y de la F5.
+- **Prueba de esfuerzo:** cada informe repite los resultados netos con la comisión y el deslizamiento dobles.
+- **Sin funding** (§12.4.4). Los parámetros de costes del riesgo de la F4 son D22 y D30, que esto no decide.
+
+#### 12.5.4 El informe exploratorio de cada familia (F3-A11)
+
+- **Formato:** uno por familia y versión, en `docs/informes/exploratorio/`, en Markdown, con un JSON al lado con todas sus cifras.
+- **Registro completo:** las señales, las decisiones y las operaciones de cada ejecución quedan en el PC, junto al histórico (`C:\kbot_historico\informes\`), fuera de Git. Se pueden rehacer con los datos y la versión.
+- **Ejecución:** la familia corre **sola** (el modo por familia, §12.4.3), en cada instrumento del universo y en cada tramo.
+- **Primera línea:** «Este informe no es la validación de la estrategia (D16, F8): sirve para ver si la familia merece seguir.»
+- **Siempre lleva:**
+  - la familia, su versión (commit y hash) y su ficha;
+  - el periodo, las particiones consultadas y las decisiones tomadas con ellas;
+  - el universo (`docs/f3/universo_2026-11-18.json`) y su sesgo de supervivencia;
+  - la cobertura del histórico en el periodo, por instrumento (F3E5-05):
+    - la del contrato (§12.1, punto 2), con la presencia de cada minuto pedido y la evidencia de elegibilidad de F3-E1: «no aplicable» si no hay ningún minuto que no sea `no_elegible`;
+    - aparte, sus ausencias, lo no descargado, lo que nunca se pidió y las contradicciones;
+    - y, rotulada como otra medida, la de los minutos presentes sobre todo el calendario de las ventanas;
+  - los porcentajes solo REST de las decisiones y de los resultados, que en el histórico son del 100 %;
+  - el modelo de ejecución y los costes (§12.4.4 y §12.5.3), y que no hay funding.
+- **Cifras**, por instrumento, por tramo y en total:
+  - señales, por dirección; decisiones, ejecutadas, caducadas por motivo o no ejecutadas por motivo; y operaciones;
+  - **por régimen:** las operaciones y su R medio, según la dirección y la volatilidad de la vela de contexto y de la de señal (§12.3.2);
+  - **resultados en R**, brutos y netos: número de operaciones, aciertos (R neto > 0), R medio, mediana, suma, peor, mejor y caída máxima;
+  - **la caída máxima** (F3E5-02): la curva de R acumulado empieza en 0 y avanza por el minuto de salida (`exit_minute`). Las operaciones que salen en el mismo minuto, de uno o de varios instrumentos, se suman en un solo paso. La caída máxima es la mayor bajada desde un máximo anterior de la curva, el 0 inicial incluido. Así no depende del orden de las operaciones;
+  - los mismos resultados netos con los costes dobles;
+  - las salidas por motivo: stop, objetivo, invalidación, tiempo y liquidación.
+- **La referencia idealizada** (la apertura de $t+1$), si aparece, va en una tabla aparte, rotulada «idealizada», y no se usa para nada.
+- **Datos para D15:** los resultados por volatilidad servirán para proponer, si procede, el filtro de volatilidad extrema, que decide el propietario.
+
+#### 12.5.5 La herramienta
+
+`python -m kbot.backtest.explore`:
+- **Argumentos:** la familia (o las tres), la partición (`desarrollo` o `validacion`) y la carpeta del histórico.
+- **Versión:** comprueba la de cada familia (§12.3.3). Sin árbol limpio no hay informe.
+- **Datos:** lee los minutos de cada instrumento con F3-E1 (`kbot.history.store`): solo los de su ventana y su calentamiento, y **nunca uno de la prueba**.
+- **Memoria acotada:** corre el motor por instrumento y por tramo, con unos 140 días de minutos a la vez.
+- **Comisiones:** las lee de KuCoin una vez, dentro del presupuesto REST de la E1, y las guarda con el informe.
+- **Validación:** crea la reserva atómica antes de leer nada, y al terminar la marca `completada` o `fallida` y copia el resultado en `consultas_validacion.json` (§12.5.1; F3E5-01).
+- **Determinista:** los mismos datos, la misma versión y los mismos costes dan el mismo informe.
+- **Precisiones de la implementación** (`src/kbot/backtest/`):
+  - **Las comisiones se leen antes de la reserva**, con una petición `uta.v2.instrument` por instrumento. La reserva sigue siendo anterior al primer minuto leído, y un fallo de la red al leer las comisiones no consume la consulta de la validación.
+  - **La validación se consulta familia a familia**, una por ejecución: nunca se reserva una familia que no se vaya a leer.
+  - **El lector no abre ningún archivo de un día de la prueba.** Un día cuyos dos archivos no forman un par válido no da minutos, y la cobertura lo nombra.
+  - **Nombres:** el informe es `<familia>_<partición>_<7 cifras del commit>_<12 del hash>.md`, con su `.json`. El registro completo va en `C:\kbot_historico\informes\` con el mismo nombre, en `registro.jsonl` y `comisiones.json`.
+  - **La referencia idealizada no aparece en el informe:** queda solo en el registro completo (`ideal_open` de cada operación).
+  - **Las sumas se redondean exactamente** (`math.fsum`): ninguna cifra depende del orden de las operaciones.
+  - **La prueba de F3E5-03 usa la EMA(50) del código** sobre velas de un minuto: la cuenta no depende de la temporalidad.
+  - **La evidencia de elegibilidad de la cobertura** es la de F3-E1 (`kbot.history.universe.evidence`): la apertura de cada contrato de Futures (`contratos_futures.json` del histórico), lo que vio el grabador y los anuncios (F3E5-05).
+  - **Los decimales de los parámetros** van en el informe con el texto canónico del proyecto (§5.7), el mismo que usa su hash. Así `2` y `2,00` dan el mismo texto, y el hash se puede rehacer desde el informe (F3E5-07).
+
+#### 12.5.6 Pruebas (F3-A11)
+
+- **Con un histórico sintético pequeño** en una carpeta temporal, con dos instrumentos y unos días:
+  - el informe sale con todos sus apartados y con su primera línea;
+  - una ventana que toca la prueba se rechaza, y el lector nunca devuelve un minuto de la prueba;
+  - una segunda consulta de la validación con la misma familia y versión se rechaza; con una versión nueva, se admite;
+  - **F3E5-01:** un fallo provocado después de leer la validación deja la reserva `fallida` y no permite otra consulta; y de dos procesos que la piden a la vez, solo uno la consigue;
+  - **F3E5-02:** tras −1 R, dos operaciones de dos instrumentos salen en el mismo minuto con +2 R y −1 R. La caída máxima es 1 R en cualquier orden;
+  - **F3E5-03:** dos semillas de la EMA(50) separadas por una unidad, seguidas de 130 actualizaciones iguales, siguen separadas por unos 0,0055;
+  - **F3E5-04:** ninguna observación contada como muestra adicional comparte instrumento y minuto con las particiones;
+  - sin versión, con el árbol sucio, no hay informe;
+  - los costes se aplican como dice §12.5.3, y la variante doble los dobla;
+  - el calentamiento de 30 días y la liquidación al final de cada tramo;
+  - la misma entrada da el mismo informe;
+  - **F3E5-05:** un instrumento que abre después de la ventana tiene la cobertura «no aplicable»; con cuatro minutos elegibles presentes y uno no elegible, la cobertura es 4/4;
+  - **F3E5-06:** cuatro procesos de cuatro familias escriben a la vez 25 entradas cada uno en la misma copia, y quedan las 100 en un JSON válido;
+  - **F3E5-07:** con `2` y con `2,00`, el informe da los mismos parámetros, y desde ellos se rehace el hash aprobado.
+- **Las particiones y los tramos**, con sus fechas exactas.
+
+#### 12.5.7 Qué decide el propietario y qué sigue
+
+- **Tras los informes del desarrollo, el propietario decide qué familias siguen** y si cambia algún parámetro. Un cambio es una versión nueva, que vuelve a pasar por su ficha.
+- Con los datos de los informes se le podrá proponer D15 (filtros opcionales).
+- Esta sección no decide D12, D16, D22, D28 ni D30.
+- **Sigue en F3-E5b:** la migración `0004` y `svc-strategy` (F3-A10).
+
+#### 12.5.8 Lo que muestran los informes del desarrollo: Futures [23 nov 2026; la regla del contrato se mantiene; **pregunta abierta para el propietario**]
+
+Los informes del desarrollo están en `docs/informes/exploratorio/` (§18).
+
+- **Muchos contratos de Futures no dan ninguna señal:** 13 de los 20 en la tendencia, 11 en el breakout y 3 en la reversión a la media. En Spot solo callan EVAA-USDT y PIEVERSE-USDT, que no tienen minutos en el desarrollo.
+- **Tres reglas aprobadas actúan juntas:**
+  - en Futures, KuCoin no da vela de un intervalo sin operaciones (§3.2 [H]);
+  - el histórico deja ese minuto como `ausente`, nunca «sin operaciones» (§12.1);
+  - una vela incompleta no la usa ningún indicador, y un hueco reinicia los recursivos (CD-02 y CD-08).
+
+  Los huecos de Futures son sobre todo de un minuto suelto, y con uno basta para que una vela de 4 h no sea utilizable. **Una ausencia no demuestra por sí sola que no hubiera operaciones:** KuCoin también avisa de que sus velas pueden estar incompletas (revisor, 23 nov 2026).
+- **Medido en el tramo 3** [27 jun 2025, 14 oct 2025):
+
+| Instrumento | Minutos presentes | Huecos (de un minuto) | Velas de 4 h completas |
+|---|---|---|---|
+| FUTURES XBTUSDTM | 99,13 % | 1.234 (1.122) | 60,1 % |
+| FUTURES SOLUSDTM | 99,96 % | 64 (62) | 95,1 % |
+| FUTURES AVAXUSDTM | 87,62 % | 12.678 (8.828) | 6,3 % |
+| SPOT BTC-USDT | 100 % | 0 | 100 % |
+
+  En Spot, KuCoin publica una vela de volumen 0 cuando no hay operaciones: BTC-USDT tiene 7 en ese tramo.
+- **Por qué calla cada contrato,** separado como pidió el revisor. Se cuentan, en las ventanas de los cuatro tramos, las velas de cada temporalidad de la ficha con todos sus indicadores calculados:
+  - **sin periodo elegible:** el contrato abrió después del desarrollo;
+  - **el contexto nunca se calienta:** ninguna vela de la temporalidad de contexto (4 h, o 1 h en la reversión) tiene todos sus valores;
+  - **valores a ratos, sin señal:** algunas velas los tienen, pero pocas, y la ficha nunca cumple sus condiciones a la vez.
+
+| Familia | Sin periodo elegible | El contexto nunca se calienta | Valores a ratos, sin señal |
+|---|---|---|---|
+| tendencia (13) | SOXL | AVAX, BCH, FHE, INJ, LINK, NIGHT, PIEVERSE, UNI | ASTER, ENA, ICP, XBT |
+| breakout (11) | SOXL | AVAX, BCH, FHE, INJ, LINK, NIGHT, PIEVERSE, UNI | HYPE, XBT |
+| reversion_media (3) | SOXL | AVAX | INJ |
+
+  - SOXLUSDTM abrió el 15 may 2026, y su cobertura es «no aplicable» (F3E5-05).
+  - FHE, NIGHT y PIEVERSE abrieron entre el 14 nov y el 9 dic 2025: solo tienen unos dos meses del desarrollo.
+  - Con valores a ratos, son pocos. XBTUSDTM tiene completas 1.676 de sus 2.376 velas de 4 h, pero solo 51 con la EMA(50) calculada: necesita 50 completas seguidas.
+  - Todas las señales de Futures tuvieron completas sus velas de disparo, porque solo aparecen en tramos de datos continuos.
+- **Opinión técnica del revisor** (23 nov 2026): mantener el contrato actual como referencia.
+  - Rellenar con velas planas introduce datos imputados.
+  - Tolerar minutos ausentes deja desconocidos los máximos, los mínimos y los volúmenes.
+  - Las dos opciones requerirían una enmienda versionada, comparada solo en el desarrollo y con reglas explícitas de calidad y procedencia.
+  - Una vela sintética nunca debe convertirse en un precio observado para ejecutar.
+  - Su dictamen no aprueba ninguna modificación del contrato.
+- **Estado:** la regla se mantiene. Los informes son correctos con ella, pero sus conclusiones de Futures descansan en pocos contratos. Estudiar una enmienda es decisión del propietario; si la pide, se diseña con esas condiciones y con su propia revisión.
+
 ## 13. Infraestructura, monitorización y alertas
 
 | Componente | RAM | Prioridad |
@@ -2724,3 +2893,16 @@ $$\Delta Cap=\underbrace{8}_{\text{distancia mark-stop de lo cerrado}}+\underbra
 | 20 nov 2026 | **Revisión del código de F3-E4 (commit `535652a`): APROBABLE CON CORRECCIONES.** Pasan las 110 pruebas locales de backtest y de estrategias. El combinador, las reglas de ejecución y la interfaz de salidas coinciden con el diseño, y las dos precisiones sobre el conocimiento retrasado son coherentes. Dos hallazgos MEDIOS en el registro. **F3E4-04:** se perdía el instante de conocimiento de una entrada fallida. La misma decisión y el mismo `no_entra`, con el minuto de entrada disponible a las 10:22:15 o a las 12:00, daban un `Run` idéntico, aunque a las 11:00 el rechazo solo se conoce en el primero. **F3E4-05:** el registro no conservaba los dos porcentajes solo REST. La misma serie, con todos sus minutos solo REST o todos contrastados, daba `Run` idénticos: se guardaban los intervalos, pero no los recuentos | Revisor |
 | 20 nov 2026 | **F3E4-04 y F3E4-05, corregidos.** (1) `DecisionRecord` separa lo que se sabe en $D$ (la caducidad, el rechazo o «elegida») del resultado de la entrada de una elegida (`ejecutada`, `caduca_sin_minuto` o `no_entra`), con su instante de conocimiento. Los dos casos del revisor dan registros distintos, y a las 11:00 solo el primero conoce el rechazo. (2) Cada operación guarda los recuentos, total y solo REST, de la procedencia de la decisión y de la del resultado. Desde el `Run` se leen el 100 %, el 0 % y el caso mixto, (15, 0) y (41, 20). Dos pruebas nuevas, 38 en `tests/unit/backtest/` | Claude |
 | 21 nov 2026 | **Segunda revisión del código de F3-E4 (commit `676711b`): APROBADO.** F3E4-04, RESUELTO: `DecisionRecord` separa la elección en $D$ del resultado de la entrada y su conocimiento; los casos de las 10:22:15 y de las 12:00 dan registros distintos, y a las 11:00 solo el primero conoce el rechazo. F3E4-05, RESUELTO: cada operación conserva los dos recuentos solo REST; el revisor confirmó desde `Run` el 100 %, el 0 % y el caso mixto (15, 0) y (41, 20). Pasan las 112 pruebas locales de backtest y de estrategias. El diff y el ZIP coinciden. Sin residuales ni hallazgos nuevos. Queda aprobada la implementación del combinador, el modelo de ejecución, las posiciones y el motor de backtest en el alcance de F3-E4 | Revisor |
+| 21 nov 2026 | **F3-E4 integrada en `main`** (`350f8e0`) por decisión del propietario («integra»), con F3-A8, F3-A9 y F3-A4 del motor entero | Claude |
+| 21 nov 2026 | **Diseño de F3-E5a: la evaluación exploratoria** (§12.5, rama `fase-3-e5`, **pendiente de revisión**, antes del código). **Particiones** de calendario UTC, iguales para todos los instrumentos, en la medianoche más cercana al 60 % y al 80 % del histórico: desarrollo [19 nov 2024, 1 feb 2026), validación [1 feb 2026, 27 jun 2026) y prueba [27 jun 2026, 19 nov 2026 22:10). La validación, una vez por familia y versión, anotada; la prueba, sellada en el código. ***Walk-forward*** en cuatro tramos de unos 110 días del desarrollo, con 30 días de calentamiento, que mide la estabilidad porque la F3 no ajusta parámetros. **Costes:** la comisión de tomador de cada instrumento leída de KuCoin, 0,05 % de deslizamiento por ejecución y una prueba con costes dobles; sin funding. **Informe** por familia y versión, con todo lo que exige `08` §3 y sus cifras por instrumento, tramo y régimen. **Herramienta** `kbot.backtest.explore`. La migración `0004` y `svc-strategy` quedan para F3-E5b. No decide D12, D15, D16, D22, D28 ni D30 | Claude |
+| 21 nov 2026 | **Revisión del diseño de F3-E5a (commit `00390b7`): APROBABLE CON CORRECCIONES.** Los cortes de las particiones y los cuatro tramos son correctos, la separación entre E5a y E5b es coherente, y el modelo de Spot por clase y coeficiente tiene respaldo en la página de tarifas de KuCoin y en su SDK oficial. Dos hallazgos MEDIOS y dos BAJOS. **F3E5-01:** anotar la validación al terminar permitía repetirla tras un fallo, o a dos procesos a la vez. **F3E5-02:** la caída máxima total dependía del orden de las salidas simultáneas: tras −1 R, salir con +2 R y −1 R a la vez daba 1 R o 2 R según el orden. **F3E5-03:** el ejemplo del calentamiento contaba las 50 velas de la semilla como actualizaciones; son 130, y la influencia es de un 0,55 %. **F3E5-04:** lo grabado desde el 17 nov se solapa con la prueba, que acaba el 19 nov a las 22:10 UTC. La revisión es documental y matemática | Revisor |
+| 21 nov 2026 | **F3E5-01 a F3E5-04, corregidos en §12.5.** (1) La consulta de la validación se reserva antes de leerla, de forma atómica y persistente: un archivo por familia y versión creado solo si no existe, con los estados `iniciada`, `completada` y `fallida`; un fallo no la borra y cualquier reserva impide otra. (2) La curva de R acumulado empieza en 0 y avanza por el minuto de salida, con las salidas de un mismo minuto sumadas en un paso: la caída máxima no depende del orden. (3) $(49/51)^{130} \approx 0{,}0055$. (4) La muestra temporal adicional empieza el 19 nov 2026 a las 22:10 UTC; lo grabado antes queda sellado con la prueba. Sus pruebas, en §12.5.6 | Claude |
+| 21 nov 2026 | **El 17 nov, el primer día con datos reales, archivado en el servidor en el formato 2.** El temporizador diario corrió a las 00:23 UTC: selló el 17 nov a las 00:23:01 y lo archivó a las 00:24:36 (generación `83b9274d-ce92-43a0-bed4-3b109165c45a`, esquema `0003`, formato 2). La comprobación de las 00:25:19 dio «archived days checked: all match». El día tiene 62.496 velas, 23.562 velas del WebSocket, 206.730 métricas de profundidad y 35.010 instantáneas del libro: unos 40 MB en total. El servicio terminó bien, con un pico de 495 MB de memoria y 2 min 15 s de CPU, y el grabador siguió sin reinicios. El 18 nov no se selló, porque aún no habían pasado 72 h desde su final | Claude |
+| 23 nov 2026 | **Segunda revisión del diseño de F3-E5a (commit `7eab2b4`): APROBADO.** F3E5-01, RESUELTO: la reserva es atómica, persistente y anterior a la lectura; cualquier estado impide repetir la consulta, y hay pruebas de fallo y de concurrencia. F3E5-02, RESUELTO: la curva parte de cero y agrupa las salidas por minuto, y el ejemplo da 1 R de caída máxima en cualquier orden. F3E5-03, RESUELTO: las 130 actualizaciones y $(49/51)^{130} \approx 0{,}00551274$ son correctas. F3E5-04, RESUELTO: la muestra adicional empieza el 19 nov 2026 a las 22:10 UTC y excluye el solapamiento con las particiones. El diff, el ZIP y el paquete coinciden. Sin residuales ni hallazgos nuevos. La aprobación es del diseño: las pruebas de F3-A11 se acreditarán con la implementación, y F3-E5b tiene su propia revisión | Revisor |
+| 23 nov 2026 | **F3-E5a programada** (rama `fase-3-e5`, **pendiente de la revisión del código**). Los módulos están en `src/kbot/backtest/`: `partitions` (las particiones, los cuatro tramos con su calentamiento y la muestra adicional); `reader` (los minutos del histórico, sin abrir nunca un día de la prueba); `reservation` (la reserva atómica de la validación, con sus tres estados y su copia); `fees` (la comisión de cada instrumento leída de KuCoin, el deslizamiento y la prueba de esfuerzo); `report` (las cifras, la caída máxima por minuto de salida y el informe en Markdown y JSON); y `explore`, la herramienta. Hay 37 pruebas nuevas en `tests/unit/backtest/` para §12.5.6, entre ellas cuatro procesos que piden la misma reserva a la vez, el fallo provocado tras leer la validación, la caída máxima en cualquier orden y la EMA(50) tras 130 actualizaciones. En local pasan 1.306. La tarifa de Spot de cada clase se leyó de la tabla VIP de KuCoin y ya es [H] (§12.5.3), y §12.5.5 anota siete precisiones de la implementación. Medido con un instrumento y un tramo reales del desarrollo: unos 80 s con las tres familias, y menos de 0,1 MB de registro por ejecución | Claude |
+| 23 nov 2026 | **El 18 y el 19 nov, archivados en el servidor en el formato 2:** el 22 nov a las 00:26 UTC (generación `25ec0499-17fd-4bd6-8212-497b39c0ce9b`) y el 23 nov a las 00:23 UTC (`bf66eb50-3de0-42f3-a261-c0cc168fa009`). Las dos comprobaciones dieron «archived days checked: all match». Son los primeros días grabados enteros: unos 94 MB cada uno, con unas 115.000 velas y 505.000 métricas de profundidad. El grabador sigue sin reinicios desde el 20 nov, y la copia de las 10:45 UTC terminó bien. Ese día el acceso SSH desde el PC falló por dos motivos del PC, que el propietario resolvió: su IP de casa había cambiado (la regla de la lista de seguridad de Oracle) y el servicio `ssh-agent` de Windows estaba parado | Claude |
+| 23 nov 2026 | **Primeros informes del desarrollo** (§12.5.8), hechos con `python -m kbot.backtest.explore --familia todas --particion desarrollo` sobre el árbol limpio de `6f08bb8`. Tardó 1 h 14 min con los 40 instrumentos, los cuatro tramos y las tres familias. Las comisiones leídas de KuCoin son: en Futures, 0,06 % todas; en Spot, la clase A con coeficiente 1,00 (0,1 %), salvo EVAA-USDT (clase C, 0,3 %) y PIEVERSE-USDT (clase B, 0,2 %). Los hashes coinciden con los aprobados. Resultados, en R por operación: **tendencia**, 318 operaciones, bruto −0,084 y neto −0,215, sin ningún tramo con R neto positivo; **breakout**, 259 operaciones, bruto +0,075 y neto −0,079, y solo gana en el tramo 4; **reversión a la media**, 832 operaciones, bruto +0,057 y neto −0,240, sin ningún tramo positivo. **Observación:** muchos contratos de Futures no dan ninguna señal, por la regla de las velas completas con los minutos sin operaciones que KuCoin no publica. Queda como pregunta abierta en §12.5.8, sin decidir. No se ha consultado la validación | Claude |
+| 23 nov 2026 | **Revisión del código de F3-E5a (commit `a6c64c0`): APROBABLE CON CORRECCIONES.** Pasan las 75 pruebas locales de backtest. La recomposición de los 480 registros guardados del desarrollo confirma las cifras de los tres informes: operaciones, R bruto y neto, costes dobles, regímenes y caída máxima. El revisor no volvió a ejecutar las estrategias sobre el histórico ni consultó velas de la validación o de la prueba. Un hallazgo MEDIO y dos BAJOS. **F3E5-05** (MEDIO): la cobertura ignoraba la elegibilidad. SOXLUSDTM salía con 0 de 632.160 minutos, un 0 %, pero abrió el 15 may 2026, después del desarrollo: su cobertura del contrato es «no aplicable». **F3E5-06** (BAJO): la copia de auditoría perdía consultas concurrentes. Con dos familias a la vez, las dos reservas quedaban `completada`, pero la copia guardaba una sola entrada. **F3E5-07** (BAJO): los parámetros del informe podían perder su texto canónico. `Decimal("2.00")` da el hash aprobado, pero el informe guardaba `"2.00"`, y el hash rehecho desde él era otro; los tres informes actuales no lo tienen. **Sobre Futures,** el revisor mantendría el contrato como referencia. KuCoin documenta que no publica los intervalos sin operaciones, pero también avisa de que las velas pueden estar incompletas: una ausencia no demuestra por sí sola que no hubiera operaciones. Antes de atribuir el silencio a los huecos, separaría tres causas: contratos sin periodo elegible, contexto sin calentamiento suficiente y condiciones de la estrategia no cumplidas. Rellenar con velas planas introduce datos imputados, y tolerar minutos ausentes deja desconocidos los máximos, los mínimos y los volúmenes. Las dos opciones requieren una enmienda versionada, una comparación solo en el desarrollo y reglas explícitas de calidad y procedencia, y una vela sintética nunca debe convertirse en un precio observado para ejecutar. El dictamen no aprueba ninguna modificación del contrato | Revisor |
+| 23 nov 2026 | **F3E5-05 a F3E5-07, corregidos** (§12.5.1, §12.5.4 a §12.5.6). (5) El lector da también la presencia de F3-E1 de cada minuto pedido, sacada de `solicitado.json` y de las peticiones de cada día. Con ella y con la evidencia de elegibilidad de F3-E1, el informe calcula la cobertura del contrato y da aparte E, los presentes en E, los ausentes, lo no descargado, lo que está en conflicto, las contradicciones, los no elegibles y lo que nunca se pidió. La de los presentes sobre el calendario queda rotulada como otra medida. (6) La copia se lee, se mezcla y se publica bajo un cierre exclusivo del sistema operativo (`copia.lock`, en la carpeta de las reservas, fuera del repositorio), y se reemplaza con un archivo temporal. (7) Los decimales de los parámetros van en el informe con `to_canonical`. Hay cuatro pruebas nuevas, las de aceptación del revisor, y en local pasan 1.310 | Claude |
+| 23 nov 2026 | **Informes del desarrollo rehechos con `3490a1c` (en `5829cf1`), y §12.5.8 ampliado.** El primer intento, con `2fd382e`, se detuvo en el primer día de Futures anterior a lo solicitado (antes del 1 ene 2025). El lector construía una ventana invertida para un día que no toca ninguna ventana pedida. `3490a1c` lo salta, con dos pruebas que fallaban con el lector anterior; su CI, en verde, pasa 1.619 pruebas y 223 en aarch64. La nueva ejecución tardó 1 h 08 min. **Todas las cifras coinciden con las de `6f08bb8`:** solo cambian la cobertura, el commit y la hora de lectura de las comisiones, que son las mismas. La cobertura del contrato da «no aplicable» a SOXLUSDTM y 99,37 % a XBTUSDTM, y deja aparte los 61.920 minutos de Futures anteriores al 1 ene 2025, que nunca se pidieron. EVAA-USDT y PIEVERSE-USDT de Spot dan 0 %: no hay evidencia de cuándo empezaron a cotizar, así que sus minutos son de elegibilidad desconocida y cuentan en E, como en el informe de cobertura de F3-E1. Los informes de `6f08bb8` se retiran del repositorio, y siguen en su historia. §12.5.8 añade la opinión del revisor y por qué calla cada contrato: sin periodo elegible (SOXL), el contexto nunca se calienta (8 contratos en la tendencia y en el breakout, 1 en la reversión) o valores a ratos sin señal | Claude |
+| 23 nov 2026 | **Segunda revisión del código de F3-E5a (commit `2ba8e2f`): APROBADO**, con el código y los tres informes del desarrollo. **F3E5-05, RESUELTO:** la cobertura usa la presencia y la elegibilidad de F3-E1 y deja lo no solicitado fuera del denominador. SOXLUSDTM figura como «no aplicable» y XBTUSDTM con 566.630 de 570.240, un 99,37 %, y la ventana invertida de los días anteriores a lo solicitado queda corregida. **F3E5-06, RESUELTO:** el cierre del sistema operativo protege a la vez la lectura, la mezcla y la publicación, y la prueba concurrente conserva las 100 anotaciones, con reemplazo atómico. **F3E5-07, RESUELTO:** los parámetros usan el texto canónico; `2` y `2.00` dan el mismo contenido y permiten rehacer el hash aprobado. **Verificación del revisor:** pasan las 80 pruebas de backtest, las cifras de operaciones y resultados de los 480 registros del desarrollo coinciden exactamente con las anteriores, y los informes en Markdown concuerdan con sus JSON. La separación de causas de Futures es coherente con mantener el contrato vigente; los recuentos de calentamiento son mediciones aportadas, que no recalculó. Sin hallazgos nuevos. El revisor no repitió la ejecución completa sobre el histórico ni consultó datos de la validación o de la prueba. La aprobación es la de la evaluación exploratoria: siguen pendientes F3-E5b y la validación definitiva | Revisor |

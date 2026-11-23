@@ -10,4 +10,17 @@
 
 The fichas, the combiner and the rules of a position are those of ``kbot.strategies``: the
 paper trading will use the same ones, with another clock and another data layer.
+
+The exploratory evaluation of F3-E5a (§12.5, design approved on 23 November 2026):
+
+* ``partitions``: the partitions of the history, the folds of the development and the
+  additional sample; the test is sealed.
+* ``reader``: the minutes of the history on the PC and their presence, never one of the
+  test.
+* ``reservation``: the atomic reservation of a query of the validation and its copy
+  (F3E5-01 and F3E5-06).
+* ``fees``: the costs of the reports, with the fee of each instrument read from KuCoin.
+* ``report``: the figures, the coverage of the contract and the report of a family
+  (F3E5-02 and F3E5-05).
+* ``explore``: the tool, ``python -m kbot.backtest.explore``.
 """

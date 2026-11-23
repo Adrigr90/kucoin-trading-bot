@@ -5,8 +5,8 @@ Este informe no es la validación de la estrategia (D16, F8): sirve para ver si 
 ## Familia, versión y ficha
 
 - **Familia:** tendencia, con la ficha de `02` §12.3.4, aprobada.
-- **Versión:** `6f08bb8669babfdcf629a6e1f0d2e0ba62a64a72+8866b51449f119568d5012acb47487d37d411b66fda8d615661564b144fa36d3`.
-  - commit `6f08bb8669babfdcf629a6e1f0d2e0ba62a64a72`;
+- **Versión:** `3490a1cd7318290cbc1978f26fae7988c3ab0c1b+8866b51449f119568d5012acb47487d37d411b66fda8d615661564b144fa36d3`.
+  - commit `3490a1cd7318290cbc1978f26fae7988c3ab0c1b`;
   - hash de los parámetros `8866b51449f119568d5012acb47487d37d411b66fda8d615661564b144fa36d3`.
 - **Parámetros** (§12.3.3):
 
@@ -76,50 +76,50 @@ Este informe no es la validación de la estrategia (D16, F8): sirve para ver si 
 
 ## Cobertura del histórico
 
-Minutos presentes en las ventanas, sin el calentamiento. En Futures no hay velas de un minuto antes del 1 ene 2025.
+En las ventanas, sin el calentamiento. **Cobertura** es la del contrato (§12.1, punto 2): los minutos presentes de E entre los de E. E son los minutos pedidos a KuCoin cuya elegibilidad no es `no_elegible`; los de elegibilidad desconocida cuentan. Si E está vacío, es «no aplicable». **Fuera de lo solicitado** son minutos que nunca se pidieron, como los de Futures antes del 1 ene 2025, que no tienen velas de un minuto: no cuentan en E. **Presentes sobre el calendario** es otra medida: los presentes entre todos los minutos de las ventanas.
 
-| Instrumento | Presentes | Minutos | Cobertura | Días no válidos |
-|---|---|---|---|---|
-| FUTURES ASTERUSDTM | 182680 | 632160 | 28,90 % | — |
-| FUTURES AVAXUSDTM | 489033 | 632160 | 77,36 % | — |
-| FUTURES BCHUSDTM | 465180 | 632160 | 73,59 % | — |
-| FUTURES ENAUSDTM | 531239 | 632160 | 84,04 % | — |
-| FUTURES ETHUSDTM | 569038 | 632160 | 90,01 % | — |
-| FUTURES EVAAUSDTM | 173150 | 632160 | 27,39 % | — |
-| FUTURES FHEUSDTM | 75477 | 632160 | 11,94 % | — |
-| FUTURES HYPEUSDTM | 539115 | 632160 | 85,28 % | — |
-| FUTURES ICPUSDTM | 453547 | 632160 | 71,75 % | — |
-| FUTURES INJUSDTM | 509944 | 632160 | 80,67 % | — |
-| FUTURES LINKUSDTM | 559145 | 632160 | 88,45 % | — |
-| FUTURES NIGHTUSDTM | 73280 | 632160 | 11,59 % | — |
-| FUTURES PEPEUSDTM | 568306 | 632160 | 89,90 % | — |
-| FUTURES PIEVERSEUSDTM | 74445 | 632160 | 11,78 % | — |
-| FUTURES SOLUSDTM | 569832 | 632160 | 90,14 % | — |
-| FUTURES SOXLUSDTM | 0 | 632160 | 0,00 % | — |
-| FUTURES UNIUSDTM | 462679 | 632160 | 73,19 % | — |
-| FUTURES XBTUSDTM | 566630 | 632160 | 89,63 % | — |
-| FUTURES XRPUSDTM | 568307 | 632160 | 89,90 % | — |
-| FUTURES ZECUSDTM | 408316 | 632160 | 64,59 % | — |
-| SPOT ASTER-USDT | 186660 | 632160 | 29,53 % | — |
-| SPOT AVAX-USDT | 632160 | 632160 | 100,00 % | — |
-| SPOT BNB-USDT | 632160 | 632160 | 100,00 % | — |
-| SPOT BTC-USDT | 632160 | 632160 | 100,00 % | — |
-| SPOT DOGE-USDT | 632160 | 632160 | 100,00 % | — |
-| SPOT DOT-USDT | 632160 | 632160 | 100,00 % | — |
-| SPOT ETH-USDT | 632160 | 632160 | 100,00 % | — |
-| SPOT EVAA-USDT | 0 | 632160 | 0,00 % | — |
-| SPOT LTC-USDT | 632160 | 632160 | 100,00 % | — |
-| SPOT NEAR-USDT | 632160 | 632160 | 100,00 % | — |
-| SPOT PEPE-USDT | 632160 | 632160 | 100,00 % | — |
-| SPOT PIEVERSE-USDT | 0 | 632160 | 0,00 % | — |
-| SPOT SOL-USDT | 632160 | 632160 | 100,00 % | — |
-| SPOT SUI-USDT | 632160 | 632160 | 100,00 % | — |
-| SPOT TAO-USDT | 632160 | 632160 | 100,00 % | — |
-| SPOT UNI-USDT | 632160 | 632160 | 100,00 % | — |
-| SPOT XLM-USDT | 632160 | 632160 | 100,00 % | — |
-| SPOT XMR-USDT | 632160 | 632160 | 100,00 % | — |
-| SPOT XRP-USDT | 632160 | 632160 | 100,00 % | — |
-| SPOT ZEC-USDT | 632160 | 632160 | 100,00 % | — |
+| Instrumento | Minutos | Fuera de lo solicitado | No elegibles | E | Presentes en E | Ausentes | En conflicto | No descargados | Contradicciones | Cobertura | Presentes sobre el calendario | Días no válidos |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| FUTURES ASTERUSDTM | 632160 | 61920 | 376579 | 193661 | 182680 | 10981 | 0 | 0 | 0 | 94,33 % | 28,90 % | — |
+| FUTURES AVAXUSDTM | 632160 | 61920 | 0 | 570240 | 489033 | 81207 | 0 | 0 | 0 | 85,76 % | 77,36 % | — |
+| FUTURES BCHUSDTM | 632160 | 61920 | 0 | 570240 | 465180 | 105060 | 0 | 0 | 0 | 81,58 % | 73,59 % | — |
+| FUTURES ENAUSDTM | 632160 | 61920 | 0 | 570240 | 531239 | 39001 | 0 | 0 | 0 | 93,16 % | 84,04 % | — |
+| FUTURES ETHUSDTM | 632160 | 61920 | 0 | 570240 | 569038 | 1202 | 0 | 0 | 0 | 99,79 % | 90,01 % | — |
+| FUTURES EVAAUSDTM | 632160 | 61920 | 396635 | 173605 | 173150 | 455 | 0 | 0 | 0 | 99,74 % | 27,39 % | — |
+| FUTURES FHEUSDTM | 632160 | 61920 | 491520 | 78720 | 75477 | 3243 | 0 | 0 | 0 | 95,88 % | 11,94 % | — |
+| FUTURES HYPEUSDTM | 632160 | 61920 | 0 | 570240 | 539115 | 31125 | 0 | 0 | 0 | 94,54 % | 85,28 % | — |
+| FUTURES ICPUSDTM | 632160 | 61920 | 0 | 570240 | 453547 | 116693 | 0 | 0 | 0 | 79,54 % | 71,75 % | — |
+| FUTURES INJUSDTM | 632160 | 61920 | 0 | 570240 | 509944 | 60296 | 0 | 0 | 0 | 89,43 % | 80,67 % | — |
+| FUTURES LINKUSDTM | 632160 | 61920 | 0 | 570240 | 559145 | 11095 | 0 | 0 | 0 | 98,05 % | 88,45 % | — |
+| FUTURES NIGHTUSDTM | 632160 | 61920 | 493090 | 77150 | 73280 | 3870 | 0 | 0 | 0 | 94,98 % | 11,59 % | — |
+| FUTURES PEPEUSDTM | 632160 | 61920 | 0 | 570240 | 568306 | 1934 | 0 | 0 | 0 | 99,66 % | 89,90 % | — |
+| FUTURES PIEVERSEUSDTM | 632160 | 61920 | 457175 | 113065 | 74445 | 38620 | 0 | 0 | 0 | 65,84 % | 11,78 % | — |
+| FUTURES SOLUSDTM | 632160 | 61920 | 0 | 570240 | 569832 | 408 | 0 | 0 | 0 | 99,93 % | 90,14 % | — |
+| FUTURES SOXLUSDTM | 632160 | 61920 | 570240 | 0 | 0 | 0 | 0 | 0 | 0 | no aplicable | 0,00 % | — |
+| FUTURES UNIUSDTM | 632160 | 61920 | 0 | 570240 | 462679 | 107561 | 0 | 0 | 0 | 81,14 % | 73,19 % | — |
+| FUTURES XBTUSDTM | 632160 | 61920 | 0 | 570240 | 566630 | 3610 | 0 | 0 | 0 | 99,37 % | 89,63 % | — |
+| FUTURES XRPUSDTM | 632160 | 61920 | 0 | 570240 | 568307 | 1933 | 0 | 0 | 0 | 99,66 % | 89,90 % | — |
+| FUTURES ZECUSDTM | 632160 | 61920 | 0 | 570240 | 408316 | 161924 | 0 | 0 | 0 | 71,60 % | 64,59 % | — |
+| SPOT ASTER-USDT | 632160 | 0 | 0 | 632160 | 186660 | 445500 | 0 | 0 | 0 | 29,53 % | 29,53 % | — |
+| SPOT AVAX-USDT | 632160 | 0 | 0 | 632160 | 632160 | 0 | 0 | 0 | 0 | 100,00 % | 100,00 % | — |
+| SPOT BNB-USDT | 632160 | 0 | 0 | 632160 | 632160 | 0 | 0 | 0 | 0 | 100,00 % | 100,00 % | — |
+| SPOT BTC-USDT | 632160 | 0 | 0 | 632160 | 632160 | 0 | 0 | 0 | 0 | 100,00 % | 100,00 % | — |
+| SPOT DOGE-USDT | 632160 | 0 | 0 | 632160 | 632160 | 0 | 0 | 0 | 0 | 100,00 % | 100,00 % | — |
+| SPOT DOT-USDT | 632160 | 0 | 0 | 632160 | 632160 | 0 | 0 | 0 | 0 | 100,00 % | 100,00 % | — |
+| SPOT ETH-USDT | 632160 | 0 | 0 | 632160 | 632160 | 0 | 0 | 0 | 0 | 100,00 % | 100,00 % | — |
+| SPOT EVAA-USDT | 632160 | 0 | 0 | 632160 | 0 | 632160 | 0 | 0 | 0 | 0,00 % | 0,00 % | — |
+| SPOT LTC-USDT | 632160 | 0 | 0 | 632160 | 632160 | 0 | 0 | 0 | 0 | 100,00 % | 100,00 % | — |
+| SPOT NEAR-USDT | 632160 | 0 | 0 | 632160 | 632160 | 0 | 0 | 0 | 0 | 100,00 % | 100,00 % | — |
+| SPOT PEPE-USDT | 632160 | 0 | 0 | 632160 | 632160 | 0 | 0 | 0 | 0 | 100,00 % | 100,00 % | — |
+| SPOT PIEVERSE-USDT | 632160 | 0 | 0 | 632160 | 0 | 632160 | 0 | 0 | 0 | 0,00 % | 0,00 % | — |
+| SPOT SOL-USDT | 632160 | 0 | 0 | 632160 | 632160 | 0 | 0 | 0 | 0 | 100,00 % | 100,00 % | — |
+| SPOT SUI-USDT | 632160 | 0 | 0 | 632160 | 632160 | 0 | 0 | 0 | 0 | 100,00 % | 100,00 % | — |
+| SPOT TAO-USDT | 632160 | 0 | 0 | 632160 | 632160 | 0 | 0 | 0 | 0 | 100,00 % | 100,00 % | — |
+| SPOT UNI-USDT | 632160 | 0 | 0 | 632160 | 632160 | 0 | 0 | 0 | 0 | 100,00 % | 100,00 % | — |
+| SPOT XLM-USDT | 632160 | 0 | 0 | 632160 | 632160 | 0 | 0 | 0 | 0 | 100,00 % | 100,00 % | — |
+| SPOT XMR-USDT | 632160 | 0 | 0 | 632160 | 632160 | 0 | 0 | 0 | 0 | 100,00 % | 100,00 % | — |
+| SPOT XRP-USDT | 632160 | 0 | 0 | 632160 | 632160 | 0 | 0 | 0 | 0 | 100,00 % | 100,00 % | — |
+| SPOT ZEC-USDT | 632160 | 0 | 0 | 632160 | 632160 | 0 | 0 | 0 | 0 | 100,00 % | 100,00 % | — |
 
 ## Porcentaje solo REST
 
@@ -140,46 +140,46 @@ Minutos originales de las operaciones, cada uno una vez por operación. En el hi
 
 | Instrumento | Comisión de tomador | Origen | Leída |
 |---|---|---|---|
-| FUTURES ASTERUSDTM | 0,06 % | takerFeeRate 0.00060 | 2026-11-23T10:47:49.993144+00:00 |
-| FUTURES AVAXUSDTM | 0,06 % | takerFeeRate 0.00060 | 2026-11-23T10:47:52.390817+00:00 |
-| FUTURES BCHUSDTM | 0,06 % | takerFeeRate 0.00060 | 2026-11-23T10:47:50.538092+00:00 |
-| FUTURES ENAUSDTM | 0,06 % | takerFeeRate 0.00060 | 2026-11-23T10:47:52.918736+00:00 |
-| FUTURES ETHUSDTM | 0,06 % | takerFeeRate 0.00060 | 2026-11-23T10:47:47.650812+00:00 |
-| FUTURES EVAAUSDTM | 0,06 % | takerFeeRate 0.00060 | 2026-11-23T10:47:48.244242+00:00 |
-| FUTURES FHEUSDTM | 0,06 % | takerFeeRate 0.00060 | 2026-11-23T10:47:52.656275+00:00 |
-| FUTURES HYPEUSDTM | 0,06 % | takerFeeRate 0.00060 | 2026-11-23T10:47:49.406709+00:00 |
-| FUTURES ICPUSDTM | 0,06 % | takerFeeRate 0.00060 | 2026-11-23T10:47:50.799260+00:00 |
-| FUTURES INJUSDTM | 0,06 % | takerFeeRate 0.00060 | 2026-11-23T10:47:51.606367+00:00 |
-| FUTURES LINKUSDTM | 0,06 % | takerFeeRate 0.00060 | 2026-11-23T10:47:52.127280+00:00 |
-| FUTURES NIGHTUSDTM | 0,06 % | takerFeeRate 0.00060 | 2026-11-23T10:47:51.339370+00:00 |
-| FUTURES PEPEUSDTM | 0,06 % | takerFeeRate 0.00060 | 2026-11-23T10:47:50.255279+00:00 |
-| FUTURES PIEVERSEUSDTM | 0,06 % | takerFeeRate 0.00060 | 2026-11-23T10:47:49.715416+00:00 |
-| FUTURES SOLUSDTM | 0,06 % | takerFeeRate 0.00060 | 2026-11-23T10:47:48.542950+00:00 |
-| FUTURES SOXLUSDTM | 0,06 % | takerFeeRate 0.00060 | 2026-11-23T10:47:51.069556+00:00 |
-| FUTURES UNIUSDTM | 0,06 % | takerFeeRate 0.00060 | 2026-11-23T10:47:51.866588+00:00 |
-| FUTURES XBTUSDTM | 0,06 % | takerFeeRate 0.00060 | 2026-11-23T10:47:47.915220+00:00 |
-| FUTURES XRPUSDTM | 0,06 % | takerFeeRate 0.00060 | 2026-11-23T10:47:49.140016+00:00 |
-| FUTURES ZECUSDTM | 0,06 % | takerFeeRate 0.00060 | 2026-11-23T10:47:48.842746+00:00 |
-| SPOT ASTER-USDT | 0,1 % | classA 0.001 x takerFeeCoefficient 1.00 | 2026-11-23T10:47:43.790609+00:00 |
-| SPOT AVAX-USDT | 0,1 % | classA 0.001 x takerFeeCoefficient 1.00 | 2026-11-23T10:47:47.112595+00:00 |
-| SPOT BNB-USDT | 0,1 % | classA 0.001 x takerFeeCoefficient 1.00 | 2026-11-23T10:47:45.748811+00:00 |
-| SPOT BTC-USDT | 0,1 % | classA 0.001 x takerFeeCoefficient 1.00 | 2026-11-23T10:47:41.457480+00:00 |
-| SPOT DOGE-USDT | 0,1 % | classA 0.001 x takerFeeCoefficient 1.00 | 2026-11-23T10:47:46.022685+00:00 |
-| SPOT DOT-USDT | 0,1 % | classA 0.001 x takerFeeCoefficient 1.00 | 2026-11-23T10:47:46.565484+00:00 |
-| SPOT ETH-USDT | 0,1 % | classA 0.001 x takerFeeCoefficient 1.00 | 2026-11-23T10:47:41.729277+00:00 |
-| SPOT EVAA-USDT | 0,3 % | classC 0.003 x takerFeeCoefficient 1.00 | 2026-11-23T10:47:44.478227+00:00 |
-| SPOT LTC-USDT | 0,1 % | classA 0.001 x takerFeeCoefficient 1.00 | 2026-11-23T10:47:45.480417+00:00 |
-| SPOT NEAR-USDT | 0,1 % | classA 0.001 x takerFeeCoefficient 1.00 | 2026-11-23T10:47:44.787115+00:00 |
-| SPOT PEPE-USDT | 0,1 % | classA 0.001 x takerFeeCoefficient 1.00 | 2026-11-23T10:47:44.081741+00:00 |
-| SPOT PIEVERSE-USDT | 0,2 % | classB 0.002 x takerFeeCoefficient 1.00 | 2026-11-23T10:47:46.288262+00:00 |
-| SPOT SOL-USDT | 0,1 % | classA 0.001 x takerFeeCoefficient 1.00 | 2026-11-23T10:47:43.248381+00:00 |
-| SPOT SUI-USDT | 0,1 % | classA 0.001 x takerFeeCoefficient 1.00 | 2026-11-23T10:47:46.835457+00:00 |
-| SPOT TAO-USDT | 0,1 % | classA 0.001 x takerFeeCoefficient 1.00 | 2026-11-23T10:47:45.190432+00:00 |
-| SPOT UNI-USDT | 0,1 % | classA 0.001 x takerFeeCoefficient 1.00 | 2026-11-23T10:47:47.377325+00:00 |
-| SPOT XLM-USDT | 0,1 % | classA 0.001 x takerFeeCoefficient 1.00 | 2026-11-23T10:47:42.500483+00:00 |
-| SPOT XMR-USDT | 0,1 % | classA 0.001 x takerFeeCoefficient 1.00 | 2026-11-23T10:47:42.922244+00:00 |
-| SPOT XRP-USDT | 0,1 % | classA 0.001 x takerFeeCoefficient 1.00 | 2026-11-23T10:47:42.023267+00:00 |
-| SPOT ZEC-USDT | 0,1 % | classA 0.001 x takerFeeCoefficient 1.00 | 2026-11-23T10:47:43.519823+00:00 |
+| FUTURES ASTERUSDTM | 0,06 % | takerFeeRate 0.00060 | 2026-11-23T13:17:21.947230+00:00 |
+| FUTURES AVAXUSDTM | 0,06 % | takerFeeRate 0.00060 | 2026-11-23T13:17:24.377337+00:00 |
+| FUTURES BCHUSDTM | 0,06 % | takerFeeRate 0.00060 | 2026-11-23T13:17:22.479850+00:00 |
+| FUTURES ENAUSDTM | 0,06 % | takerFeeRate 0.00060 | 2026-11-23T13:17:24.898585+00:00 |
+| FUTURES ETHUSDTM | 0,06 % | takerFeeRate 0.00060 | 2026-11-23T13:17:19.805981+00:00 |
+| FUTURES EVAAUSDTM | 0,06 % | takerFeeRate 0.00060 | 2026-11-23T13:17:20.343720+00:00 |
+| FUTURES FHEUSDTM | 0,06 % | takerFeeRate 0.00060 | 2026-11-23T13:17:24.632174+00:00 |
+| FUTURES HYPEUSDTM | 0,06 % | takerFeeRate 0.00060 | 2026-11-23T13:17:21.416741+00:00 |
+| FUTURES ICPUSDTM | 0,06 % | takerFeeRate 0.00060 | 2026-11-23T13:17:22.758312+00:00 |
+| FUTURES INJUSDTM | 0,06 % | takerFeeRate 0.00060 | 2026-11-23T13:17:23.553698+00:00 |
+| FUTURES LINKUSDTM | 0,06 % | takerFeeRate 0.00060 | 2026-11-23T13:17:24.099120+00:00 |
+| FUTURES NIGHTUSDTM | 0,06 % | takerFeeRate 0.00060 | 2026-11-23T13:17:23.291410+00:00 |
+| FUTURES PEPEUSDTM | 0,06 % | takerFeeRate 0.00060 | 2026-11-23T13:17:22.214554+00:00 |
+| FUTURES PIEVERSEUSDTM | 0,06 % | takerFeeRate 0.00060 | 2026-11-23T13:17:21.677795+00:00 |
+| FUTURES SOLUSDTM | 0,06 % | takerFeeRate 0.00060 | 2026-11-23T13:17:20.600501+00:00 |
+| FUTURES SOXLUSDTM | 0,06 % | takerFeeRate 0.00060 | 2026-11-23T13:17:23.018067+00:00 |
+| FUTURES UNIUSDTM | 0,06 % | takerFeeRate 0.00060 | 2026-11-23T13:17:23.840592+00:00 |
+| FUTURES XBTUSDTM | 0,06 % | takerFeeRate 0.00060 | 2026-11-23T13:17:20.077845+00:00 |
+| FUTURES XRPUSDTM | 0,06 % | takerFeeRate 0.00060 | 2026-11-23T13:17:21.142526+00:00 |
+| FUTURES ZECUSDTM | 0,06 % | takerFeeRate 0.00060 | 2026-11-23T13:17:20.880879+00:00 |
+| SPOT ASTER-USDT | 0,1 % | classA 0.001 x takerFeeCoefficient 1.00 | 2026-11-23T13:17:16.260223+00:00 |
+| SPOT AVAX-USDT | 0,1 % | classA 0.001 x takerFeeCoefficient 1.00 | 2026-11-23T13:17:19.250093+00:00 |
+| SPOT BNB-USDT | 0,1 % | classA 0.001 x takerFeeCoefficient 1.00 | 2026-11-23T13:17:17.891037+00:00 |
+| SPOT BTC-USDT | 0,1 % | classA 0.001 x takerFeeCoefficient 1.00 | 2026-11-23T13:17:14.321043+00:00 |
+| SPOT DOGE-USDT | 0,1 % | classA 0.001 x takerFeeCoefficient 1.00 | 2026-11-23T13:17:18.160291+00:00 |
+| SPOT DOT-USDT | 0,1 % | classA 0.001 x takerFeeCoefficient 1.00 | 2026-11-23T13:17:18.700349+00:00 |
+| SPOT ETH-USDT | 0,1 % | classA 0.001 x takerFeeCoefficient 1.00 | 2026-11-23T13:17:14.592832+00:00 |
+| SPOT EVAA-USDT | 0,3 % | classC 0.003 x takerFeeCoefficient 1.00 | 2026-11-23T13:17:16.809403+00:00 |
+| SPOT LTC-USDT | 0,1 % | classA 0.001 x takerFeeCoefficient 1.00 | 2026-11-23T13:17:17.620811+00:00 |
+| SPOT NEAR-USDT | 0,1 % | classA 0.001 x takerFeeCoefficient 1.00 | 2026-11-23T13:17:17.077463+00:00 |
+| SPOT PEPE-USDT | 0,1 % | classA 0.001 x takerFeeCoefficient 1.00 | 2026-11-23T13:17:16.534319+00:00 |
+| SPOT PIEVERSE-USDT | 0,2 % | classB 0.002 x takerFeeCoefficient 1.00 | 2026-11-23T13:17:18.440131+00:00 |
+| SPOT SOL-USDT | 0,1 % | classA 0.001 x takerFeeCoefficient 1.00 | 2026-11-23T13:17:15.700459+00:00 |
+| SPOT SUI-USDT | 0,1 % | classA 0.001 x takerFeeCoefficient 1.00 | 2026-11-23T13:17:18.988072+00:00 |
+| SPOT TAO-USDT | 0,1 % | classA 0.001 x takerFeeCoefficient 1.00 | 2026-11-23T13:17:17.343716+00:00 |
+| SPOT UNI-USDT | 0,1 % | classA 0.001 x takerFeeCoefficient 1.00 | 2026-11-23T13:17:19.539136+00:00 |
+| SPOT XLM-USDT | 0,1 % | classA 0.001 x takerFeeCoefficient 1.00 | 2026-11-23T13:17:15.146382+00:00 |
+| SPOT XMR-USDT | 0,1 % | classA 0.001 x takerFeeCoefficient 1.00 | 2026-11-23T13:17:15.423773+00:00 |
+| SPOT XRP-USDT | 0,1 % | classA 0.001 x takerFeeCoefficient 1.00 | 2026-11-23T13:17:14.871379+00:00 |
+| SPOT ZEC-USDT | 0,1 % | classA 0.001 x takerFeeCoefficient 1.00 | 2026-11-23T13:17:15.979482+00:00 |
 
 ## Resultados
 
@@ -584,4 +584,4 @@ Los resultados por volatilidad servirán, si procede, para proponer el filtro de
 
 ## Registro completo
 
-Las señales, las decisiones y las operaciones de cada ejecución están en el PC, fuera de Git: `C:/kbot_historico/informes/tendencia_desarrollo_6f08bb8_8866b51449f1`.
+Las señales, las decisiones y las operaciones de cada ejecución están en el PC, fuera de Git: `C:/kbot_historico/informes/tendencia_desarrollo_3490a1c_8866b51449f1`.

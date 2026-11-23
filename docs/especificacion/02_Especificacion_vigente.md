@@ -2290,17 +2290,17 @@ El desarrollo se parte en **cuatro tramos consecutivos**, cada corte en la media
 - Esta sección no decide D12, D16, D22, D28 ni D30.
 - **Sigue en F3-E5b:** la migración `0004` y `svc-strategy` (F3-A10).
 
-#### 12.5.8 Lo que muestran los primeros informes del desarrollo [23 nov 2026; **pregunta abierta**, sin decidir]
+#### 12.5.8 Lo que muestran los informes del desarrollo: Futures [23 nov 2026; la regla del contrato se mantiene; **pregunta abierta para el propietario**]
 
-Los tres informes del desarrollo, hechos con `6f08bb8` (§18), están en `docs/informes/exploratorio/`.
+Los informes del desarrollo están en `docs/informes/exploratorio/` (§18).
 
 - **Muchos contratos de Futures no dan ninguna señal:** 13 de los 20 en la tendencia, 11 en el breakout y 3 en la reversión a la media. En Spot solo callan EVAA-USDT y PIEVERSE-USDT, que no tienen minutos en el desarrollo.
-- **La causa es la combinación de tres reglas aprobadas:**
-  - en Futures, KuCoin no da vela de un minuto sin operaciones (§3.2 [H]);
+- **Tres reglas aprobadas actúan juntas:**
+  - en Futures, KuCoin no da vela de un intervalo sin operaciones (§3.2 [H]);
   - el histórico deja ese minuto como `ausente`, nunca «sin operaciones» (§12.1);
   - una vela incompleta no la usa ningún indicador, y un hueco reinicia los recursivos (CD-02 y CD-08).
 
-  Los huecos de Futures son sobre todo de un minuto suelto, y con uno basta para que una vela de 4 h no sea utilizable.
+  Los huecos de Futures son sobre todo de un minuto suelto, y con uno basta para que una vela de 4 h no sea utilizable. **Una ausencia no demuestra por sí sola que no hubiera operaciones:** KuCoin también avisa de que sus velas pueden estar incompletas (revisor, 23 nov 2026).
 - **Medido en el tramo 3** [27 jun 2025, 14 oct 2025):
 
 | Instrumento | Minutos presentes | Huecos (de un minuto) | Velas de 4 h completas |
@@ -2311,13 +2311,28 @@ Los tres informes del desarrollo, hechos con `6f08bb8` (§18), están en `docs/i
 | SPOT BTC-USDT | 100 % | 0 | 100 % |
 
   En Spot, KuCoin publica una vela de volumen 0 cuando no hay operaciones: BTC-USDT tiene 7 en ese tramo.
-- **Los informes son correctos con el contrato aprobado,** pero sus conclusiones de Futures descansan en pocos contratos. Todas las señales de Futures tuvieron completas sus velas de disparo. Las señales solo aparecen en tramos de datos continuos: por eso no caduca ninguna por una vela no utilizable.
-- **Pregunta abierta, para el revisor y el propietario.** Hay tres posibilidades:
-  - mantener la regla;
-  - tratar como minuto sin operaciones un minuto de Futures que KuCoin contestó sin vela: una vela plana al cierre anterior, de volumen 0 y marcada aparte;
-  - aceptar una vela superior con algunos minutos ausentes, hasta un límite.
+- **Por qué calla cada contrato,** separado como pidió el revisor. Se cuentan, en las ventanas de los cuatro tramos, las velas de cada temporalidad de la ficha con todos sus indicadores calculados:
+  - **sin periodo elegible:** el contrato abrió después del desarrollo;
+  - **el contexto nunca se calienta:** ninguna vela de la temporalidad de contexto (4 h, o 1 h en la reversión) tiene todos sus valores;
+  - **valores a ratos, sin señal:** algunas velas los tienen, pero pocas, y la ficha nunca cumple sus condiciones a la vez.
 
-  Cualquier cambio sería una enmienda del contrato (§12.1), con su revisión, y daría versiones nuevas de los informes. Hasta entonces, nada cambia.
+| Familia | Sin periodo elegible | El contexto nunca se calienta | Valores a ratos, sin señal |
+|---|---|---|---|
+| tendencia (13) | SOXL | AVAX, BCH, FHE, INJ, LINK, NIGHT, PIEVERSE, UNI | ASTER, ENA, ICP, XBT |
+| breakout (11) | SOXL | AVAX, BCH, FHE, INJ, LINK, NIGHT, PIEVERSE, UNI | HYPE, XBT |
+| reversion_media (3) | SOXL | AVAX | INJ |
+
+  - SOXLUSDTM abrió el 15 may 2026, y su cobertura es «no aplicable» (F3E5-05).
+  - FHE, NIGHT y PIEVERSE abrieron entre el 14 nov y el 9 dic 2025: solo tienen unos dos meses del desarrollo.
+  - Con valores a ratos, son pocos. XBTUSDTM tiene completas 1.676 de sus 2.376 velas de 4 h, pero solo 51 con la EMA(50) calculada: necesita 50 completas seguidas.
+  - Todas las señales de Futures tuvieron completas sus velas de disparo, porque solo aparecen en tramos de datos continuos.
+- **Opinión técnica del revisor** (23 nov 2026): mantener el contrato actual como referencia.
+  - Rellenar con velas planas introduce datos imputados.
+  - Tolerar minutos ausentes deja desconocidos los máximos, los mínimos y los volúmenes.
+  - Las dos opciones requerirían una enmienda versionada, comparada solo en el desarrollo y con reglas explícitas de calidad y procedencia.
+  - Una vela sintética nunca debe convertirse en un precio observado para ejecutar.
+  - Su dictamen no aprueba ninguna modificación del contrato.
+- **Estado:** la regla se mantiene. Los informes son correctos con ella, pero sus conclusiones de Futures descansan en pocos contratos. Estudiar una enmienda es decisión del propietario; si la pide, se diseña con esas condiciones y con su propia revisión.
 
 ## 13. Infraestructura, monitorización y alertas
 

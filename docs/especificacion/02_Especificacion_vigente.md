@@ -1250,7 +1250,7 @@ Una ampliación es una **intención de entrada** sobre una posición existente. 
 - un usuario por servicio;
 - `LoadCredential=` (Anthropic solo para news; Telegram para telegram y watchdog);
 - `IPAddressDeny=any` en strategy, risk, broker y web [P: comprobar que el socket Unix sigue funcionando];
-- SSH solo con clave e **IP restringida en la lista de seguridad de Oracle** [decisión del propietario del 17 nov 2026], **el cortafuegos que trae la imagen de Oracle** (`iptables`, cargado al arrancar por `netfilter-persistent`, con sus reglas IPv4 tal como vienen), no `ufw` [decisión del propietario del 16 nov 2026], `fail2ban` y **0 puertos de entrada** salvo SSH.
+- SSH solo con clave e **IP restringida en la lista de seguridad de Oracle** [decisión del propietario del 17 nov 2026], **el cortafuegos que trae la imagen de Oracle** (`iptables`, cargado al arrancar por `netfilter-persistent`, con sus reglas IPv4 tal como vienen), no `ufw` [decisión del propietario del 16 nov 2026], `fail2ban` y **0 puertos de entrada** salvo SSH. **Enmienda del propietario del 26 nov 2026, provisional mientras se desarrolla:** la regla admite el bloque de su proveedor, `79.112.0.0/12`, en vez de una sola IP, porque su IP doméstica cambia cada pocos días (79.112…, 79.117… y 79.116… en nueve días). El acceso sigue siendo solo con clave, y `fail2ban` sigue activo.
 
 **PostgreSQL:**
 - `listen_addresses=''`: sin escucha TCP, solo socket Unix [H];
@@ -2682,6 +2682,135 @@ Fija la migración `0004`, con `trading.signals` y `config.strategy_versions`; l
 - **Pruebas:** las unitarias de retención, intentos y destinatarios; en la CI, contra PostgreSQL y con dos identidades de prueba (nunca las del propietario): una fila insertada después de la instantánea no se cuenta ni se vuelca; el volcado se descifra con cualquiera de las dos identidades y su SHA-256 es el del manifiesto; la copia de un día sellado tiene las mismas filas y huellas que su generación de E3; una copia que falla no deja nada en el disco, tampoco el volcado en claro; los objetos globales llevan los roles. Tras la revisión: la copia caliente reutiliza las huellas de los días sellados y se detiene ante unas filas distintas; una fila cambiada con el mismo recuento cambia la huella de su tabla; mover el límite de una partición cambia la huella del catálogo, y devolverlo la repite; el registro antes de publicar, con fallos inyectados en el registro y en el renombrado, una línea cortada y una copia sin su entrada; y, como root en la CI con los usuarios, grupos y modos reales de `05_copias.sh`, `postgres` llega a su directorio solo con el grupo de su unidad y `kbot_backup` lee la copia, pero no puede escribir allí.
 - **Hasta E4c-2, ningún día sellado tiene una alternativa externa verificada** (R-E4-01): la copia caliente lo lleva todo. Su tamaño y su duración crecen con los días calientes y se miden en el servidor; la exclusión llega con la subida y la relectura del cubo.
 
+**E4c-2: diseño de detalle de la subida a Object Storage** [26 nov 2026, **pendiente de revisión**, antes del código]. Aplica el diseño aprobado de este punto 4 (cuarta revisión, 11 nov 2026). Precisa lo que aquel dejaba abierto y corrige dos cosas que no contaba: el **límite de peticiones** del nivel gratuito y **quién tiene red**.
+
+- **Lo medido en el servidor** el 26 nov 2026, con el grabador desde el 17 nov:
+  - la copia caliente cifrada ocupa unos **577 MB** y tarda unos 6 minutos (5 min 48 s de CPU). Lleva todos los días, porque ninguno tiene aún alternativa externa;
+  - cada copia de día sellado con datos ocupa unos **63 MB**;
+  - los objetos globales, unos 4 KB;
+  - en total, 2,5 GB en `/srv/kbot/backups`.
+- **Lo que fija Oracle para el nivel gratuito** [H, página de recursos Always Free, leída el 26 nov 2026]:
+  - **20 GB** entre los tres niveles de almacenamiento;
+  - **50.000 peticiones de la API de Object Storage al mes**. El diseño aprobado no las contaba.
+  - Si las versiones anteriores cuentan en los 20 GB no lo dice esa página: la de versionado dice que se cobran. Se cuentan siempre en el presupuesto, como ya decía el diseño.
+
+**1. Dos procesos, y solo uno con red** [precisión nueva, para revisar]
+- **`kbot-backup.service`** (`kbot_backup`) sigue **sin red**: vuelca, cifra, registra y publica en local, como en E4c-1. Además decide qué días sellados omite la copia caliente (punto 4).
+- **`kbot-upload.service`**, nuevo, con un usuario del sistema propio, `kbot_upload`:
+  - **sin rol de PostgreSQL** y sin acceso a la base;
+  - lee solo las copias ya publicadas, que están cifradas, y sube, relee, aplica la retención y escribe su estado en `/srv/kbot/subidas` (`kbot_upload`, `0750`, con el grupo `kbot_backup` para que el otro proceso lo lea).
+- **El aislamiento de metadatos de E4** (E4-D04) exime solo a `kbot_upload`, nunca a `kbot_backup`. Con esa exención, el proceso que lee toda la base tendría a la vez red y los testigos de la instancia. Separados:
+  - quien lee la base no tiene red;
+  - quien tiene red solo ve copias cifradas, con claves públicas.
+- **Lo que cambia en el sistema:**
+  - el guardián de metadatos, `netcheck` y `check` se amplían juntos, con el nombre del usuario y no con un uid fijo, como pedía E4c;
+  - las copias pasan a `0640` y sus directorios a `0750`, con el grupo `kbot_upload` en lectura (los directorios llevan `setgid`, así que cada copia nueva hereda ese grupo). `kbot_backup` cambia su `UMask` a `0027`;
+  - el registro sigue siendo solo de su autor.
+- **La red de `kbot-upload`:**
+  - `RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX`;
+  - sin lista de IP de Oracle (R-E4-03): el SDK usa solo los puntos de acceso del servicio de autenticación y de Object Storage de Frankfurt;
+  - el resto del aislamiento, como en `kbot-backup`.
+
+**2. El cubo y sus permisos** (guía del propietario: `docs/operacion/copias_object_storage.md`)
+- **El cubo:** `kbot-backups`, privado, en Frankfurt, nivel Standard, **con versionado** y sin escalonado automático.
+- **Grupo dinámico** `kbot-servidor`, con la regla `instance.id = '<OCID de la instancia>'`. Así solo esta instancia, no todo el compartimento.
+- **Política** `kbot-copias`, en el compartimento raíz:
+  - `manage objects` en el cubo, con `OBJECT_CREATE`, `OBJECT_INSPECT`, `OBJECT_READ` y `OBJECT_DELETE`, y **sin `OBJECT_OVERWRITE` ni `OBJECT_VERSION_DELETE`** [H: referencia de políticas de Object Storage];
+  - `read buckets` en ese cubo, para que el servicio compruebe al arrancar que el versionado está activo. Si no lo está, no sube nada.
+- **Regla de ciclo de vida:** borrar las **versiones anteriores** a 1 día (`target: previous-object-versions`, `DELETE`, 1 día). Oracle la ejecuta solo si el propio servicio tiene permiso: `Allow service objectstorage-eu-frankfurt-1 to manage object-family in tenancy where target.bucket.name = 'kbot-backups'` [H en su forma sin condición; P, que admita la condición del cubo].
+- **Sin `OBJECT_OVERWRITE`,** ningún nombre se sube dos veces. Cada objeto lleva el nombre único de su copia:
+  - `caliente/<nombre>/volcado.age` y `caliente/<nombre>/manifiesto.json`;
+  - lo mismo en `dia/`, `globales/` y `previa/`.
+
+  No hay un índice en el cubo, porque cambiarlo exigiría sobrescribir.
+- **`GetNamespace` no necesita permiso** [H]. El servicio lo obtiene al arrancar.
+
+**3. La subida, la relectura y la retención** (`python -m kbot.upload`, cada hora en el minuto 55, cuando la copia de las 40 ha terminado)
+1. Comprueba que el versionado está activo y lista **todas las versiones** del cubo, paginadas. Con ellas tiene el espacio ocupado y lo que hay.
+2. **Presupuesto** (E4-D07):
+   - si lo ocupado más lo que va a subir pasa de **19 GB**, no sube;
+   - lo registra como error, y el estado da la antigüedad de la última subida completa, que es el RPO frente a la pérdida del servidor.
+3. **Qué sube, en orden:**
+   - las copias de día sellado que faltan;
+   - la copia caliente más reciente;
+   - los objetos globales nuevos;
+   - las copias previas a una actualización.
+
+   Sube solo las que su registro avala, y de cada una el volcado y el manifiesto. Un volcado grande va en partes (`UploadManager` del SDK), y cada parte es una petición.
+4. **Relectura:** lee de nuevo cada objeto subido y comprueba su SHA-256 contra el registro. Solo entonces lo anota como `verificada_fuera`, con su nombre, su SHA-256, la huella de su manifiesto y la hora.
+5. **Retención D25**, contando solo las copias verificadas:
+   - **horarias:** las 3 copias calientes más recientes;
+   - **diarias:** la primera de cada día UTC, de los 7 últimos días;
+   - **semanales:** la primera de cada semana ISO (del lunes UTC), de las 2 últimas;
+   - **previas a una actualización:** las 2 últimas;
+   - **globales:** las 2 últimas.
+
+   Una copia puede estar en varias clases, y se guarda una vez. Las demás se borran con `DeleteObject`, que con versionado deja la versión anterior durante 1 día.
+6. **Copias de día sellado:** se borran solo con la condición del residual de R-E4-01. Su día ha de ser `elegible_para_exclusion_backup`, y cada copia retenida que la fija ha de poder restaurarse sin ella con las identidades de su propio manifiesto. El índice de dependencias se guarda en `/srv/kbot/subidas` y se rehace leyendo los manifiestos del cubo si falta.
+7. **El estado** (`/srv/kbot/subidas/estado.json`, que solo escribe `kbot_upload`) da:
+   - las copias verificadas fuera y cuándo se vieron por última vez en el listado;
+   - lo ocupado y las peticiones del mes;
+   - la antigüedad de la última subida completa.
+
+**4. Qué omite la copia caliente** (R-E4-01, del lado de `kbot-backup`)
+- Omite los datos de un día sellado solo si `estado.json` dice que su copia de día está verificada fuera y que estaba en el **último** listado del cubo, y ese listado tiene menos de 2 horas.
+- El manifiesto fija la dependencia: el nombre del objeto, su SHA-256, la huella de su manifiesto y la hora de esa verificación.
+- **Sin estado, o con uno viejo, no omite nada:** la copia crece, pero nunca queda incompleta.
+- **Límite declarado:** si el propietario borra una copia de día desde la consola, la copia caliente siguiente aún puede omitir ese día durante como mucho una hora. Mientras tanto el objeto sigue como versión anterior durante 1 día. El listado siguiente lo detecta, y la copia caliente de después vuelve a incluir el día.
+- **Las copias previas a una actualización** son autocontenidas (punto 4): `python -m kbot.backup run --previa` no omite nada. `02_codigo.sh` la pedirá antes de cambiar el código, cuando E4c-2 esté instalada.
+
+**5. Peticiones al mes** [precisión nueva]
+- **Una hora normal** son unas 12 peticiones:
+  - el listado de versiones, 1 o 2;
+  - la copia caliente, unas 5 partes con su creación y su cierre;
+  - el manifiesto, 1;
+  - la relectura, 2;
+  - los borrados, 2.
+- **Un día** suma además la copia del día sellado (unas 6) y la de los globales (4 a la semana).
+- **En total,** unas **9.000 peticiones al mes**, de las 50.000. El servicio las cuenta y las guarda en el estado.
+- **Si en un mes pasa de 40.000,** solo hace lo imprescindible: el listado y la subida de copias de día. La copia caliente se queda en el servidor, y lo registra como error.
+
+**6. La simulación del presupuesto** (`tools/simular_copias.py`, en la CI)
+- **Su entrada:**
+  - los tamaños medidos (la copia caliente sin días omitidos, de unos 4 días calientes y las tablas pequeñas, y los 63 MB de cada día);
+  - un crecimiento declarado;
+  - la retención anterior;
+  - la ventana de 1 día de versiones anteriores;
+  - las peticiones;
+  - la cadencia del disco externo.
+- **Lo que da:** el máximo del cubo antes de cada subida durante al menos **120 días**, y la fecha en que llegaría a 19 GB.
+- **Mientras no exista E4c-3,** ninguna generación queda `verificado_fuera`. Así ningún día se hace elegible, y sus copias de día se quedan en el cubo: unos 63 MB al día. La simulación da cuánto tiempo cabe y, con eso, para cuándo hace falta E4c-3. **No se usa ninguna cota fija.**
+
+**7. Pruebas** (en la CI, con un Object Storage falso en memoria que aplica el versionado y los permisos de la política)
+- **Sin `OBJECT_OVERWRITE`:** subir un nombre que ya existe falla, y el servicio nunca lo intenta.
+- **Relectura:** una copia cambiada en el cubo no queda verificada.
+- **Presupuesto:**
+  - pasar de 19 GB no sube nada y deja el error con la antigüedad de la última subida;
+  - pasar de 40.000 peticiones deja solo lo imprescindible.
+- **La retención D25** sobre 30 días de copias horarias, con las clases que se solapan.
+- **El caso de aceptación del residual de R-E4-01:** la copia caliente H retenida fija S y G1, y se pide el borrado de S. Solo procede con G1 verificada fuera; con G2 elegible y G1 no, S se conserva hasta que H expire.
+- **La omisión del lado de `kbot-backup`:**
+  - con estado verificado y reciente, se omite;
+  - con estado viejo o ausente, o con la copia de día que falta en el último listado, se incluye;
+  - la copia previa nunca omite.
+- **El índice de dependencias** se rehace desde los manifiestos.
+- **Los permisos del sistema,** como root en la CI:
+  - `kbot_upload` lee las copias y no puede escribirlas;
+  - `kbot_backup` lee el estado y no puede escribirlo;
+  - el guardián de metadatos deja pasar a `kbot_upload` y rechaza a `kbot_backup`.
+- **La simulación de 120 días.**
+- **En el servidor,** con informe en `docs/operacion/`:
+  - la subida de prueba sin credenciales, que cierra el punto 33;
+  - 24 h de copias en el cubo con la retención aplicada;
+  - la relectura;
+  - el presupuesto y las peticiones medidas.
+
+**8. Dependencia nueva:** el SDK de Oracle para Python (`oci`, licencias UPL 1.0 y Apache 2.0), fijado en `uv.lock`. Solo lo importa `kbot.upload`.
+
+**9. Qué decide el propietario:**
+- crear el cubo, el grupo dinámico, la política y la regla de ciclo de vida, siguiendo la guía;
+- la instalación en el servidor, con su permiso, como siempre.
+
 **Revisión del diseño (11 nov 2026): APROBABLE CON CORRECCIONES.** El revisor confirmó el orden instantánea → comprobaciones → `pg_dump --snapshot` y lo contrastó en PostgreSQL 18.6 (una inserción concurrente no aparece ni en el volcado ni en el manifiesto si van en la misma instantánea). Hallazgos, todos incorporados arriba: **E4-D01** (ALTO) un recibo podía acreditar una copia externa inexistente → recibo completo, desafío en una sincronización posterior y parte confiable con garantía acotada; **E4-D02** (MEDIO) `pg_restore` reponía el sello antes de cargar el Parquet (`23514`) → restauración por fases; **E4-D03** (MEDIO) el perfil SFTP permitía reenvíos y `AllowUsers` excluía a `kbot_sync` → bloque `Match` completo con `DisableForwarding`; **E4-D04** (MEDIO) `IPAddressDeny` no acreditaba el aislamiento de metadatos → cortafuegos por usuario, comprobación desde cada contexto real y parada de la instalación si no funciona; **E4-D05** (MEDIO) faltaba el descifrado para la restauración mensual → ensayo automático con clave de prueba y restauración integral descifrada en el PC; **E4-D06** (MEDIO) el bloqueo REST no era escribible con `ProtectSystem=strict` → precreado por `tmpfiles.d` y `ReadWritePaths`; **E4-D07** (MEDIO) la cadencia semanal no garantizaba copias de 3-7 días → copia de cada día sellado una sola vez, medición del presupuesto y antigüedad de la última subida como RPO efectivo.
 
 **Segunda revisión del diseño (11 nov 2026): APROBABLE CON CORRECCIONES.** E4-D01, D02, D03, D05 y D06 resueltos como diseño; D04 y D07 parciales. Hallazgos nuevos, incorporados arriba: **R-E4-01** (ALTO) una copia de día sellado podía caducar a los 120 días mientras una copia caliente aún la necesitaba → nada caduca por edad, el manifiesto fija la dependencia exacta, el servicio comprueba que existe y, si no, el día vuelve a las copias calientes; las copias previas a actualización son autocontenidas; **R-E4-02** (MEDIO) el ciclo de vida por edad daba 24/8/3 copias y unas 120 de días sellados, no las 3/7/2 de D25 → la retención la aplica el servicio, exactamente D25, con `OBJECT_DELETE` pero sin `OBJECT_VERSION_DELETE` ni `OBJECT_OVERWRITE`, versionado del cubo y una ventana de un día de versiones anteriores (una ventana de recuperación limitada: después el ciclo de vida borra esas versiones); la ampliación de D25 se somete al propietario (P-E4-4) y una simulación de 120 días comprueba el presupuesto; **R-E4-03** (MEDIO) el perfil de red de `svc-backup` bloqueaba el servicio de autenticación regional → sin lista blanca por IP para Oracle, los destinos los acota el SDK con sus dos puntos de acceso explícitos, y la prueba crea el firmante, sube, lee y renueva el testigo; **R-E4-04** (MEDIO) faltaba autenticar el volcado recibido y aislar el restaurador → SHA-256 en claro registrado al crear la copia y comprobado sobre una copia privada antes de `pg_restore`, y clúster de restauración de un usuario del sistema propio sin acceso a producción; **R-E4-05** (BAJO) el desafío se describía como prueba de persistencia → es una lectura diferida por un cliente confiable, con el límite documentado y el guion que falla sin el disco.
@@ -3104,3 +3233,6 @@ $$\Delta Cap=\underbrace{8}_{\text{distancia mark-stop de lo cerrado}}+\underbra
 | 26 nov 2026 | **Revisión del código de F3-E5b (commit `e8f9502`): APROBABLE CON CORRECCIONES**, con dos hallazgos MEDIOS y uno BAJO. **F3E5B-05** (MEDIO): un minuto parcialmente incierto conservaba la V válida. Con 0,01 a las 00:00 y a las 11:59:30 y 0,001 a las 14:00, la incertidumbre empieza a las 11:59:30, pero el código solo miraba la apertura: el minuto de las 11:59 y el agregado de las 11:45 quedaban válidos y alimentaban el VWAP. **F3E5B-06** (BAJO): una vela de Spot sin observaciones, o anterior a la primera dentro de su minuto, recibía multiplicador nulo y V no válida, aunque en Spot es siempre 1. **F3E5B-07** (MEDIO): la prueba «sin red» no bloqueaba las conexiones nativas. Bajo el mismo gancho de auditoría, `psycopg.connect(hostaddr='127.0.0.1')` alcanzó un listener TCP local, y Python no ofrece esos ganchos como aislamiento. No demuestra tráfico indebido del servicio. **Verificación del revisor:** pasan 465 pruebas locales, y el ZIP corresponde al commit y al diff. No ejecutó las de PostgreSQL ni las tres que necesitan NumPy y TA-Lib | Revisor |
 | 26 nov 2026 | **F3E5B-05 a F3E5B-07, corregidos** (§12.6.4 y §12.6.5). (5) Un minuto tiene multiplicador solo si es conocido e igual en todo él: `multiplier_at` mira también las observaciones dentro del minuto y la siguiente. (6) En Spot, el multiplicador es siempre 1, sin depender de las observaciones. (7) La prueba sin red corre el ciclo en un espacio de red propio (`sudo -n unshare --net` y `setpriv` para volver al usuario de las pruebas). Dentro, una conexión TCP de psycopg a un puerto que escucha la prueba se rechaza, mientras fuera ese puerto contesta, y el ciclo funciona por el socket Unix. Cada corrección tiene su prueba de aceptación | Claude |
 | 26 nov 2026 | **Segunda revisión del código de F3-E5b (commit `d169f17`): APROBADO.** F3E5B-05, RESUELTO: se comprueba el minuto entero, con los dos límites dentro del minuto, y la incertidumbre invalida la V y sus agregados, con P y T intactas. F3E5B-06, RESUELTO: Spot recibe siempre el multiplicador 1, sin depender de las observaciones. F3E5B-07, RESUELTO por revisión del código: la prueba usa un aislamiento del sistema operativo y comprueba el rechazo del TCP nativo, el funcionamiento por el socket Unix y que el puerto de fuera no recibió ninguna conexión. **Verificación del revisor:** pasan 136 pruebas locales, y las tres pruebas nuevas fallan con el código anterior y pasan con el corregido. Una comparación adicional de 6.843 casos de intervalos no encontró discrepancias, y el ZIP, el commit, el diff y el paquete coinciden. No repitió la prueba con Linux y PostgreSQL desde Windows: para ella, la CI en verde sigue siendo la evidencia aportada. Sin residuales ni hallazgos nuevos. El despliegue y la elección de las versiones siguen pendientes del propietario | Revisor |
+| 26 nov 2026 | **Un reinicio del grabador por una actualización automática.** A las 06:38-06:39 UTC, `unattended-upgrade` instaló bibliotecas de Kerberos nuevas (`libgssapi-krb5-2`, `libkrb5-3` y otras) y el sistema reinició `postgresql@18-main` a las 06:39:14. El grabador recibió `AdminShutdown` al escribir sus velas, terminó con error y `systemd` lo arrancó de nuevo a las 06:39:31, como está previsto (§0, regla 1). Quedó un hueco `proceso_detenido` de 06:39:00 a 06:40:10 en los dos mercados: las velas se recuperan por REST, y el libro de ese minuto se pierde. La copia de las 06:40 terminó bien. **Pendiente de proponer:** fijar la hora de las actualizaciones automáticas y cómo reinician PostgreSQL | Claude |
+| 26 nov 2026 | **SSH: el bloque del proveedor** (decisión del propietario, provisional mientras se desarrolla). La regla de entrada de la lista de seguridad admite `79.112.0.0/12` en vez de una sola IP: la IP de casa cambió tres veces en nueve días, siempre dentro de ese bloque (§9 y `docs/operacion/oracle_instancia.md` §4). El acceso sigue siendo solo con clave | Propietario |
+| 26 nov 2026 | **Diseño de detalle de E4c-2: la subida a Object Storage** (§13.1, punto 4; rama `fase-2-e4c2`, **pendiente de revisión**, antes del código). Con lo medido en el servidor (la copia caliente, unos 577 MB; cada día sellado, unos 63 MB) y los límites gratuitos leídos en la documentación de Oracle (20 GB y 50.000 peticiones al mes). **Dos procesos:** `kbot-backup` sigue sin red, y un `kbot-upload` nuevo, sin acceso a la base, sube solo copias cifradas, y es el único exento del aislamiento de metadatos. El cubo, versionado y sin sobrescritura, con un grupo dinámico de una sola instancia y la regla de 1 día para las versiones anteriores. La subida, la relectura con SHA-256, la retención D25 con sus clases concretas, las dependencias del residual de R-E4-01, la omisión de días en la copia caliente solo con un estado verificado de menos de 2 h, las peticiones del mes (unas 9.000) y la simulación de 120 días. Guía del propietario: `docs/operacion/copias_object_storage.md` | Claude |

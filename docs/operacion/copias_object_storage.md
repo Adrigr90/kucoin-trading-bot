@@ -2,7 +2,7 @@
 
 Para el propietario. Son pasos en la consola web de Oracle (https://cloud.oracle.com), en castellano, con el nombre en inglés de cada botón. Lo que crea es gratuito, dentro de los límites de *Always Free*: 20 GB y 50.000 peticiones al mes.
 
-**No lo hagas todavía:** espera a que el revisor apruebe el diseño de E4c-2 (`02` §13.1, punto 4). Mientras nada lo use, no pasa nada si ya existe.
+**El revisor aprobó el diseño de E4c-2** el 26 nov 2026 (`ae0b217`, `02` §13.1, punto 4), así que ya puedes hacerlo. Hasta que el código esté instalado nada lo usa, y no pasa nada porque ya exista.
 
 Haz los cuatro apartados en este orden: la regla de ciclo de vida necesita antes la política.
 

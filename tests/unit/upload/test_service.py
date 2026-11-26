@@ -441,3 +441,55 @@ def test_the_recoverable_point_needs_the_exact_identity_of_each_dependency(
     entry = s.state()["verificadas"]["dia-2026-11-27"]  # type: ignore[index]
     assert entry["sha256"] == hashlib.sha256(b"first").hexdigest()
     assert s.state()["ultima_caliente_fuera"] == h6
+
+
+@pytest.mark.parametrize("order", ["verified first", "other first"])
+def test_two_versions_of_the_same_time_never_keep_a_verification_without_reading(
+    tmp_path: Path, order: str
+) -> None:
+    """E4C2-10: S was verified in version v1; another version with other bytes and the same
+    time appears. Whatever the order of the listing, the verification does not hold: S is
+    read again, and the version and the SHA-256 read decide."""
+    s = Setup(tmp_path)
+    publish(s.backups, "dia-2026-11-27", b"day")
+    h0 = hot_name(START.replace(minute=40))
+    publish(s.backups, h0, b"h0")
+    s.clock.now = START
+    assert s.run(hot_every_hours=6).errors == []
+    publish(
+        s.backups,
+        hot_name(START.replace(hour=6, minute=40)),
+        b"h6",
+        dias_excluidos=[relying_on(s, "dia-2026-11-27")],
+    )
+    s.clock.now = START.replace(hour=6)
+    assert s.run(hot_every_hours=6).errors == []
+    dump = service.objects_of("dia-2026-11-27")[0]
+    verified_version = s.state()["verificadas"]["dia-2026-11-27"]["version_objeto"]  # type: ignore[index]
+    original = s.storage.objects[dump][-1]
+    s.storage.tamper(dump, b"other bytes")
+    other = s.storage.objects[dump][-1]
+    other.modified = original.modified  # the same time
+    if order == "other first":  # the fake lists the last stored first, and reads it
+        s.storage.objects[dump][-2:] = [other, original]
+    reads_before = s.storage.sent("GetObject").count(dump)
+    s.clock.now = START.replace(hour=7)
+    report = s.run(hot_every_hours=6)
+    assert s.storage.sent("GetObject").count(dump) == reads_before + 1  # read again
+    assert "PutObject" not in [op for op, name in s.storage.log if name == dump][-1:]
+    entry = s.state()["verificadas"].get("dia-2026-11-27")  # type: ignore[union-attr]
+    if order == "verified first":  # what is read is the other version: never verified
+        assert entry is None and report.errors
+        assert s.state()["ultima_caliente_fuera"] == h0
+    else:  # what is read is the verified bytes, in the version that answered
+        assert entry is not None and entry["version_objeto"] == verified_version
+        assert entry["sha256"] == hashlib.sha256(b"day").hexdigest()
+
+
+def test_tied_versions_without_a_marker_are_ambiguous_in_either_order() -> None:
+    first = Version("s", "v1", 5, START, False)
+    second = Version("s", "v7", 6, START, False)
+    for versions in ([first, second], [second, first]):
+        bucket = service.Bucket.of(versions)
+        assert "s" not in bucket.current and bucket.ambiguous == {"s"}
+        assert not bucket.holds("dia-x", {"version_objeto": "v1", "version_manifiesto": "v1"})

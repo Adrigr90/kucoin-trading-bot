@@ -114,27 +114,36 @@ def local_copies(backups: Path, globals_dir: Path) -> dict[str, LocalCopy]:
 @dataclass
 class Bucket:
     """What a listing of every version says: the objects that exist now (their newest
-    version is not a delete marker), and the bytes of every version that is not a marker."""
+    version is not a delete marker), and the bytes of every version that is not a marker.
+    ``ambiguous`` holds the objects whose newest time is shared by several versions, none
+    of them a delete marker: they exist, but nothing says which version is current."""
 
     current: dict[str, Version]
     used: int
+    ambiguous: set[str] = field(default_factory=set)
 
     @classmethod
     def of(cls, versions: list[Version]) -> Bucket:
-        """The listing does not mark the current version, so it is the newest by its time.
-        Nothing orders two versions of the same time: if any of them is a delete marker,
-        the object counts as not there, and the next upload reads it again before trusting
-        it (review of the code of E4c-2)."""
+        """The listing does not mark the current version, so it is the newest by its time,
+        and only when no other version shares that time: nothing orders two versions of the
+        same time, neither their position in the listing nor their identifiers (E4C2-10).
+        Such an object is never current, so no verification of it holds: with a delete
+        marker in the tie it may be gone, and an upload is tried; without one it is
+        ``ambiguous``, and it is read again, which decides by the version and the SHA-256
+        that come back."""
         by_name: dict[str, list[Version]] = {}
         for version in versions:
             by_name.setdefault(version.name, []).append(version)
         current = {}
+        ambiguous = set()
         for name, found in by_name.items():
             newest = max(v.modified for v in found)
             latest = [v for v in found if v.modified == newest]
-            if not any(v.delete_marker for v in latest):
+            if len(latest) == 1 and not latest[0].delete_marker:
                 current[name] = latest[0]
-        return cls(current, sum(v.size for v in versions if not v.delete_marker))
+            elif not any(v.delete_marker for v in latest):
+                ambiguous.add(name)
+        return cls(current, sum(v.size for v in versions if not v.delete_marker), ambiguous)
 
     def has(self, copy: str) -> bool:
         return all(name in self.current for name in objects_of(copy))
@@ -337,8 +346,8 @@ class Uploader:
             (dump_name, copy.path / local.DUMP),
             (manifest_name, copy.path / local.MANIFEST),
         ):
-            if name in bucket.current:
-                continue
+            if name in bucket.current or name in bucket.ambiguous:
+                continue  # it is there: never overwritten, the reading below decides
             # A response lost after the upload gives 412 on the retry: the reading below
             # decides whether what is there is this copy.
             with contextlib.suppress(AlreadyExists):

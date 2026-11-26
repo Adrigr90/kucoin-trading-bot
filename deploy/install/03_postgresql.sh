@@ -6,7 +6,7 @@
 #
 # Installs PostgreSQL 18 from PGDG (arm64), creates the cluster 18/main with its data on
 # the data volume, applies the production configuration (no TCP, peer only), the roles of
-# sql/roles.sql and the migrations 0001 → 0003 as kbot_owner. It can be repeated after an
+# sql/roles.sql and the migrations 0001 → 0004 as kbot_owner. It can be repeated after an
 # interruption at any point: roles and database are applied statement by statement, each
 # skipped only if its own object exists (E4b-03), and the result is checked afterwards by
 # 04_verificar.sh.

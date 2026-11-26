@@ -64,6 +64,9 @@ class MinuteCandle:
     volume: Quality
     time: Quality
     available_at: datetime  # when it became a closed candle (02 §12.1, point 4)
+    # Futures: the contract multiplier of the minute when it is known (CD-12; 02 §12.6.4).
+    # The history has none, as before; the recorded minutes carry it.
+    multiplier: float | None = None
 
     @property
     def key(self) -> tuple[str, str, datetime]:
@@ -112,6 +115,9 @@ class Bar:
     # Of its minutes, those only REST (``vela_rest_suficiente``): the share of results based
     # only on REST counts original minutes (02 §12.1, point 5; §12.2, point 1).
     rest_only_minutes: int = 0
+    # The multiplier of its minutes, which can only be one (02 §12.6.4): with two, one of
+    # them is of an unknown multiplier and its V is not valid. None if they differ or none.
+    multiplier: float | None = None
 
     @property
     def complete(self) -> bool:
@@ -183,9 +189,15 @@ def aggregate(
                 rest_only_minutes=sum(
                     1 for m in members if m.evidence is CandleEvidence.REST_SUFICIENTE
                 ),
+                multiplier=_common({m.multiplier for m in members}),
             )
         )
     return bars
+
+
+def _common(values: set[float | None]) -> float | None:
+    """The one value of a set, or None if there are several."""
+    return next(iter(values)) if len(values) == 1 else None
 
 
 def exact_sum(values: Iterable[Decimal]) -> Decimal:

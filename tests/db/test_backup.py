@@ -118,7 +118,7 @@ def test_the_hot_copy_is_one_snapshot_and_only_its_encrypted_dump_stays(
         assert gaps["origen"] == "instantanea"
         fixed = manifest["versiones"]  # 02 §10.1
         assert str(fixed["postgresql"]).startswith("18") and "pg_dump" in fixed["pg_dump"]
-        assert fixed["alembic"] == ["0003"] and fixed["arquitectura"] and fixed["sistema"]
+        assert fixed["alembic"] == ["0004"] and fixed["arquitectura"] and fixed["sistema"]
         assert isinstance(fixed["extensiones"], dict)
         dump = manifest["volcado"]
         assert local.sha256_file(copy.path / local.DUMP) == dump["sha256_cifrado"]

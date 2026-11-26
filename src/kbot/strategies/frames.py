@@ -121,10 +121,10 @@ def build_frames(
     for timeframe in sorted({ONE_MINUTE, *timeframes, *indicators, *regime}):
         if timeframe == ONE_MINUTE:
             ordered = sorted(by_key.values(), key=lambda m: m.candle.open_time)
-            points = [from_minute(m) for m in ordered]
+            points = [from_minute(m, m.multiplier) for m in ordered]
         else:
             bars = aggregate(by_key.values(), timeframe, downloaded_until=downloaded_until)
-            points = [from_bar(bar) for bar in bars]
+            points = [from_bar(bar, bar.multiplier) for bar in bars]
         frame = Frame(market, symbol, timeframe, {p.open_time: p for p in points})
         for name, indicator in indicators.get(timeframe, {}).items():
             frame.values[name] = {v.open_time: v for v in compute(indicator, points, frame.step)}

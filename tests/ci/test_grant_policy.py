@@ -28,6 +28,10 @@ def test_the_exact_matrix_respects_section_9() -> None:
         Grant("kbot_ingest", "select", TABLE, "config.risk_limits"),
         Grant("kbot_news", "select", TABLE, "trading.intents"),
         Grant("kbot_strategy", "insert", TABLE, "trading.approved_orders"),
+        # F3-A10: kbot_strategy only inserts signals and intents (02 §12.6.3).
+        Grant("kbot_strategy", "insert", TABLE, "market.candles"),
+        Grant("kbot_strategy", "insert", TABLE, "config.strategy_versions"),
+        Grant("kbot_strategy", "insert", TABLE, "ops.events"),
         Grant("kbot_broker", "insert", TABLE, "trading.risk_decisions"),
         Grant("kbot_web", "insert", TABLE, "trading.risk_reservations"),
         Grant("kbot_web", "insert", TABLE, "config.risk_limits"),

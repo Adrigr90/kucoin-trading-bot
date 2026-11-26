@@ -96,6 +96,16 @@ PARTITION_FUNCTIONS = (
     "market.retire_day(date)",
 )
 ARCHIVE_EXECUTABLE = frozenset({"market.prepare_partitions()", "market.seal_day(date)"})
+# Phase 3, stage F3-E5b (02 §12.6.3; F3-A10): svc-strategy reads the recorded candles, the
+# instruments, the universe and the approved versions, and inserts signals. Nothing else.
+STRATEGY_READS = (
+    "market.candles",
+    "market.instruments",
+    "market.universe_snapshots",
+    "config.strategy_versions",
+)
+# §9: kbot_strategy inserts signals and intents (the intents arrive with the phase 4).
+STRATEGY_WRITABLE = frozenset({"trading.signals", "trading.intents"})
 
 ALLOWED_GRANTS: frozenset[Grant] = frozenset(
     {
@@ -119,6 +129,10 @@ ALLOWED_GRANTS: frozenset[Grant] = frozenset(
         ),
         *(Grant("kbot_archive", "insert", TABLE, table) for table in ARCHIVE_WRITABLE),
         *(Grant("kbot_archive", "execute", FUNCTION, name) for name in ARCHIVE_EXECUTABLE),
+        # svc-strategy (02 §12.6.3): reads, and inserts its signals.
+        *(Grant("kbot_strategy", "usage", SCHEMA, s) for s in ("market", "trading", "config")),
+        *(Grant("kbot_strategy", "select", TABLE, table) for table in STRATEGY_READS),
+        Grant("kbot_strategy", "insert", TABLE, "trading.signals"),
     }
 )
 
@@ -171,6 +185,8 @@ def section_9_conflict(grant: Grant) -> str | None:
         return f"§9: kbot_risk cannot execute; it cannot write {grant.target}"
     if writes and grant.role == "kbot_telegram" and grant.target not in TELEGRAM_WRITABLE:
         return f"§9: kbot_telegram may only request a pause, not write {grant.target}"
+    if writes and grant.role == "kbot_strategy" and grant.target not in STRATEGY_WRITABLE:
+        return f"§9: kbot_strategy only inserts signals and intents, not {grant.target}"
     return None
 
 

@@ -186,3 +186,60 @@ def test_f3e5b_01_who_counts_at_each_instant() -> None:
     assert universe.at(day - timedelta(seconds=1)) == frozenset()
     assert universe.during(day.date()) == {x, y}
     assert universe.during((day + timedelta(days=1)).date()) == {y}
+
+
+def test_f3e5b_05_a_minute_partly_uncertain_has_an_unknown_multiplier() -> None:
+    """The reviewer's case, with seconds: 0.01 at 00:00 and at 11:59:30, and 0.001 at
+    14:00:20. The uncertainty starts at 11:59:30, so the minute [11:59, 12:00) is unknown,
+    and the detection at 14:00:20 leaves [14:00, 14:01) unknown too."""
+    day = datetime(2026, 1, 5, tzinfo=UTC)
+    stored = [
+        Observation(day, Decimal("0.01")),
+        Observation(day + timedelta(hours=11, minutes=59, seconds=30), Decimal("0.01")),
+        Observation(day + timedelta(hours=14, seconds=20), Decimal("0.001")),
+    ]
+
+    def at(hours: int, minutes: int) -> datetime:
+        return day + timedelta(hours=hours, minutes=minutes)
+
+    assert multiplier_at(stored, at(11, 58)) == Decimal("0.01")
+    assert multiplier_at(stored, at(11, 59)) is None
+    assert multiplier_at(stored, at(13, 59)) is None
+    assert multiplier_at(stored, at(14, 0)) is None
+    assert multiplier_at(stored, at(14, 1)) == Decimal("0.001")
+    # A first observation inside a minute leaves that minute unknown.
+    assert multiplier_at([Observation(day + timedelta(seconds=30), Decimal("0.01"))], day) is None
+    # The minute and its aggregates lose V and reset the volume; P and T stay.
+    rows = [row(at(11, 0) + i * MINUTE) for i in range(60)]
+    indicators = {
+        "1m": {"rvol": RelativeVolume(5), "ema": EMA(5)},
+        "15m": {"vwap": VWAP(), "ema": EMA(2)},
+    }
+    minutes = minutes_from_rows("FUTURES", "XUSDTM", rows, stored)
+    frames = build_frames(
+        minutes, downloaded_until=at(12, 0), timeframes=("15m",), indicators=indicators
+    )
+    one, quarter = frames["1m"], frames["15m"]
+    assert one.points[at(11, 59)].volume_quality is Quality.DISCREPANTE
+    assert one.points[at(11, 58)].volume_quality is Quality.SOLO_REST
+    assert at(11, 59) not in one.values["rvol"] and at(11, 58) in one.values["rvol"]
+    assert at(11, 59) in one.values["ema"]  # the price is not touched
+    assert quarter.points[at(11, 45)].volume_quality is Quality.DISCREPANTE
+    assert quarter.points[at(11, 30)].volume_quality is Quality.SOLO_REST
+    assert at(11, 45) not in quarter.values["vwap"]
+    assert at(11, 45) in quarter.values["ema"]
+    assert (quarter.points[at(11, 45)].price, quarter.points[at(11, 45)].time) == (
+        Quality.SOLO_REST,
+        Quality.SOLO_REST,
+    )
+
+
+@pytest.mark.parametrize(
+    "observations",
+    [[], [Observation(T0 + timedelta(seconds=30), Decimal(1))]],
+    ids=["sin observaciones", "la primera dentro del minuto"],
+)
+def test_f3e5b_06_spot_always_has_the_multiplier_1(observations: list[Observation]) -> None:
+    (minute,) = minutes_from_rows("SPOT", "BTC-USDT", [row(T0)], observations)
+    assert minute.multiplier == 1.0
+    assert minute.volume is Quality.SOLO_REST  # that of its state, cerrada_rest

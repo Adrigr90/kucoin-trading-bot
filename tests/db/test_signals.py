@@ -4,7 +4,10 @@ written as the recorder writes them, without network."""
 
 from __future__ import annotations
 
+import os
 import secrets
+import shutil
+import socket
 import subprocess
 import sys
 import textwrap
@@ -400,28 +403,33 @@ def test_svc_strategy_writes_the_engine_signals_of_the_recorded_candles(
     Service(fichas, COMMIT).cycle(open_view, write, now)
     assert stored(admin, symbol) == wanted
 
-    # Without network: a new process runs the same cycle with every AF_INET or AF_INET6
-    # connection and every name resolution refused; it works through the Unix socket.
+    # Without network (F3E5B-07): a new process runs the same cycle in a network namespace
+    # of its own, a barrier of the operating system that also stops the native connections of
+    # libpq. A TCP connection of psycopg to a listener of the test is refused there, while
+    # the same listener answers outside; the cycle works through the Unix socket.
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    listener.settimeout(5)
+    port = listener.getsockname()[1]
+    with socket.create_connection(("127.0.0.1", port), timeout=5):
+        accepted, _ = listener.accept()  # outside the namespace, the listener answers
+        accepted.close()
     code = textwrap.dedent(
         f"""
-        import socket, sys
+        import sys
         from datetime import datetime
         sys.path.insert(0, {str(REPO)!r})
-
-        def refuse(event, args):
-            if event == "socket.getaddrinfo":
-                raise PermissionError("no network: name resolution")
-            if event == "socket.connect" and args[0].family in (socket.AF_INET, socket.AF_INET6):
-                raise PermissionError("no network: " + repr(args[1]))
-
-        sys.addaudithook(refuse)
-        try:
-            socket.create_connection(("127.0.0.1", 9), timeout=1)
-        except PermissionError:
-            pass
-        else:
-            raise SystemExit("the guard did not refuse the network")
         import psycopg
+        try:
+            psycopg.connect(
+                host="127.0.0.1", hostaddr="127.0.0.1", port={port}, dbname="kbot",
+                user="kbot_strategy", connect_timeout=3,
+            )
+        except psycopg.OperationalError as error:
+            print("tcp refused:", str(error).strip().splitlines()[0], file=sys.stderr)
+        else:
+            raise SystemExit("libpq reached the TCP listener: there is network")
         from kbot.strategies.service import Service, postgres
         from tests.unit.strategies.support import short_fichas
         open_view, write = postgres(
@@ -434,8 +442,42 @@ def test_svc_strategy_writes_the_engine_signals_of_the_recorded_candles(
         """
     )
     finished = subprocess.run(
-        [sys.executable, "-c", code], capture_output=True, text=True, timeout=600, check=False
+        [*without_network(), sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        timeout=600,
+        check=False,
     )
     assert finished.returncode == 0, finished.stderr
+    assert "tcp refused" in finished.stderr
     assert int(finished.stdout.strip()) == len(wanted)
     assert stored(admin, symbol) == wanted
+    listener.settimeout(0.5)
+    with pytest.raises(TimeoutError):
+        listener.accept()  # nothing from inside the namespace ever reached it
+    listener.close()
+
+
+def without_network() -> list[str]:
+    """The prefix that runs a command in a new network namespace, as the user of the tests:
+    ``unshare --net`` needs root, and ``setpriv`` gives the process back its user, so that
+    PostgreSQL authenticates it by peer as before."""
+    found = {
+        name: shutil.which(name, path="/usr/bin:/bin:/usr/sbin:/sbin")
+        for name in ("sudo", "unshare", "setpriv")
+    }
+    missing = [name for name, where in found.items() if where is None]
+    if missing:
+        if os.environ.get("KBOT_CI"):
+            pytest.fail(f"{missing} are required in the CI")
+        pytest.skip(f"{missing} not installed")
+    return [
+        str(found["sudo"]),
+        "-n",
+        str(found["unshare"]),
+        "--net",
+        str(found["setpriv"]),
+        f"--reuid={os.getuid()}",
+        f"--regid={os.getgid()}",
+        "--init-groups",
+    ]

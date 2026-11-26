@@ -20,7 +20,10 @@
   ``market.instruments`` visible in the cut, in order: unknown before the first; between
   two in a row with the same multiplier, theirs; between two in a row that change it,
   unknown over the whole interval, from the earlier one to the one that detects the change;
-  from the last one on, its own. A minute of an unknown multiplier has its V not valid.
+  from the last one on, its own. **A minute has a multiplier only if it is known and the
+  same in the whole minute** (F3E5B-05): if any part of it falls in an unknown interval,
+  its multiplier is unknown and its V not valid. **Spot always has 1** (F3E5B-06), whatever
+  the observations.
 * **The universe, at each instant** (F3E5B-01): an instrument counts at ``D_s`` if the last
   visible evaluation with ``evaluated_at`` at or before ``D_s`` has it in the universe.
 """
@@ -97,17 +100,28 @@ class Evaluation:
 
 
 def multiplier_at(observations: Sequence[Observation], minute: datetime) -> Decimal | None:
-    """The multiplier of the minute that opens at ``minute``; None when it is unknown.
-    ``observations`` are those visible, in order of ``observed_at``."""
+    """The multiplier of the minute [minute, minute + 1 min); None when it is unknown in
+    any part of it (F3E5B-05). ``observations`` are those visible, in order of
+    ``observed_at``."""
+    start = as_utc(minute, "minute")
+    end = start + MINUTE
     times = [o.observed_at for o in observations]
-    index = bisect_right(times, as_utc(minute, "minute")) - 1
+    index = bisect_right(times, start) - 1
     if index < 0:
         return None  # before the first observation of the instrument
-    held = observations[index]
+    value = observations[index].multiplier
+    # Every observation inside the minute must keep it: from each, the multiplier is the
+    # one it says, and a change inside would make part of the minute unknown.
+    while index + 1 < len(observations) and observations[index + 1].observed_at < end:
+        index += 1
+        if observations[index].multiplier != value:
+            return None
+    # The interval from the last observation before the end goes on to the next one: if
+    # that one changes it, the change happened somewhere in between, this minute included.
     following = observations[index + 1] if index + 1 < len(observations) else None
-    if following is not None and following.multiplier != held.multiplier:
-        return None  # the change happened somewhere in [held, following)
-    return held.multiplier
+    if following is not None and following.multiplier != value:
+        return None
+    return value
 
 
 def minute_from_row(
@@ -137,6 +151,8 @@ def minute_from_row(
 def minutes_from_rows(
     market: str, symbol: str, rows: Iterable[CandleRow], observations: Sequence[Observation]
 ) -> list[MinuteCandle]:
+    if market == "SPOT":  # always 1 (§3.8), whatever the observations (F3E5B-06)
+        return [minute_from_row(market, symbol, row, Decimal(1)) for row in rows]
     ordered = sorted(observations, key=lambda o: o.observed_at)
     return [
         minute_from_row(market, symbol, row, multiplier_at(ordered, row.open_time)) for row in rows

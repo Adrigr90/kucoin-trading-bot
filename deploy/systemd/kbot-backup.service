@@ -1,9 +1,13 @@
-# kbot: the hourly local backup, as kbot_backup (02 §13.1, point 4; stage E4c-1): a copy
-# of each sealed day that has none yet, the hot copy of the whole database from one
+# kbot: the hourly local backup, as kbot_backup (02 §13.1, point 4; stages E4c-1 and E4c-2):
+# a copy of each sealed day that has none yet, the hot copy of the database from one
 # snapshot, and the local retention. Every copy is encrypted with age before it is kept.
-# In E4c-1 nothing leaves the server: no network at all, only the socket of PostgreSQL;
-# stage E4c-2 opens the way to Object Storage. The timer runs it at minute 40, far from
-# the daily archive (00:20 UTC), whose seal must not wait for the locks of a dump.
+# No network at all, only the socket of PostgreSQL: the upload to Object Storage is
+# kbot-upload, another user without access to the database. The hot copy leaves out the
+# sealed days whose copy kbot-upload verified in the bucket (/srv/kbot/subidas/estado.json,
+# readable through the group kbot_backup). UMask=0027 and the setgid directory leave each
+# copy readable by the group kbot_upload, and by no one else.
+# The timer runs it at minute 40, far from the daily archive (00:20 UTC), whose seal must
+# not wait for the locks of a dump.
 # @resources is not denied: age is a Go program and raises its open file limit at start.
 [Unit]
 Description=kbot: local backup of the database (hot copy and sealed days)
@@ -43,7 +47,7 @@ SystemCallFilter=~@privileged
 SystemCallErrorNumber=EPERM
 CapabilityBoundingSet=
 AmbientCapabilities=
-UMask=0077
+UMask=0027
 ReadWritePaths=/srv/kbot/backups
 RestrictAddressFamilies=AF_UNIX
 IPAddressDeny=any

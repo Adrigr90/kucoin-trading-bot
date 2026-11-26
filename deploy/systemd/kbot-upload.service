@@ -1,0 +1,52 @@
+# kbot: the upload of the copies to Object Storage, as kbot_upload (02 §13.1, point 4;
+# stage E4c-2). kbot_upload has no role in PostgreSQL and no access to the database: it
+# reads only the copies kbot-backup already published, which are encrypted with public
+# keys, and writes only its state in /srv/kbot/subidas. It is the only service the metadata
+# guard lets reach the instance metadata (E4-D04), from which the SDK of Oracle takes the
+# instance principal: no credential is ever on the disk. kbot-backup, which reads the
+# whole database, keeps no network at all.
+# Its network: Oracle's public endpoints and the metadata; no private network and no other
+# link-local address. The timer runs it at minute 55, after the hot copy of minute 40.
+[Unit]
+Description=kbot: upload of the encrypted copies to Object Storage
+Documentation=file:///opt/kbot/docs/especificacion/02_Especificacion_vigente.md
+After=network-online.target kbot-metadata-guard.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=kbot_upload
+Group=kbot_upload
+WorkingDirectory=/opt/kbot
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/kbot/.venv/bin/python -m kbot.upload run
+TimeoutStartSec=50min
+Nice=10
+IOSchedulingClass=idle
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0027
+ReadWritePaths=/srv/kbot/subidas
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+IPAddressDeny=10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 169.254.0.0/16 fc00::/7 fe80::/10
+IPAddressAllow=169.254.169.254

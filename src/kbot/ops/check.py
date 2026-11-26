@@ -40,7 +40,14 @@ class CommandFailed(Exception):
     pass
 
 
-SERVICE_USERS = ("kbot_ingest", "kbot_archive", "kbot_backup", "kbot_restore", "kbot_sync")
+SERVICE_USERS = (
+    "kbot_ingest",
+    "kbot_archive",
+    "kbot_backup",
+    "kbot_upload",
+    "kbot_restore",
+    "kbot_sync",
+)
 # Only SSH listens on the network (02 §9). PostgreSQL has listen_addresses = '' and
 # systemd-resolved listens on 127.0.0.53, which is the loopback and not the network.
 LISTENING_ALLOWED = {("0.0.0.0", "22"), ("[::]", "22"), ("*", "22")}  # noqa: S104
@@ -328,11 +335,12 @@ def service_users(passwd: str) -> Verdict:
 
 GUARD_ADDRESS = "169.254.169.254"
 GUARD_PORTS = {80, 443}
-# Who may reach the metadata now: root, and snap_daemon, the user the Oracle Cloud Agent
-# runs as (a snap; on the instance, 17 Nov 2026, its updater was connected to the metadata).
-# Stage E4c adds kbot_backup, in the guard, in netcheck and here at the same time (review
-# of E4a, E4a-04).
-METADATA_ALLOWED = frozenset({"root", "snap_daemon"})
+# Who may reach the metadata: root, snap_daemon, the user the Oracle Cloud Agent runs as (a
+# snap; on the instance, 17 Nov 2026, its updater was connected to the metadata), and from
+# stage E4c-2 kbot_upload, the user of the uploads, which has no access to the database
+# (02 §13.1, point 4, E4c-2, point 1). The guard, netcheck and this check change together
+# (review of E4a, E4a-04); kbot_backup, which reads the whole database, stays rejected.
+METADATA_ALLOWED = frozenset({"root", "snap_daemon", "kbot_upload"})
 # The ids the guard names by number, the same on every Ubuntu: snapd gives snap_daemon a
 # fixed id. nft prints a user by name when the system knows it, and by number otherwise.
 _FIXED_UIDS = {0: "root", 584788: "snap_daemon"}

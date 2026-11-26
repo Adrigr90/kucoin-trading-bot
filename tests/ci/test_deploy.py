@@ -176,11 +176,22 @@ def test_metadata_guard_is_valid_nftables_and_manages_only_its_table() -> None:
     text = guard.read_text(encoding="utf-8")
     assert "flush ruleset" not in text  # E4a-01: never the whole ruleset
     assert text.count("table inet kbot_guard") >= 2 and "delete table inet kbot_guard" in text
-    # Root and snap_daemon (the Oracle Cloud Agent) by their fixed ids, in IPv4 and IPv6.
-    assert text.count("meta skuid != { 0, 584788 } counter reject") == 2
+    # Root and snap_daemon (the Oracle Cloud Agent) by their fixed ids and, from E4c-2,
+    # kbot_upload by name, in IPv4 and IPv6; never kbot_backup.
+    assert text.count("meta skuid != { 0, 584788, kbot_upload } counter reject") == 2
+    assert "kbot_backup }" not in text
     nft = tool("nft")
+    # nft resolves the name when it reads the rule: the user must exist, as on the server.
+    made = run(*as_root("bash", "-c", _USER.replace("@USER@", "kbot_upload")))
+    assert made.returncode == 0, made.stderr
     done = run(*as_root(nft, "-c", "-f", str(guard)))
     assert done.returncode == 0, done.stderr
+
+
+_USER = (
+    "getent passwd @USER@ >/dev/null || "
+    "useradd --system --shell /usr/sbin/nologin --no-create-home @USER@"
+)
 
 
 def test_uv_checksum_is_pinned_for_the_server() -> None:
@@ -198,73 +209,133 @@ def test_the_local_backups_run_without_network_and_keep_no_plain_dump() -> None:
     objects as postgres, neither with any network (only the socket of PostgreSQL); the
     installation stops on a private key or a plain dump left on the disk."""
     backup = (DEPLOY / "systemd" / "kbot-backup.service").read_text(encoding="utf-8")
+    previa = (DEPLOY / "systemd" / "kbot-backup-previa.service").read_text(encoding="utf-8")
     globals_unit = (DEPLOY / "systemd" / "kbot-backup-globals.service").read_text(encoding="utf-8")
-    assert "User=kbot_backup" in backup and "-m kbot.backup run" in backup
+    assert "User=kbot_backup" in backup and "-m kbot.backup run\n" in backup
+    assert "User=kbot_backup" in previa and "-m kbot.backup run --previa\n" in previa
     assert "User=postgres" in globals_unit and "-m kbot.backup globals" in globals_unit
-    for unit in (backup, globals_unit):
+    for unit in (backup, previa, globals_unit):
         assert "IPAddressDeny=any" in unit and "RestrictAddressFamilies=AF_UNIX\n" in unit
         assert "@resources" not in unit.split("[Service]")[1].replace("#", "")  # age is Go
+        assert "UMask=0027" in unit  # E4c-2: the group kbot_upload reads each copy
     assert "ReadWritePaths=/srv/kbot/backups\n" in backup
+    assert "ReadWritePaths=/srv/kbot/backups\n" in previa
     assert "ReadWritePaths=/srv/kbot/backups/globales\n" in globals_unit
     timer = (DEPLOY / "systemd" / "kbot-backup.timer").read_text(encoding="utf-8")
     assert "OnCalendar=*-*-* *:40:00" in timer  # far from the archive at 00:20 UTC
     install = (DEPLOY / "install" / "05_copias.sh").read_text(encoding="utf-8")
     assert "AGE-SECRET-KEY" in install and "volcado.dump" in install
-    assert "install -d -o postgres -g kbot_backup -m 2750" in install
-    assert "SupplementaryGroups=kbot_backup" in globals_unit and "UMask=0027" in globals_unit
+    assert "install -d -o postgres -g kbot_upload -m 2750" in install
+    assert "SupplementaryGroups=kbot_upload" in globals_unit
 
 
-# As root: the directories of the copies with the very lines of 05_copias.sh, and the real
-# users. postgres, as its unit runs it (SupplementaryGroups=kbot_backup, UMask=0027), must
-# reach its directory and publish a copy that kbot_backup reads but cannot change; without
-# that group it must not even reach it (review of E4c-1, E4c1-01).
-_GLOBALS_LAYOUT = r"""
+# As root: the directories of the copies and of the uploads with the very lines of
+# 05_copias.sh, and the real users (02 §13.1, point 4, E4c-2, point 7). Each writer runs as
+# its unit runs it, with UMask=0027 (postgres with the group of its unit). kbot_upload
+# reads every copy and the register and cannot change any of them; kbot_backup reads the
+# state of the uploads and cannot change it; postgres without its group does not even
+# reach its directory (review of E4c-1, E4c1-01).
+_LAYOUT = r"""
 set -e
 root="$(mktemp -d /tmp/kbot-copias.XXXXXX)"
 trap 'rm -rf "$root"' EXIT
 chmod 0755 "$root"
-getent passwd kbot_backup >/dev/null ||
-  useradd --system --shell /usr/sbin/nologin --no-create-home kbot_backup
+for user in kbot_backup kbot_upload; do
+  getent passwd "$user" >/dev/null ||
+    useradd --system --shell /usr/sbin/nologin --no-create-home "$user"
+done
 getent passwd postgres >/dev/null
 backups="$root/backups"
+uploads="$root/subidas"
 @LAYOUT@
+as() { user="$1"; shift; setpriv --reuid="$user" --regid="$user" --init-groups -- "$@"; }
+must_fail() { if "$@" 2>/dev/null; then echo "allowed: $*"; exit 1; fi; }
 if setpriv --reuid=postgres --regid=postgres --clear-groups -- \
   ls "$backups/globales" 2>/dev/null; then
   echo "postgres reached the globals without the group of its unit"
   exit 1
 fi
-setpriv --reuid=postgres --regid=postgres --groups=kbot_backup -- sh -c '
+setpriv --reuid=postgres --regid=postgres --groups=kbot_upload -- sh -c '
   umask 0027
   d="$1/globales"
-  : > "$d/.lock"
   mkdir "$d/.globales-1.tmp"
   echo cifrado > "$d/.globales-1.tmp/volcado.age"
   mv "$d/.globales-1.tmp" "$d/globales-1"
 ' sh "$backups"
-setpriv --reuid=kbot_backup --regid=kbot_backup --init-groups -- \
-  cat "$backups/globales/globales-1/volcado.age"
-if setpriv --reuid=kbot_backup --regid=kbot_backup --init-groups -- \
-  touch "$backups/globales/x" 2>/dev/null; then
-  echo "kbot_backup can write the globals"
-  exit 1
-fi
-stat -c 'mode %G %a' "$backups/globales/globales-1/volcado.age"
+as kbot_backup sh -c '
+  umask 0027
+  mkdir "$1/.caliente-1.tmp"
+  echo cifrada > "$1/.caliente-1.tmp/volcado.age"
+  mv "$1/.caliente-1.tmp" "$1/caliente-1"
+  echo "{}" >> "$1/registro.jsonl"
+' sh "$backups"
+as kbot_upload sh -c 'umask 0027; echo "{}" > "$1/estado.json"' sh "$uploads"
+as kbot_upload cat "$backups/globales/globales-1/volcado.age" "$backups/caliente-1/volcado.age"
+as kbot_upload cat "$backups/registro.jsonl" >/dev/null
+must_fail as kbot_upload touch "$backups/x"
+must_fail as kbot_upload touch "$backups/caliente-1/x"
+must_fail as kbot_upload sh -c "echo x >> '$backups/caliente-1/volcado.age'"
+must_fail as kbot_upload touch "$backups/globales/x"
+as kbot_backup cat "$uploads/estado.json" >/dev/null
+must_fail as kbot_backup touch "$uploads/x"
+must_fail as kbot_backup sh -c "echo x >> '$uploads/estado.json'"
+stat -c 'mode %n %G %a' "$backups/globales/globales-1/volcado.age" \
+  "$backups/caliente-1" "$backups/caliente-1/volcado.age" "$uploads/estado.json"
 """
 
 
-def test_the_global_objects_reach_their_directory_with_the_real_modes() -> None:
+def test_the_copies_and_the_state_of_the_uploads_have_the_real_modes() -> None:
     tool("setpriv")
     install = (DEPLOY / "install" / "05_copias.sh").read_text(encoding="utf-8")
     layout = [
         line.strip()
         for line in install.splitlines()
-        if line.strip().startswith("install -d -o") and '"$backups' in line
+        if line.strip().startswith("install -d -o") and ('"$backups' in line or '"$uploads' in line)
     ]
-    assert len(layout) == 2, layout  # the directory of the copies and that of the globals
-    script = _GLOBALS_LAYOUT.replace("@LAYOUT@", "\n".join(layout))
-    done = run(*as_root("bash", "-c", script))
+    assert len(layout) == 3, layout  # the copies, the global objects and the uploads
+    done = run(*as_root("bash", "-c", _LAYOUT.replace("@LAYOUT@", "\n".join(layout))))
     assert done.returncode == 0, done.stdout + done.stderr
-    assert "cifrado" in done.stdout and "mode kbot_backup 640" in done.stdout, done.stdout
+    assert "cifrado\ncifrada" in done.stdout, done.stdout
+    for line in (
+        "globales-1/volcado.age kbot_upload 640",
+        "caliente-1 kbot_upload 2750",
+        "caliente-1/volcado.age kbot_upload 640",
+        "estado.json kbot_backup 640",
+    ):
+        assert line in done.stdout, done.stdout
+
+
+def test_the_uploads_have_network_and_no_database_and_the_backups_the_opposite() -> None:
+    """E4c-2 (02 §13.1, point 4, E4c-2, point 1): kbot_upload, with no role in PostgreSQL,
+    reaches Oracle's public endpoints and the metadata, and nothing private or link-local
+    else; it writes only its state. The timer runs it after the hot copy."""
+    unit = (DEPLOY / "systemd" / "kbot-upload.service").read_text(encoding="utf-8")
+    assert "User=kbot_upload" in unit and "-m kbot.upload run\n" in unit
+    assert "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6\n" in unit
+    deny = next(line for line in unit.splitlines() if line.startswith("IPAddressDeny="))
+    for network in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16"):
+        assert network in deny
+    assert "IPAddressAllow=169.254.169.254\n" in unit
+    assert "ReadWritePaths=/srv/kbot/subidas\n" in unit and "UMask=0027" in unit
+    assert "kbot.backup" not in unit and "SupplementaryGroups" not in unit
+    timer = (DEPLOY / "systemd" / "kbot-upload.timer").read_text(encoding="utf-8")
+    assert "OnCalendar=*-*-* *:55:00" in timer
+    roles = (ROOT / "sql" / "roles.sql").read_text(encoding="utf-8")
+    assert "kbot_upload" not in roles  # no role in PostgreSQL
+    # The user exists before the guard names it: in 01 for a new server, in 05 for this one.
+    system = (DEPLOY / "install" / "01_sistema.sh").read_text(encoding="utf-8")
+    assert system.index("kbot_backup kbot_upload") < system.index("metadata-guard.nft")
+    install = (DEPLOY / "install" / "05_copias.sh").read_text(encoding="utf-8")
+    assert (
+        install.index("useradd")
+        < install.index("nft -c -f")
+        < install.index("systemctl reload kbot-metadata-guard")
+    )
+    assert "kbot-guardcheck@$user" in install and "kbot_upload kbot_backup" in install
+    assert install.index("systemctl start kbot-upload.service") < install.index("enable --now")
+    # From E4c-2 every update starts with the self-contained copy (E4c-2, point 4).
+    code = (DEPLOY / "install" / "02_codigo.sh").read_text(encoding="utf-8")
+    assert code.index("kbot-backup-previa.service") < code.index("checkout --quiet")
 
 
 def test_backup_recipients_are_two_public_keys_and_no_secret() -> None:

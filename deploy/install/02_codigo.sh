@@ -25,6 +25,15 @@ tarball="uv-aarch64-unknown-linux-gnu.tar.gz"
 
 step() { printf '\n== %s\n' "$*"; }
 
+# From stage E4c-2: before the code changes, a self-contained copy of the database and the
+# global objects (02 §13.1, point 4, E4c-2, point 4). Until 05_copias.sh installs the unit
+# there is nothing to start. A backup that is running makes this one fail: run the script
+# again once it ends.
+if systemctl cat kbot-backup-previa.service >/dev/null 2>&1; then
+  step "the copies before the update"
+  systemctl start kbot-backup-previa.service kbot-backup-globals.service
+fi
+
 step "the clone at $tag"
 git -C "$repo" fetch --tags origin
 git -C "$repo" -c advice.detachedHead=false checkout --quiet "refs/tags/$tag"

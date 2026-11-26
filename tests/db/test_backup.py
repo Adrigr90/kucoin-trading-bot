@@ -318,6 +318,79 @@ def test_fingerprints_see_a_changed_value_and_a_moved_partition_bound(
             admin.execute(f"DROP SCHEMA {schema} CASCADE")
 
 
+def test_the_hot_copy_leaves_out_the_data_of_a_day_and_the_previa_never_does(
+    connect: Connect,
+    partitions: Partitions,
+    dsn: str,
+    identities: tuple[list[Path], Path],
+    tmp_path: Path,
+) -> None:
+    """E4c-2 (02 §13.1, point 4, E4c-2, point 4): a day whose copy is verified in the
+    bucket stays out of the hot copy by partition (``--exclude-table-data``), with its
+    tables kept empty for the restore; the manifest marks its partitions ``excluido``, with
+    the rows and fingerprints of the day copy, and fixes the identity of that copy and the
+    generation of the day. The copy taken before an update leaves out nothing."""
+    keys, recipients = identities
+    directory = tmp_path / "copias"
+    directory.mkdir()
+    day = date(2015, 3, 21)
+    sealed_day(connect, partitions, day)
+    day_copy = local.sealed_day_copy(directory, recipients, day, now=NOW, dsn=dsn)
+    root = tmp_path / "archivo"
+    root.mkdir()
+    archiver.archive_pending(lambda: connect("kbot_archive"), root)
+    with connect("kbot_archive") as archive:
+        row = archive.execute(
+            "SELECT generation_id FROM market.archive_generations WHERE day = %s", (day,)
+        ).fetchone()
+    assert row is not None
+    dependency = {
+        "copia": day_copy.path.name,
+        "objeto": f"dia/{day_copy.path.name}/volcado.age",
+        "sha256": "1" * 64,
+        "objeto_manifiesto": f"dia/{day_copy.path.name}/manifiesto.json",
+        "sha256_manifiesto": "2" * 64,
+        "verificada": NOW.isoformat(),
+    }
+    hot = local.hot_copy(
+        directory, recipients, now=NOW, dsn=dsn, omit={day: dependency}, listing="L1"
+    )
+    manifest = hot.manifest
+    assert manifest["listado"] == "L1"
+    assert manifest["dias_excluidos"] == [
+        {"dia": day.isoformat(), "copia_de_dia": dependency, "generacion": str(row[0])}
+    ]
+    assert set(manifest["archivo"]) == {"dias_elegibles", "generaciones_verificadas_fuera"}
+    for partition in day_copy.manifest["particiones"]:
+        assert manifest["tablas"][partition["particion"]] == {
+            "modo": "excluido",
+            "filas": partition["filas"],
+            "huella": partition["huella"],
+            "origen": day_copy.path.name,
+        }
+    compact = f"{day:%Y%m%d}"
+    listing = restore_listing(decrypt(keys[0], hot.path / local.DUMP, tmp_path / "hot.dump"))
+    for name in archiver.TABLES:
+        assert f"TABLE market {name}_p{compact} " in listing, name  # restored empty, sealed
+        assert f"TABLE DATA market {name}_p{compact} " not in listing, name
+    previa = local.previa_copy(directory, recipients, now=NOW.replace(hour=11), dsn=dsn)
+    assert previa.path.name == "previa-20261117T114000Z"
+    assert previa.manifest["clase"] == "previa" and previa.manifest["dias_excluidos"] == []
+    assert previa.manifest["listado"] is None
+    listing = restore_listing(decrypt(keys[1], previa.path / local.DUMP, tmp_path / "pre.dump"))
+    for name in archiver.TABLES:
+        assert f"TABLE DATA market {name}_p{compact} " in listing, name
+    # A day that is not sealed cannot be left out.
+    with pytest.raises(local.BackupError, match="not sealed"):
+        local.hot_copy(
+            directory,
+            recipients,
+            now=NOW.replace(hour=12),
+            dsn=dsn,
+            omit={date(2015, 3, 22): dependency},
+        )
+
+
 def test_a_copy_that_fails_leaves_nothing_on_the_disk(dsn: str, tmp_path: Path) -> None:
     """age rejects the recipients after pg_dump wrote the plain dump: the attempt goes."""
     broken = tmp_path / "recipients.txt"

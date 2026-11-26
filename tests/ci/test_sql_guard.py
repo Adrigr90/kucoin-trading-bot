@@ -203,7 +203,9 @@ def test_migration_modules_cannot_run_their_own_sql(module: str) -> None:
 
 @pytest.fixture(scope="module")
 def valid_module(repo_root: Path) -> str:
-    module = next((repo_root / "migrations" / "versions").glob("*.py"))
+    # The first migration, by name: the order of glob() depends on the file system, and with
+    # 0004 the CI runner sometimes listed another one first.
+    module = sorted((repo_root / "migrations" / "versions").glob("*.py"))[0]
     return module.read_text(encoding="utf-8")
 
 

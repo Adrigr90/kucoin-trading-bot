@@ -2682,7 +2682,7 @@ Fija la migración `0004`, con `trading.signals` y `config.strategy_versions`; l
 - **Pruebas:** las unitarias de retención, intentos y destinatarios; en la CI, contra PostgreSQL y con dos identidades de prueba (nunca las del propietario): una fila insertada después de la instantánea no se cuenta ni se vuelca; el volcado se descifra con cualquiera de las dos identidades y su SHA-256 es el del manifiesto; la copia de un día sellado tiene las mismas filas y huellas que su generación de E3; una copia que falla no deja nada en el disco, tampoco el volcado en claro; los objetos globales llevan los roles. Tras la revisión: la copia caliente reutiliza las huellas de los días sellados y se detiene ante unas filas distintas; una fila cambiada con el mismo recuento cambia la huella de su tabla; mover el límite de una partición cambia la huella del catálogo, y devolverlo la repite; el registro antes de publicar, con fallos inyectados en el registro y en el renombrado, una línea cortada y una copia sin su entrada; y, como root en la CI con los usuarios, grupos y modos reales de `05_copias.sh`, `postgres` llega a su directorio solo con el grupo de su unidad y `kbot_backup` lee la copia, pero no puede escribir allí.
 - **Hasta E4c-2, ningún día sellado tiene una alternativa externa verificada** (R-E4-01): la copia caliente lo lleva todo. Su tamaño y su duración crecen con los días calientes y se miden en el servidor; la exclusión llega con la subida y la relectura del cubo.
 
-**E4c-2: diseño de detalle de la subida a Object Storage** [26 nov 2026; **APROBADO** por el revisor en `ae0b217`, tras tres revisiones, con E4C2-01 a E4C2-03 resueltos e incorporados abajo; **el código, pendiente**]. Aplica el diseño aprobado de este punto 4 (cuarta revisión, 11 nov 2026). Precisa lo que aquel dejaba abierto y corrige dos cosas que no contaba: el **límite de peticiones** del nivel gratuito y **quién tiene red**.
+**E4c-2: diseño de detalle de la subida a Object Storage** [26 nov 2026; **APROBADO** por el revisor en `ae0b217`, tras tres revisiones, con E4C2-01 a E4C2-03 resueltos e incorporados abajo; **programado** en la misma rama, pendiente de la revisión del código; la cadencia de la copia caliente al cubo, pendiente del propietario (abajo, «Implementado en E4c-2»)]. Aplica el diseño aprobado de este punto 4 (cuarta revisión, 11 nov 2026). Precisa lo que aquel dejaba abierto y corrige dos cosas que no contaba: el **límite de peticiones** del nivel gratuito y **quién tiene red**.
 
 - **Lo medido en el servidor** el 26 nov 2026, con el grabador desde el 17 nov:
   - la copia caliente cifrada ocupa unos **577 MB** y tarda unos 6 minutos (5 min 48 s de CPU). Lleva todos los días, porque ninguno tiene aún alternativa externa;
@@ -2865,6 +2865,74 @@ Las cuatro dudas [P] del diseño, contrastadas por el revisor: la política del 
 **Tercera revisión del diseño de detalle de E4c-2 (26 nov 2026, `ae0b217`): APROBADO.** E4C2-03, RESUELTO: la secuencia sincroniza el archivo y, tras el cambio de nombre, el directorio antes de la petición HTTP; cualquier fallo de persistencia impide el envío, y `estado.json` tiene la misma garantía. E4C2-01 y E4C2-02 siguen RESUELTOS. Sin residuales ni hallazgos nuevos. La aprobación es del **diseño**: las pruebas nuevas, la simulación y las comprobaciones reales en Oracle se verifican con el código.
 
 **Segunda revisión del diseño de detalle de E4c-2 (26 nov 2026, `79fac56`): APROBABLE CON CORRECCIONES.** E4C2-01 y E4C2-02, RESUELTOS. E4C2-03, PARCIAL: el tope y la reserva son coherentes, pero la secuencia sincronizaba el archivo temporal y lo renombraba sin sincronizar el directorio, y tras una caída podía reaparecer el contador anterior. Corregido arriba con la secuencia completa y su prueba. Sin hallazgos nuevos. El revisor acepta los 2 días de retraso del ciclo de vida como supuesto de la simulación: un retraso mayor puede alargar el RPO, pero el límite sobre lo ocupado de verdad sigue actuando.
+
+**Implementado en E4c-2** [26 nov 2026, rama `fase-2-e4c2`, **pendiente de la revisión del código**; sin instalar]. Aplica el diseño de detalle aprobado en `ae0b217`.
+
+- **El código:**
+  - `kbot.upload`:
+    - `service` es el ciclo (puntos 3 y 4);
+    - `budget` es el contador con su tope, y `durable` la secuencia de persistencia (punto 5);
+    - `store` define lo que el servicio pide a Object Storage, y `CountedStore` cuenta cada petición, cada página y cada reintento;
+    - `oci_store` habla con Oracle con el principal de instancia, sin reintentos del SDK;
+    - `retention` aplica D25 y el residual de R-E4-01;
+    - `state` es el estado que lee `kbot-backup`.
+  - **`kbot.backup`:** `omissions` decide qué días omite la copia caliente, y `previa_copy` hace la copia previa a una actualización (`run --previa`).
+  - **Las unidades:** `kbot-upload.service`, con su temporizador a los :55, y `kbot-backup-previa.service`.
+  - **La simulación:** `tools/simular_copias.py`.
+  - **La dependencia nueva:** `oci` 2.189.0. Todas sus dependencias tienen versión para aarch64.
+- **Precisiones de la implementación:**
+  - **`kbot_upload` no tiene acceso a la base.** Lo que necesita para borrar una copia de día lo lee del manifiesto de la copia caliente más reciente, que lo leyó en su instantánea: los días elegibles y las generaciones verificadas fuera (`archivo`). Ese manifiesto está avalado por el registro.
+  - **Un día que ya es elegible no se vuelve a subir:** su copia puede acabar de salir del cubo.
+  - **Cada omisión se ata al listado.** El manifiesto de la copia caliente guarda el identificador del listado en el que se apoyó (`listado`), y la copia siguiente no lo repite (E4C2-02). Cada día omitido lleva la identidad de su copia en el cubo y la generación de ese día (la más reciente, en la instantánea).
+  - **Una copia de día rehecha en el servidor con el mismo nombre** se cifra distinto, pero lleva los mismos datos. La copia del cubo se queda, porque nunca se sobrescribe. Se verifica con su propio manifiesto: tiene que avalar el volcado que hay en el cubo y tener las mismas particiones, filas y huellas, comparadas con un SHA-256 de esa lista. La copia caliente omite el día solo si esa comparación coincide.
+  - **Los restos de un ciclo interrumpido** (copias calientes, previas o globales que nadie verificó, que no están en el servidor y tienen más de 2 días) se borran. Las copias de día solo salen por la regla del residual.
+  - **El estado da, además,** la copia caliente más reciente que hay fuera (`ultima_caliente_fuera`).
+- **Los permisos en el servidor:**
+  - `/srv/kbot/backups` pasa a `kbot_backup:kbot_upload`, `2750`, y `globales` a `postgres:kbot_upload`, `2750`. `kbot_backup` ya no lee los globales: los sube `kbot_upload`.
+  - Las tres unidades que escriben copias usan `UMask=0027`, y la de los globales tiene `SupplementaryGroups=kbot_upload`.
+  - `05_copias.sh` pasa al grupo nuevo también las copias hechas en E4c-1, que eran solo de `kbot_backup`.
+  - `/srv/kbot/subidas` es `kbot_upload:kbot_backup`, `2750`. El contador lo crea `05_copias.sh` con cero peticiones.
+- **La red de `kbot-upload`:**
+  - `IPAddressDeny=` las redes privadas, `100.64.0.0/10`, el enlace local y sus equivalentes IPv6;
+  - `IPAddressAllow=169.254.169.254`, para el principal de instancia.
+  - El DNS va por `systemd-resolved`, en el bucle local.
+- **El guardián de metadatos** exime a `kbot_upload` por su nombre, en IPv4 y en IPv6. `01_sistema.sh` crea el usuario para un servidor nuevo, y `05_copias.sh` para este, antes de recargar la regla. Comprueba desde el contexto real que `kbot_upload` llega a los metadatos y que `kbot_backup`, `kbot_ingest`, `kbot_archive` y `kbot_sync` no.
+- **`02_codigo.sh`,** una vez instalada E4c-2, arranca antes de cambiar el código la copia previa y la de los objetos globales.
+- **`05_copias.sh` termina con una primera subida de prueba.** Para hacerla tienen que existir el cubo, el grupo dinámico y la política de la guía. Se detiene si el listado no terminó bien o si la subida no quedó completa.
+- **Lo que dio la simulación** (26 nov 2026, con lo medido; `python -m tools.simular_copias`), en 120 días. En todos los casos, el máximo de peticiones en 32 días queda por debajo de 6.400, de las 45.000 del tope:
+
+  | Copia caliente al cubo | Disco externo (E4c-3) | Máximo del cubo | Primera subida que no cabe |
+  |---|---|---|---|
+  | cada hora (lo aprobado), 2 días de retraso del ciclo de vida | no | 19 GB | día 4 |
+  | cada hora, sin retraso | no | 19 GB | día 36 |
+  | cada hora | sí, días elegibles a los 14 días | 19 GB | día 4 |
+  | cada 3 horas | sí, a los 14 días | 13,1 GB | ninguna |
+  | cada 6 horas | sí, a los 14 días | 10,3 GB | ninguna |
+  | cada 6 horas, 180 días y un 10 % más cada 30 días | sí, a los 14 días | 17,6 GB | ninguna |
+  | cada 6 horas | no | 19 GB | día 50 |
+
+  - **Con la subida horaria no cabe:** cada copia caliente que sale de la retención deja una versión anterior de unos 240 MB durante uno a tres días, y eso suma unos 14 GB.
+  - **Sin el disco externo no cabe nunca:** sin E4c-3 y E4c-4 ningún día se hace elegible, así que el cubo guarda todos los días, en las copias de día y en las previas, que son autocontenidas.
+  - **La cadencia de la copia caliente al cubo** es la constante `HOT_UPLOAD_HOURS` de `kbot.upload.service`. Sube solo las copias hechas a una hora divisible por ella. **Hoy vale 1, lo aprobado, y su valor lo decide el propietario** (D25; recomendación: 6). En el servidor la copia sigue siendo horaria: frente a un fallo de la base, el RPO sigue siendo 1 h, y frente a la pérdida del servidor pasa a ser esa cadencia.
+- **Las pruebas,** en la CI:
+  - **El servicio,** con un Object Storage falso en memoria que aplica el versionado y los permisos de la política. Cubren:
+    - la subida y la relectura;
+    - un volcado de 129 MiB en un único `PutObject`, sin ninguna llamada de subida en partes, que el falso rechaza sin `OBJECT_OVERWRITE`;
+    - un nombre en uso que nunca se sobrescribe, y el `412` tras una respuesta perdida;
+    - una copia cambiada en el cubo que no se verifica, y la copia de día rehecha;
+    - los 19 GB, el modo de ahorro y el bucket sin versionado;
+    - el intento de listado anotado antes de pedirlo, y la cadencia;
+    - la retención D25 en 72 ciclos horarios y en 30 días;
+    - el caso de aceptación del residual de R-E4-01, directo y a través del servicio, con el índice perdido y rehecho desde el cubo.
+  - **El tope de peticiones:**
+    - con 0, 1, 2 y 3 restantes, un listado de 2 páginas con un reintento, y un reinicio;
+    - el orden exacto de la secuencia de persistencia, con un fallo inyectado en cada paso;
+    - la ventana de 32 días;
+    - un contador ausente o ilegible.
+  - **La omisión:** el caso de la revisión y sus tres variantes, y cada condición por separado.
+  - **Con PostgreSQL:** la copia caliente deja fuera los datos de un día por partición y conserva sus tablas, y la previa lo lleva todo.
+  - **Como root:** los permisos reales de las copias y del estado, con los usuarios reales.
+  - **El resto:** el guardián con `nft -c` y el usuario creado, las unidades con `systemd-analyze`, los guiones con `shellcheck`, y la simulación.
 
 **Revisión del diseño (11 nov 2026): APROBABLE CON CORRECCIONES.** El revisor confirmó el orden instantánea → comprobaciones → `pg_dump --snapshot` y lo contrastó en PostgreSQL 18.6 (una inserción concurrente no aparece ni en el volcado ni en el manifiesto si van en la misma instantánea). Hallazgos, todos incorporados arriba: **E4-D01** (ALTO) un recibo podía acreditar una copia externa inexistente → recibo completo, desafío en una sincronización posterior y parte confiable con garantía acotada; **E4-D02** (MEDIO) `pg_restore` reponía el sello antes de cargar el Parquet (`23514`) → restauración por fases; **E4-D03** (MEDIO) el perfil SFTP permitía reenvíos y `AllowUsers` excluía a `kbot_sync` → bloque `Match` completo con `DisableForwarding`; **E4-D04** (MEDIO) `IPAddressDeny` no acreditaba el aislamiento de metadatos → cortafuegos por usuario, comprobación desde cada contexto real y parada de la instalación si no funciona; **E4-D05** (MEDIO) faltaba el descifrado para la restauración mensual → ensayo automático con clave de prueba y restauración integral descifrada en el PC; **E4-D06** (MEDIO) el bloqueo REST no era escribible con `ProtectSystem=strict` → precreado por `tmpfiles.d` y `ReadWritePaths`; **E4-D07** (MEDIO) la cadencia semanal no garantizaba copias de 3-7 días → copia de cada día sellado una sola vez, medición del presupuesto y antigüedad de la última subida como RPO efectivo.
 
@@ -3296,3 +3364,5 @@ $$\Delta Cap=\underbrace{8}_{\text{distancia mark-stop de lo cerrado}}+\underbra
 | 26 nov 2026 | **Segunda revisión del diseño de detalle de E4c-2 (commit `79fac56`): APROBABLE CON CORRECCIONES.** E4C2-01, RESUELTO: un único `PutObject` sin subida en partes, la política sin sobrescritura y la relectura tras una respuesta perdida. E4C2-02, RESUELTO: el último intento, menos de una hora y una sola copia caliente cierran el caso anterior. E4C2-03, PARCIAL, con un residual MEDIO: la reserva sincronizaba el archivo temporal y lo renombraba, pero no sincronizaba el directorio, y tras una caída podía reaparecer el contador anterior y permitir una petición de más (`fsync(2)`). Sin hallazgos nuevos. **Verificación del revisor:** el ZIP, el commit, el diff y el paquete | Revisor |
 | 26 nov 2026 | **Residual de E4C2-03, corregido** (§13.1, punto 4, puntos 5 y 7). Antes de cada petición: archivo temporal, `fsync` del archivo, cambio de nombre, `fsync` del directorio y solo entonces la petición HTTP. Si falla cualquier paso, no se envía. `estado.json` usa la misma secuencia. La prueba registra el orden de las operaciones e inyecta un fallo en cada paso | Claude |
 | 26 nov 2026 | **Tercera revisión del diseño de detalle de E4c-2 (commit `ae0b217`): APROBADO.** E4C2-03, RESUELTO: el archivo se sincroniza y, tras el cambio de nombre, también el directorio antes de la petición HTTP; cualquier fallo de persistencia impide el envío, con la misma garantía para `estado.json`, y la prueba comprueba el orden completo e inyecta un fallo en cada paso. E4C2-01 y E4C2-02 siguen RESUELTOS. Sin residuales ni hallazgos nuevos. La aprobación es del diseño: las pruebas, la simulación y las comprobaciones en Oracle se verifican con el código. **Verificación del revisor:** el ZIP, el commit, el diff y el paquete | Revisor |
+| 26 nov 2026 | **E4c-2 programada** (rama `fase-2-e4c2`, **pendiente de la revisión del código**; §13.1, punto 4, «Implementado en E4c-2»). `kbot.upload`: el ciclo de `kbot_upload`, sin acceso a la base, con el listado anotado antes de pedirlo, cada objeto en un único `PutObject` con `If-None-Match: *`, la relectura con SHA-256, la retención D25 y el residual de R-E4-01 con su índice de dependencias, el contador con el tope de 45.000 peticiones en 32 días reservado en el disco antes de cada petición, y el principal de instancia sin reintentos del SDK. `kbot.backup`: la omisión de los días verificados en el cubo, atada a un listado de un solo uso, y la copia previa autocontenida. Las unidades `kbot-upload` y `kbot-backup-previa`, `UMask=0027` y el grupo `kbot_upload` en las copias, el guardián que exime a `kbot_upload` por nombre, `01`, `02` y `05`. Dependencia nueva: `oci` 2.189.0 | Claude |
+| 26 nov 2026 | **La simulación del presupuesto del cubo** (`tools/simular_copias.py`, con lo medido ese día: la copia caliente, 580 MB con todos los días; un día sellado, 63 MB). **Con la copia caliente al cubo cada hora, lo aprobado, no cabe en 19 GB:** cada copia que sale de la retención deja una versión anterior de unos 240 MB durante uno a tres días, unos 14 GB en total, y la primera subida que no cabe llega el día 4. Cada 6 horas, con el disco externo funcionando, el máximo es de 10,3 GB; cada 3 horas, 13,1 GB. Sin E4c-3 y E4c-4 no cabe nunca: con cada 6 horas, el día 50. **Pendiente del propietario** (D25): la cadencia de la copia caliente al cubo (`HOT_UPLOAD_HOURS`, hoy 1; recomendación: 6). En el servidor la copia sigue siendo horaria | Claude |

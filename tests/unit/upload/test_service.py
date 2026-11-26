@@ -205,6 +205,8 @@ def test_the_listing_attempt_is_written_before_its_request(tmp_path: Path) -> No
 
 
 def test_the_hot_copies_follow_the_cadence(tmp_path: Path) -> None:
+    """Every 6 hours: the owner's decision of 26 Nov 2026 (an amendment of D25)."""
+    assert service.HOT_UPLOAD_HOURS == 6
     s = Setup(tmp_path)
     for hour in (0, 5, 6, 7):
         publish(s.backups, hot_name(START.replace(hour=hour, minute=40)), b"h%d" % hour)

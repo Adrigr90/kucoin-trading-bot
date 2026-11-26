@@ -54,7 +54,7 @@ class Parameters:
     hot_manifest_kb: float = 130.0
     day_manifest_kb: float = 3.4
     globals_kb: float = 6.0
-    hot_upload_every_hours: int = 1
+    hot_upload_every_hours: int = 6  # the cadence the owner chose on 26 Nov 2026
     hourly_keep: int = 3
     daily_keep: int = 7
     weekly_keep: int = 2
@@ -290,7 +290,12 @@ def main(argv: list[str] | None = None) -> int:
     defaults = Parameters()
     parser = argparse.ArgumentParser(description="simulación del presupuesto del cubo (E4c-2)")
     parser.add_argument("--dias", type=int, default=defaults.days)
-    parser.add_argument("--subida-caliente-cada", type=int, default=1, metavar="HORAS")
+    parser.add_argument(
+        "--subida-caliente-cada",
+        type=int,
+        default=defaults.hot_upload_every_hours,
+        metavar="HORAS",
+    )
     parser.add_argument("--horarias", type=int, default=defaults.hourly_keep)
     parser.add_argument("--diarias", type=int, default=defaults.daily_keep)
     parser.add_argument("--semanales", type=int, default=defaults.weekly_keep)

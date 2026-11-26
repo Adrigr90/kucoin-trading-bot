@@ -44,9 +44,11 @@ from kbot.upload.budget import BudgetExhausted, CounterUnreadable, RequestBudget
 from kbot.upload.store import AlreadyExists, CountedStore, StoreError, Version
 
 BUDGET_BYTES = 19 * 10**9
-# The hot copies that go to the bucket: those made at an hour of the day divisible by this
-# (02 §13.1, point 4, E4c-2; the decision of the owner on the cadence).
-HOT_UPLOAD_HOURS = 1
+# The hot copies that go to the bucket: those made at an hour of the day divisible by this,
+# so those of 00:40, 06:40, 12:40 and 18:40 UTC. Owner decision of 26 Nov 2026, an
+# amendment of D25: every hour does not fit in the 20 GB (tools/simular_copias.py). On the
+# server the copy stays hourly (02 §13.1, point 4, E4c-2).
+HOT_UPLOAD_HOURS = 6
 STALE = timedelta(days=2)  # an unverified leftover of a past cycle, older than this, goes
 FOLDERS = {
     local.HOT_PREFIX: "caliente",

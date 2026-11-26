@@ -39,7 +39,7 @@
 | F2-A12 | 72 h seguidas sin intervención, dentro de lo gratuito | — | El grabador funciona desde el 17 nov 2026 a las 10:56 UTC; la medición es de E5 |
 | F2-A13 | Inactividad de Oracle: 7 días con sus métricas por encima de los umbrales | — | No empezada (E4 y E5) |
 | F2-A14 | Informe de la medición con propuestas para D26, D04 y D29 | — | No empezada (E5) |
-| F2-A15 | Coste 0 €: todo dentro de Always Free, cuenta sin pasar a pago | — | No empezada (E4 y E5). La simulación de E4c-2 (`tools/simular_copias.py`) muestra que con la copia caliente al cubo cada hora no cabe y que cada 6 horas, con el disco externo, el máximo es de 10,3 GB; la cadencia la decide el propietario. El diseño de E4c-2, APROBADO en `ae0b217`, fija los topes del cubo: 19 GB de los 20 gratuitos, y un tope obligatorio de 45.000 peticiones en cualquier ventana de 32 días, de las 50.000 al mes |
+| F2-A15 | Coste 0 €: todo dentro de Always Free, cuenta sin pasar a pago | — | No empezada (E4 y E5). La simulación de E4c-2 (`tools/simular_copias.py`) muestra que con la copia caliente al cubo cada hora no cabe y que cada 6 horas, con el disco externo, el máximo es de 10,3 GB; el propietario eligió cada 6 horas el 26 nov 2026 (enmienda de D25). El diseño de E4c-2, APROBADO en `ae0b217`, fija los topes del cubo: 19 GB de los 20 gratuitos, y un tope obligatorio de 45.000 peticiones en cualquier ventana de 32 días, de las 50.000 al mes |
 
 ## Fase 3: indicadores y estrategias (alcance aprobado el 17 de noviembre de 2026)
 

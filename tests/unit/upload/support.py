@@ -60,6 +60,7 @@ class FakeObjectStorage:
     log: list[tuple[str, str]] = field(default_factory=list)
     fail: dict[str, list[Exception]] = field(default_factory=dict)
     lose_response: set[str] = field(default_factory=set)  # PutObject done, answer lost
+    refuse: set[str] = field(default_factory=set)  # PutObject refused for these names
     corrupt: set[str] = field(default_factory=set)  # PutObject stores other bytes
     objects: dict[str, list[_Stored]] = field(default_factory=dict)
     _next_id: int = 0
@@ -107,6 +108,8 @@ class FakeObjectStorage:
 
     def put_new(self, namespace: str, name: str, path: Path) -> None:
         self._request("PutObject", name)
+        if name in self.refuse:
+            raise Forbidden(f"refused: {name}")
         exists = self._current(name) is not None
         if exists:  # If-None-Match: * is checked first, and the name is in use
             raise AlreadyExists(f"412: {name} exists")
@@ -117,17 +120,15 @@ class FakeObjectStorage:
             self.lose_response.discard(name)
             raise Transient("the connection closed before the answer")
 
-    def read(self, namespace: str, name: str) -> Iterator[bytes]:
+    def read(self, namespace: str, name: str) -> tuple[str | None, Iterator[bytes]]:
         self._request("GetObject", name)
         self._need("OBJECT_READ")
         stored = self._current(name)
         if stored is None or stored.data is None:
             raise NotFound(name)
         data = stored.data
-        for i in range(0, len(data), 1 << 20):
-            yield data[i : i + (1 << 20)]
-        if not data:
-            yield b""
+        chunks = [data[i : i + (1 << 20)] for i in range(0, len(data), 1 << 20)] or [b""]
+        return stored.version_id, iter(chunks)
 
     def delete(self, namespace: str, name: str) -> None:
         self._request("DeleteObject", name)

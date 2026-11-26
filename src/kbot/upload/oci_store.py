@@ -115,12 +115,17 @@ class OciStore:
                 )
             )
 
-    def read(self, namespace: str, name: str) -> Iterator[bytes]:
+    def read(self, namespace: str, name: str) -> tuple[str | None, Iterator[bytes]]:
+        """The version that answered (its ``version-id`` header) and its bytes."""
         response = self._do(
             lambda: self._client.get_object(
                 namespace, self._bucket, name, retry_strategy=self._none
             )
         )
+        headers = getattr(response, "headers", None) or {}
+        return headers.get("version-id"), self._chunks(response)
+
+    def _chunks(self, response: Any) -> Iterator[bytes]:
         stream = response.data.raw.stream(CHUNK, decode_content=False)
         while True:
             try:

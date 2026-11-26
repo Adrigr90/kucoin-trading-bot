@@ -3,6 +3,7 @@ permissions of the policy (02 Â§13.1, point 4, E4c-2, points 3 and 7)."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 from datetime import UTC, date, datetime, timedelta
@@ -25,6 +26,17 @@ from tests.unit.upload.support import (
     hot_name,
     publish,
 )
+
+
+def relying_on(s: Setup, day_copy: str) -> dict[str, object]:
+    """An omitted day as kbot-backup writes it: the exact identity of the sealed-day copy
+    in the bucket, from the state of the uploads (local.omissions)."""
+    entry = s.state()["verificadas"][day_copy]  # type: ignore[index]
+    return {
+        "dia": day_copy[len("dia-") :],
+        "copia_de_dia": {"copia": day_copy, **{k: entry[k] for k in upload_state.IDENTITY}},
+        "generacion": None,
+    }
 
 
 class Setup:
@@ -285,7 +297,10 @@ def test_the_service_applies_the_residual_with_an_index_it_rebuilds(tmp_path: Pa
     assert s.run().errors == []
     assert "dia/dia-2026-11-27/volcado.age" in s.storage.current_names()
     index = json.loads((s.uploads / upload_state.DEPENDENCIES).read_text(encoding="utf-8"))
-    assert index == {h: [{"copy": h, "day_copy": "dia-2026-11-27", "generation": "G1"}]}
+    no_identity = dict.fromkeys(upload_state.IDENTITY[:4])  # the test fixes only the name
+    assert index == {
+        h: [{"copy": h, "day_copy": "dia-2026-11-27", "generation": "G1", **no_identity}]
+    }
 
     def cycle(hours: int, verified_outside: str, by_generation: bool = True) -> None:
         moment = START + timedelta(hours=hours)
@@ -343,11 +358,10 @@ def test_the_recoverable_point_moves_only_with_a_newer_hot_copy_verified_outside
     00:40 while the last cycle without errors moves. The copy of 06:40 moves it. A copy whose
     sealed-day copy leaves the bucket is no longer a recoverable point."""
     s = Setup(tmp_path)
-    day = publish(s.backups, "dia-2026-11-27", b"day")
-    dependency = {"dia": "2026-11-27", "copia_de_dia": {"copia": day.path.name}, "generacion": None}
+    publish(s.backups, "dia-2026-11-27", b"day")
     for hour in range(7):
         moment = START.replace(hour=hour, minute=40)
-        extra = {"dias_excluidos": [dependency]} if hour == 6 else {}
+        extra = {"dias_excluidos": [relying_on(s, "dia-2026-11-27")]} if hour == 6 else {}
         publish(s.backups, hot_name(moment), b"h%d" % hour, **extra)
         if hour == 3:
             publish(s.globals_dir, "globales-20261201T034000Z", b"roles")
@@ -381,3 +395,49 @@ def test_a_version_tied_in_time_with_a_delete_marker_does_not_count_as_current()
     assert set(bucket.current) == {"b", "c"}
     assert bucket.current["b"].version_id == "v4"
     assert bucket.used == 5 + 5 + 6 + 7
+
+
+def test_the_recoverable_point_needs_the_exact_identity_of_each_dependency(
+    tmp_path: Path,
+) -> None:
+    """E4C2-09: H00:40 is complete; H06:40 leaves S out and fixes its SHA-256. S is made
+    again here with another encryption and the same partitions; it leaves the bucket and is
+    uploaded again under the same name, with other SHA-256; the lifecycle rule removes the
+    old version, and the upload of a later hot copy fails. The recoverable point goes back
+    to H00:40. Putting back exactly the original objects makes H06:40 recoverable again."""
+    s = Setup(tmp_path)
+    first = publish(s.backups, "dia-2026-11-27", b"first")
+    h0, h6, h12 = (hot_name(START.replace(hour=h, minute=40)) for h in (0, 6, 12))
+    publish(s.backups, h0, b"h0")
+    s.clock.now = START
+    assert s.run(hot_every_hours=6).errors == []
+    publish(s.backups, h6, b"h6", dias_excluidos=[relying_on(s, "dia-2026-11-27")])
+    s.clock.now = START.replace(hour=6)
+    assert s.run(hot_every_hours=6).errors == []
+    assert s.state()["ultima_caliente_fuera"] == h6
+    dump, manifest = service.objects_of("dia-2026-11-27")
+    original = {name: s.storage.bytes_of(name) for name in (dump, manifest)}
+    # S made again here, removed from the bucket, uploaded again with other SHA-256.
+    shutil.rmtree(first.path)
+    publish(s.backups, "dia-2026-11-27", b"second")
+    for name in (dump, manifest):
+        s.storage.remove(name)
+        s.storage.objects[name] = [v for v in s.storage.objects[name] if v.data is None]
+    s.clock.now = START.replace(hour=7)
+    assert s.run(hot_every_hours=6).uploaded == ["dia-2026-11-27"]
+    assert s.storage.bytes_of(dump) == b"second"
+    publish(s.backups, h12, b"h12")
+    s.storage.refuse.add(f"caliente/{h12}/volcado.age")  # the later hot copy fails
+    s.clock.now = START.replace(hour=12)
+    assert s.run(hot_every_hours=6).errors
+    assert s.state()["ultima_caliente_fuera"] == h0
+    assert s.state()["ultima_subida_completa"] == START.replace(minute=40).isoformat()
+    # The original objects back, exactly: S is read again, verified by its own manifest,
+    # and H06:40 restores again with the identities of its manifest.
+    for name, data in original.items():
+        s.storage.tamper(name, data)
+    s.clock.now = START.replace(hour=13)
+    assert s.run(hot_every_hours=6).errors  # H12:40 still refused
+    entry = s.state()["verificadas"]["dia-2026-11-27"]  # type: ignore[index]
+    assert entry["sha256"] == hashlib.sha256(b"first").hexdigest()
+    assert s.state()["ultima_caliente_fuera"] == h6

@@ -18,6 +18,9 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 
+# The fields of the identity of a copy in the bucket (kbot.upload.state.IDENTITY, without
+# the moment of its verification).
+IDENTITY = ("objeto", "sha256", "objeto_manifiesto", "sha256_manifiesto")
 HOURLY = 3
 DAILY = 7
 WEEKLY = 2
@@ -32,6 +35,15 @@ class Dependency:
     copy: str  # the copy that depends
     day_copy: str  # the sealed-day copy it relies on
     generation: str | None  # the generation its manifest fixes for the day
+    # The exact identity of that sealed-day copy in the bucket, as the manifest fixes it
+    # (E4C2-09): only these objects with these SHA-256 restore the copy that depends.
+    objeto: str | None = None
+    sha256: str | None = None
+    objeto_manifiesto: str | None = None
+    sha256_manifiesto: str | None = None
+
+    def identity(self) -> tuple[str | None, ...]:
+        return (self.objeto, self.sha256, self.objeto_manifiesto, self.sha256_manifiesto)
 
 
 def copy_time(name: str, prefix: str) -> datetime:
@@ -100,6 +112,12 @@ def dependencies_of(manifest: Mapping[str, object]) -> list[Dependency]:
                 copy=str(manifest["nombre"]),
                 day_copy=str(item["copia_de_dia"]["copia"]),
                 generation=None if generation is None else str(generation),
+                **{
+                    key: None
+                    if item["copia_de_dia"].get(key) is None
+                    else str(item["copia_de_dia"][key])
+                    for key in IDENTITY
+                },
             )
         )
     return found

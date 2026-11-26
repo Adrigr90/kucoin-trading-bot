@@ -2866,7 +2866,7 @@ Las cuatro dudas [P] del diseño, contrastadas por el revisor: la política del 
 
 **Segunda revisión del diseño de detalle de E4c-2 (26 nov 2026, `79fac56`): APROBABLE CON CORRECCIONES.** E4C2-01 y E4C2-02, RESUELTOS. E4C2-03, PARCIAL: el tope y la reserva son coherentes, pero la secuencia sincronizaba el archivo temporal y lo renombraba sin sincronizar el directorio, y tras una caída podía reaparecer el contador anterior. Corregido arriba con la secuencia completa y su prueba. Sin hallazgos nuevos. El revisor acepta los 2 días de retraso del ciclo de vida como supuesto de la simulación: un retraso mayor puede alargar el RPO, pero el límite sobre lo ocupado de verdad sigue actuando.
 
-**Implementado en E4c-2** [26 nov 2026, rama `fase-2-e4c2`; revisado en `cc79eea`: APROBABLE CON CORRECCIONES, con E4C2-04 a E4C2-08 corregidos abajo; **pendiente de la segunda revisión del código**; sin instalar]. Aplica el diseño de detalle aprobado en `ae0b217`.
+**Implementado en E4c-2** [26 nov 2026, rama `fase-2-e4c2`; revisado en `cc79eea` y en `24ba53a`: APROBABLE CON CORRECCIONES, con E4C2-04 a E4C2-09 corregidos abajo; **pendiente de la tercera revisión del código**; sin instalar]. Aplica el diseño de detalle aprobado en `ae0b217`.
 
 - **El código:**
   - `kbot.upload`:
@@ -2894,7 +2894,9 @@ Las cuatro dudas [P] del diseño, contrastadas por el revisor: la política del 
   - **El RPO frente a la pérdida del servidor** (E4C2-06):
     - `ultima_subida_completa` es la hora de la copia caliente más reciente verificada en el cubo con todas las copias de día de las que depende, y `ultima_caliente_fuera` su nombre;
     - un ciclo que no sube nada nuevo, o solo los objetos globales, no los mueve, y una copia caliente cuya copia de día sale del cubo deja de contar;
-    - el último ciclo sin errores va aparte, en `ultimo_ciclo_sin_errores`.
+    - el último ciclo sin errores va aparte, en `ultimo_ciclo_sin_errores`;
+    - **cada dependencia cuenta con su identidad exacta** (E4C2-09): el índice guarda, de cada copia de día de la que depende una copia caliente, el objeto y el SHA-256 de su volcado y de su manifiesto, tal como los fija el manifiesto de la caliente. La caliente cuenta solo si la copia de día verificada en el cubo tiene esa misma identidad. Si el índice no la tiene, se vuelve a leer del manifiesto en el cubo.
+  - **Cada verificación se ata a la versión leída** (E4C2-09): la lectura de cada objeto devuelve su versión (la cabecera `version-id` de `GetObject`), y el estado la guarda. Si el listado ve otra versión en su lugar, por ejemplo porque el propietario repuso un objeto desde la consola, la verificación se deshace y la copia se vuelve a leer antes de que nada dependa de ella.
   - **Si el reloj retrocede** (E4C2-08), el contador sigue contando las reservas de los días que ahora parecen futuros, hasta que salen de la ventana. La cuenta solo puede equivocarse hacia arriba.
   - **La versión actual de un objeto** es la más reciente por su hora, porque el listado no la marca. Si varias versiones tienen la misma hora y alguna es una marca de borrado, el objeto cuenta como ausente: la subida siguiente lo vuelve a leer antes de fiarse.
   - **Una copia de día sale del cubo solo cuando la copia caliente más reciente ya omite ese día sin ella,** por su generación verificada fuera (la alternativa 2 de este punto, que llega con E4c-3). Si saliera antes, las copias calientes siguientes volverían a llevar el día hasta que saliera de PostgreSQL.
@@ -2943,6 +2945,7 @@ Las cuatro dudas [P] del diseño, contrastadas por el revisor: la política del 
     - la retención D25 en 72 ciclos horarios y en 30 días;
     - el caso de aceptación del residual de R-E4-01, directo y a través del servicio, con el índice perdido y rehecho desde el cubo, y la copia de día que no sale mientras la copia caliente más reciente lleve el día;
     - el punto recuperable, que no se mueve en cinco ciclos sin copias nuevas ni en uno que solo sube globales (E4C2-06);
+    - el caso de E4C2-09: la copia de día rehecha con otro cifrado y vuelta a subir lleva el punto recuperable a la caliente anterior; con los objetos originales repuestos, vuelve la que dependía de ellos;
     - las versiones de la misma hora con una marca de borrado.
   - **El tope de peticiones:**
     - con 0, 1, 2 y 3 restantes, un listado de 2 páginas con un reintento, y un reinicio;
@@ -2956,6 +2959,11 @@ Las cuatro dudas [P] del diseño, contrastadas por el revisor: la política del 
   - **Con PostgreSQL:** la copia caliente deja fuera los datos de un día por partición y conserva sus tablas, y la previa lo lleva todo.
   - **Como root:** los permisos reales de las copias y del estado, con los usuarios reales.
   - **El resto:** el guardián con `nft -c` y el usuario creado, las unidades con `systemd-analyze`, los guiones con `shellcheck`, y la simulación.
+
+**Segunda revisión del código de E4c-2 (26 nov 2026, `24ba53a`): APROBABLE CON CORRECCIONES.** E4C2-04 a E4C2-08, RESUELTOS en sus casos originales. Los dos ajustes de más le parecen coherentes: que la retirada de una copia de día exija la omisión por generación, y que un empate con una marca de borrado se trate de forma conservadora. Hallazgo nuevo, corregido arriba:
+- **E4C2-09 (MEDIO):** el punto recuperable comprobaba el nombre de la copia de día de la que depende una caliente, no su identidad exacta. Una copia de día rehecha con otro cifrado y vuelta a subir dejaba como recuperable una caliente cuyo manifiesto fija otros SHA-256 → identidad completa en el índice y verificación atada a la versión leída.
+
+**Verificación del revisor:** el ZIP con los 314 archivos del commit y 99 pruebas locales.
 
 **Revisión del código de E4c-2 (26 nov 2026, `cc79eea`): APROBABLE CON CORRECCIONES.** Cinco hallazgos MEDIOS, corregidos arriba:
 - **E4C2-04:** un listado podía autorizar omisiones dos veces si en medio había una copia completa → la anotación persistente del listado consumido;
@@ -3408,3 +3416,5 @@ $$\Delta Cap=\underbrace{8}_{\text{distancia mark-stop de lo cerrado}}+\underbra
 | 26 nov 2026 | **E4C2-04 a E4C2-08, corregidos** (§13.1, punto 4, «Implementado en E4c-2»). (4) El listado consumido se anota de forma persistente antes de cada copia caliente. (5) La simulación modela la previa del código y la retirada a los 90 días; la tabla se rehízo, y E4c-3 debe traer la omisión por generación también en la previa. (6) `ultima_subida_completa` es la hora de la copia caliente verificada con sus dependencias, y el último ciclo sin errores va aparte. (7) Los UID del guardián se traducen con `/etc/passwd`. (8) Los días posteriores a hoy siguen contando. Además: una copia de día sale del cubo solo si la copia caliente más reciente ya omite el día por su generación, y una versión empatada en hora con una marca de borrado no cuenta como actual. Cada corrección tiene su prueba de aceptación | Claude |
 | 26 nov 2026 | **El cubo, el grupo dinámico, la política y la regla de ciclo de vida, creados** por el propietario en la consola de Oracle, siguiendo `docs/operacion/copias_object_storage.md`. La guía se precisó con lo que mostró la consola: la entrada **Policies** buena es la del bloque **Identity**; el editor manual puede llamarse **Show manual editor** o **Customize (Advanced)**; y las reglas de ciclo de vida están en la pestaña **Policies** del cubo. Se comprueban en la subida de prueba, al instalar E4c-2 | Propietario |
 | 26 nov 2026 | **El límite gratuito de Object Storage durante la prueba** [H, aviso de la consola y página de Always Free]. Mientras dura la prueba gratuita de la cuenta (hasta hacia el 8 dic 2026), lo gratuito son 10 GB de nivel Standard, y lo que pase se descuenta del crédito de prueba. Después, son 20 GB de los tres niveles juntos, el límite del diseño. Si al terminar la prueba hay más de 20 GB, Oracle borra todos los objetos: los 19 GB del presupuesto lo impiden | Claude |
+| 26 nov 2026 | **Segunda revisión del código de E4c-2 (commit `24ba53a`): APROBABLE CON CORRECCIONES.** E4C2-04 a E4C2-08, RESUELTOS en sus casos originales, y los dos ajustes de más, coherentes. **E4C2-09** (MEDIO): el punto recuperable comprobaba el nombre de la dependencia y no su identidad. Con la copia de día rehecha con otro cifrado, vuelta a subir y la versión antigua ya eliminada, el estado seguía dando por recuperable una caliente cuyo manifiesto fija otros SHA-256. **Verificación del revisor:** el ZIP con los 314 archivos del commit y 99 pruebas locales | Revisor |
+| 26 nov 2026 | **E4C2-09, corregido** (§13.1, punto 4, «Implementado en E4c-2»). El índice de dependencias guarda la identidad exacta de cada copia de día (objeto y SHA-256 del volcado y del manifiesto), y una caliente cuenta como punto recuperable solo si la copia verificada en el cubo tiene esa identidad. Cada verificación guarda la versión leída (`version-id` de `GetObject`), y si otra versión ocupa su lugar se deshace. La prueba reproduce el caso del revisor y la vuelta de los objetos originales | Claude |

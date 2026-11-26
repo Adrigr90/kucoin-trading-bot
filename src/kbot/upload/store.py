@@ -66,7 +66,7 @@ class ObjectStore(Protocol):
 
     def put_new(self, namespace: str, name: str, path: Path) -> None: ...
 
-    def read(self, namespace: str, name: str) -> Iterator[bytes]: ...
+    def read(self, namespace: str, name: str) -> tuple[str | None, Iterator[bytes]]: ...
 
     def delete(self, namespace: str, name: str) -> None: ...
 
@@ -107,20 +107,26 @@ class CountedStore:
     def put_new(self, namespace: str, name: str, path: Path) -> None:
         self._call(lambda: self._store.put_new(namespace, name, path))
 
-    def sha256(self, namespace: str, name: str) -> str:
-        """Reads the object again and returns the SHA-256 of what came back. A transient
-        failure in the middle starts the read again, as a new counted request."""
+    def sha256(self, namespace: str, name: str) -> tuple[str, str | None]:
+        """Reads the object again: the SHA-256 of what came back and the version that was
+        read (E4C2-09). A transient failure in the middle starts the read again, as a new
+        counted request."""
 
-        def read() -> str:
+        def read() -> tuple[str, str | None]:
+            version, chunks = self._store.read(namespace, name)
             digest = hashlib.sha256()
-            for chunk in self._store.read(namespace, name):
+            for chunk in chunks:
                 digest.update(chunk)
-            return digest.hexdigest()
+            return digest.hexdigest(), version
 
         return self._call(read)
 
-    def read_bytes(self, namespace: str, name: str) -> bytes:
-        return self._call(lambda: b"".join(self._store.read(namespace, name)))
+    def read_bytes(self, namespace: str, name: str) -> tuple[bytes, str | None]:
+        def read() -> tuple[bytes, str | None]:
+            version, chunks = self._store.read(namespace, name)
+            return b"".join(chunks), version
+
+        return self._call(read)
 
     def delete(self, namespace: str, name: str) -> None:
         self._call(lambda: self._store.delete(namespace, name))

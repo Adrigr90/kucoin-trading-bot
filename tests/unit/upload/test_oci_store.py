@@ -142,12 +142,17 @@ def test_versioning_and_reading_and_deleting() -> None:
     assert store.versioning_enabled("ns")
     client.answers["get_bucket"] = SimpleNamespace(data=SimpleNamespace(versioning="Suspended"))
     assert not store.versioning_enabled("ns")
-    client.answers["get_object"] = SimpleNamespace(data=SimpleNamespace(raw=Raw([b"ab", b"c"])))
-    assert b"".join(store.read("ns", "a")) == b"abc"
     client.answers["get_object"] = SimpleNamespace(
-        data=SimpleNamespace(raw=Raw([b"ab"], fail=ConnectionError("lost")))
+        data=SimpleNamespace(raw=Raw([b"ab", b"c"])), headers={"version-id": "v9"}
     )
+    version, chunks = store.read("ns", "a")
+    assert version == "v9" and b"".join(chunks) == b"abc"  # the version that was read
+    client.answers["get_object"] = SimpleNamespace(
+        data=SimpleNamespace(raw=Raw([b"ab"], fail=ConnectionError("lost"))), headers={}
+    )
+    version, chunks = store.read("ns", "a")
+    assert version is None
     with pytest.raises(Transient):
-        b"".join(store.read("ns", "a"))
+        b"".join(chunks)
     store.delete("ns", "a")
     assert all(call[2]["retry_strategy"] is NONE for call in client.calls)

@@ -139,6 +139,16 @@ class Bucket:
     def has(self, copy: str) -> bool:
         return all(name in self.current for name in objects_of(copy))
 
+    def holds(self, copy: str, entry: dict[str, Any]) -> bool:
+        """Whether the two objects of a copy are still the very versions that were read
+        and verified (E4C2-09)."""
+        dump, manifest = objects_of(copy)
+        return (
+            self.has(copy)
+            and self.current[dump].version_id == entry.get("version_objeto")
+            and self.current[manifest].version_id == entry.get("version_manifiesto")
+        )
+
 
 @dataclass
 class Report:
@@ -209,19 +219,26 @@ class Uploader:
 
     def _recoverable_point(self) -> None:
         """The RPO against the loss of the server (E4C2-06): the moment of the newest hot
-        copy verified in the bucket whose sealed-day copies are all verified there too. A
-        cycle that uploads nothing new, or only the global objects, never moves it."""
+        copy verified in the bucket whose sealed-day copies are verified there too, each
+        with the exact identity its manifest fixes: the same objects and the same SHA-256 of
+        the dump and of the manifest (E4C2-09). A cycle that uploads nothing new, or only the
+        global objects, never moves it."""
         verified = self.state.get("verificadas", {})
         index = self._load_index() or {}
         hot = sorted((n for n in verified if n.startswith(local.HOT_PREFIX)), reverse=True)
-        point = next(
-            (
-                name
-                for name in hot
-                if name in index and all(d["day_copy"] in verified for d in index[name])
-            ),
-            None,
-        )
+
+        def restorable(name: str) -> bool:
+            for item in index[name]:
+                dependency = retention.Dependency(**item)
+                entry = verified.get(dependency.day_copy)
+                if entry is None or None in dependency.identity():
+                    return False
+                fixed = tuple(entry.get(k) for k in retention.IDENTITY)
+                if fixed != dependency.identity():
+                    return False
+            return True
+
+        point = next((name for name in hot if name in index and restorable(name)), None)
         self.state["ultima_caliente_fuera"] = point
         self.state["ultima_subida_completa"] = (
             None if point is None else retention.copy_time(point, local.HOT_PREFIX).isoformat()
@@ -243,10 +260,12 @@ class Uploader:
         listing.update(terminado=self._now(), ok=True)
         verified: dict[str, dict[str, Any]] = self.state.setdefault("verificadas", {})
         for name in list(verified):
-            if bucket.has(name):
+            if bucket.holds(name, verified[name]):
                 verified[name]["visto"] = listing["id"]
             else:
-                del verified[name]  # it left the bucket: it is uploaded again if still here
+                # It left the bucket, or another version took its place (E4C2-09): it is
+                # read, and uploaded if missing, again before anything relies on it.
+                del verified[name]
         self.state["ocupado"] = bucket.used
         self._save()
 
@@ -268,6 +287,10 @@ class Uploader:
                 report.uploaded.append(copy.name)
         if not saving:
             self._retention(namespace, bucket, copies, report)
+            # The index must know every retained hot copy for the recoverable point: what
+            # it lacks is read from the manifests in the bucket (E4C2-09).
+            retained = {n for n in self.state["verificadas"] if n.startswith(local.HOT_PREFIX)}
+            self._dependencies(namespace, retained)
         self.state["ocupado"] = bucket.used
         return not saving
 
@@ -321,8 +344,8 @@ class Uploader:
             with contextlib.suppress(AlreadyExists):
                 self.store.put_new(namespace, name, path)
             bucket.used += path.stat().st_size
-        dump_sha256 = self.store.sha256(namespace, dump_name)
-        manifest_bytes = self.store.read_bytes(namespace, manifest_name)
+        dump_sha256, dump_version = self.store.sha256(namespace, dump_name)
+        manifest_bytes, manifest_version = self.store.read_bytes(namespace, manifest_name)
         manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
         entry: dict[str, Any] = {
             "clase": FOLDERS[copy.prefix],
@@ -330,6 +353,9 @@ class Uploader:
             "sha256": dump_sha256,
             "objeto_manifiesto": manifest_name,
             "sha256_manifiesto": manifest_sha256,
+            # The versions read: another version in their place undoes the verification.
+            "version_objeto": dump_version,
+            "version_manifiesto": manifest_version,
             "verificada": self._now(),
             "visto": None,  # it was not in this cycle's listing (E4C2-02)
         }
@@ -411,8 +437,14 @@ class Uploader:
         read again from the manifests in the bucket."""
         index = self._load_index() or {}
         changed = False
-        for name in sorted(retained - set(index)):
-            manifest = json.loads(self.store.read_bytes(namespace, objects_of(name)[1]))
+        incomplete = {
+            name
+            for name, items in index.items()
+            if any("sha256" not in item for item in items)  # an index of before E4C2-09
+        }
+        for name in sorted((retained - set(index)) | (incomplete & retained)):
+            content, _ = self.store.read_bytes(namespace, objects_of(name)[1])
+            manifest = json.loads(content)
             index[name] = [d.__dict__ for d in retention.dependencies_of(manifest)]
             changed = True
         for name in set(index) - retained:

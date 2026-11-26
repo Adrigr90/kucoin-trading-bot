@@ -5,6 +5,7 @@ copy. What needs no database; the dump itself is tested in tests/db/test_backup.
 
 from __future__ import annotations
 
+import shutil
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -80,7 +81,7 @@ def test_the_case_of_the_review_and_its_variants(tmp_path: Path) -> None:
     not end, or sees the deletion: in every case the copy of 12:40 carries the day."""
     publish(tmp_path, COPY, b"day")
     good = state(listing("L1", at(10, 55)), {COPY: verified("L1")})
-    listing_id, omitted = local.omissions(tmp_path, good, at(11, 40))
+    listing_id, omitted = local.claim_omissions(tmp_path, good, at(11, 40))
     assert listing_id == "L1" and set(omitted) == {DAY}
     hot_copy_used(tmp_path, at(11, 40), listing_id)
     variants = {
@@ -133,3 +134,34 @@ def test_a_day_without_its_local_copy_is_never_left_out(tmp_path: Path) -> None:
     )
     assert found == ("L1", {})
     assert timedelta(hours=1) == upload_state.FRESH
+
+
+def test_a_listing_authorises_one_hot_copy_even_with_full_copies_restarts_and_retention(
+    tmp_path: Path,
+) -> None:
+    """E4C2-04: with a listing L still fresh, the first copy relies on it and leaves the day
+    out; the second carries everything; the third, after a restart of the process and the
+    local retention of the first, must not rely on L again. Only the first may."""
+    publish(tmp_path, COPY, b"day")
+    good = state(listing("L", at(10, 55)), {COPY: verified("L")})
+    first = local.claim_omissions(tmp_path, good, at(11, 0))
+    assert first[0] == "L" and set(first[1]) == {DAY}
+    hot_copy_used(tmp_path, at(11, 0), "L")
+    assert local.claim_omissions(tmp_path, good, at(11, 10)) == (None, {})
+    hot_copy_used(tmp_path, at(11, 10), None)
+    shutil.rmtree(tmp_path / hot_name(at(11, 0)))  # the local retention, and a new process
+    for minute in (20, 30, 50):
+        assert local.claim_omissions(tmp_path, good, at(11, minute)) == (None, {})
+    assert local.consumed_listing(tmp_path) == (True, "L")
+    # A newer listing authorises one copy again.
+    newer = state(listing("M", at(11, 55)), {COPY: verified("M")})
+    assert set(local.claim_omissions(tmp_path, newer, at(12, 0))[1]) == {DAY}
+    assert local.claim_omissions(tmp_path, newer, at(12, 5)) == (None, {})
+
+
+def test_an_unreadable_record_of_the_consumed_listing_authorises_nothing(tmp_path: Path) -> None:
+    publish(tmp_path, COPY, b"day")
+    (tmp_path / local.CONSUMED_LISTING).write_text("{roto", encoding="utf-8")
+    good = state(listing("L", at(10, 55)), {COPY: verified("L")})
+    assert local.consumed_listing(tmp_path) == (False, None)
+    assert local.claim_omissions(tmp_path, good, at(11, 0)) == (None, {})

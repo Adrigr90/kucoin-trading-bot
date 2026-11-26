@@ -121,15 +121,19 @@ class Bucket:
 
     @classmethod
     def of(cls, versions: list[Version]) -> Bucket:
-        newest: dict[str, Version] = {}
+        """The listing does not mark the current version, so it is the newest by its time.
+        Nothing orders two versions of the same time: if any of them is a delete marker,
+        the object counts as not there, and the next upload reads it again before trusting
+        it (review of the code of E4c-2)."""
+        by_name: dict[str, list[Version]] = {}
         for version in versions:
-            known = newest.get(version.name)
-            if known is None or (version.modified, version.version_id) > (
-                known.modified,
-                known.version_id,
-            ):
-                newest[version.name] = version
-        current = {n: v for n, v in newest.items() if not v.delete_marker}
+            by_name.setdefault(version.name, []).append(version)
+        current = {}
+        for name, found in by_name.items():
+            newest = max(v.modified for v in found)
+            latest = [v for v in found if v.modified == newest]
+            if not any(v.delete_marker for v in latest):
+                current[name] = latest[0]
         return cls(current, sum(v.size for v in versions if not v.delete_marker))
 
     def has(self, copy: str) -> bool:
@@ -198,11 +202,30 @@ class Uploader:
             except CounterUnreadable:
                 self.state["peticiones"] = None
             if complete and not report.errors:
-                self.state["ultima_subida_completa"] = self._now()
-            hot = [n for n in self.state.get("verificadas", {}) if n.startswith(local.HOT_PREFIX)]
-            self.state["ultima_caliente_fuera"] = max(hot, default=None)
+                self.state["ultimo_ciclo_sin_errores"] = self._now()
+            self._recoverable_point()
             self._save()  # if even this fails, the error reaches the service and its log
         return report
+
+    def _recoverable_point(self) -> None:
+        """The RPO against the loss of the server (E4C2-06): the moment of the newest hot
+        copy verified in the bucket whose sealed-day copies are all verified there too. A
+        cycle that uploads nothing new, or only the global objects, never moves it."""
+        verified = self.state.get("verificadas", {})
+        index = self._load_index() or {}
+        hot = sorted((n for n in verified if n.startswith(local.HOT_PREFIX)), reverse=True)
+        point = next(
+            (
+                name
+                for name in hot
+                if name in index and all(d["day_copy"] in verified for d in index[name])
+            ),
+            None,
+        )
+        self.state["ultima_caliente_fuera"] = point
+        self.state["ultima_subida_completa"] = (
+            None if point is None else retention.copy_time(point, local.HOT_PREFIX).isoformat()
+        )
 
     def _cycle(self, report: Report) -> bool:
         namespace = self.state.get("espacio")
@@ -257,7 +280,7 @@ class Uploader:
             ]
 
         # A day already eligible is not uploaded again: its copy may just have left the bucket.
-        eligible, _ = _knowledge(copies)
+        eligible, _, _ = _knowledge(copies)
         wanted = [
             c
             for c in missing(local.DAY_PREFIX)
@@ -366,16 +389,20 @@ class Uploader:
         self, namespace: str, bucket: Bucket, copies: dict[str, LocalCopy], report: Report
     ) -> None:
         """The residual of R-E4-01: a sealed-day copy goes only when its day is eligible and
-        every retained copy that relies on it can be restored without it."""
+        every retained copy that relies on it can be restored without it. And only once the
+        newest hot copy already leaves the day out without it, by its generation: otherwise
+        the next hot copies would carry the day again until it leaves PostgreSQL."""
         verified: dict[str, dict[str, Any]] = self.state["verificadas"]
         days = sorted(n for n in verified if n.startswith(local.DAY_PREFIX))
-        eligible, generations = _knowledge(copies)
-        if not days or not eligible:
+        eligible, generations, by_generation = _knowledge(copies)
+        if not days or not (eligible & by_generation):
             return
         retained = {n for n in verified if n.startswith(local.HOT_PREFIX)}
         dependencies = self._dependencies(namespace, retained)
         for name in days:
             day = date.fromisoformat(name[len(local.DAY_PREFIX) :])
+            if day not in by_generation:
+                continue
             if retention.day_copy_may_go(name, day, dependencies, retained, eligible, generations):
                 self._delete(namespace, name, bucket, report)
 
@@ -405,19 +432,27 @@ class Uploader:
         report.deleted.append(copy)
 
 
-def _knowledge(copies: dict[str, LocalCopy]) -> tuple[set[date], set[str]]:
-    """The eligible days and the generations verified outside, as the newest hot copy read
-    them in its snapshot: kbot_upload has no access to the database."""
+def _knowledge(copies: dict[str, LocalCopy]) -> tuple[set[date], set[str], set[date]]:
+    """What the newest hot copy read in its snapshot, since kbot_upload has no access to
+    the database: the eligible days, the generations verified outside, and the days it
+    left out without a sealed-day copy, by their generation (alternative 2 of point 4,
+    which stage E4c-3 brings)."""
     hot = sorted(n for n in copies if n.startswith(local.HOT_PREFIX))
     if not hot:
-        return set(), set()
-    knowledge = copies[hot[-1]].manifest.get("archivo") or {}
+        return set(), set(), set()
+    manifest = copies[hot[-1]].manifest
+    knowledge = manifest.get("archivo") or {}
     try:
         eligible = {date.fromisoformat(d) for d in knowledge.get("dias_elegibles", [])}
         generations = {str(g) for g in knowledge.get("generaciones_verificadas_fuera", [])}
-    except (AttributeError, TypeError, ValueError):
-        return set(), set()
-    return eligible, generations
+        by_generation = {
+            date.fromisoformat(item["dia"])
+            for item in manifest.get("dias_excluidos", [])
+            if item.get("copia_de_dia") is None and item.get("generacion")
+        }
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return set(), set(), set()
+    return eligible, generations, by_generation
 
 
 def _same_day(manifest_bytes: bytes, dump_sha256: str, copy: LocalCopy) -> bool:

@@ -293,6 +293,25 @@ def test_metadata_guard_is_checked_structurally() -> None:
     assert {"root", "snap_daemon", "kbot_upload"} == check.METADATA_ALLOWED
 
 
+def test_the_guard_check_names_the_users_by_their_real_ids() -> None:
+    """E4C2-07: nft -j prints numbers, and kbot_upload has no fixed id. Its id from
+    /etc/passwd passes; an extra id or another one in its place fails."""
+    users_file = (
+        "root:x:0:0::/root:/bin/bash\nkbot_upload:x:1234:1234::/nonexistent:/usr/sbin/nologin\n"
+    )
+    names = check.uid_names(
+        users_file + "kbot_backup:x:1235:1235::/nonexistent:/usr/sbin/nologin\n"
+    )
+    assert names[1234] == "kbot_upload"
+    assert check.metadata_guard(nft_json(users=[0, 584788, 1234]), names=names).ok
+    assert not check.metadata_guard(nft_json(users=[0, 584788, 1234])).ok  # unknown id
+    extra = check.metadata_guard(nft_json(users=[0, 584788, 1234, 1235]), names=names)
+    assert not extra.ok and "kbot_backup" in extra.detail
+    swapped = check.metadata_guard(nft_json(users=[0, 584788, 1235]), names=names)
+    assert not swapped.ok
+    assert not check.metadata_guard(nft_json(users=[0, 584788, 4321]), names=names).ok
+
+
 def test_run_all_uses_the_commands_and_files_of_the_server() -> None:
     commands: list[list[str]] = []
 
@@ -343,7 +362,8 @@ def test_a_failed_command_or_unreadable_file_fails_its_check() -> None:
     verdicts = {v.name: v for v in check.run_all(run, read, pg_conf_dir="/nonexistent")}
     assert not verdicts["listening ports"].ok and "exit 1" in verdicts["listening ports"].detail
     assert not verdicts["service users"].ok and "cannot read" in verdicts["service users"].detail
-    assert verdicts["metadata guard"].ok
+    # E4C2-07: without /etc/passwd the ids of the guard cannot be named, so it fails too.
+    assert not verdicts["metadata guard"].ok and "cannot read" in verdicts["metadata guard"].detail
 
 
 @pytest.mark.parametrize(

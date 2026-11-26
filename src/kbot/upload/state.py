@@ -9,8 +9,12 @@ to decide which sealed days the hot copy may leave out. It holds:
   with its identifier, when it started, and whether it finished well (E4C2-02);
 * ``verificadas``: each copy read again from the bucket with the SHA-256 of its two
   objects, when that happened, and the identifier of the last listing that saw them;
-* ``ocupado``, ``peticiones`` and ``ultima_subida_completa`` (the RPO against the loss
-  of the server), and the errors of the last cycle.
+* ``ocupado`` and ``peticiones``;
+* ``ultima_subida_completa``, the RPO against the loss of the server: the moment of the
+  newest hot copy verified in the bucket with every sealed-day copy it relies on, and
+  ``ultima_caliente_fuera``, its name; a cycle that uploads nothing new never moves them
+  (E4C2-06);
+* ``ultimo_ciclo_sin_errores``, and the errors of the last cycle.
 """
 
 from __future__ import annotations
@@ -42,6 +46,8 @@ def empty() -> dict[str, Any]:
         "ocupado": None,
         "peticiones": None,
         "ultima_subida_completa": None,
+        "ultima_caliente_fuera": None,
+        "ultimo_ciclo_sin_errores": None,
         "errores": [],
     }
 

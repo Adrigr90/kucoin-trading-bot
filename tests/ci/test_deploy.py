@@ -188,6 +188,42 @@ def test_metadata_guard_is_valid_nftables_and_manages_only_its_table() -> None:
     assert done.returncode == 0, done.stderr
 
 
+def test_the_guard_check_reads_the_real_json_of_the_kernel(tmp_path: Path) -> None:
+    """E4C2-07: the guard loaded by the kernel, in a throwaway network namespace, with
+    kbot_upload created with an id that is not fixed; ``nft -j`` prints it by number, and
+    the check names it through /etc/passwd. With another user in its place it fails."""
+    nft = tool("nft")
+    unshare = tool("unshare")
+    for user in ("kbot_upload", "kbot_backup"):
+        made = run(*as_root("bash", "-c", _USER.replace("@USER@", user)))
+        assert made.returncode == 0, made.stderr
+    names = check.uid_names(Path("/etc/passwd").read_text(encoding="utf-8"))
+    assert {"kbot_upload", "kbot_backup"} <= set(names.values())
+    guard = DEPLOY / "etc" / "kbot" / "metadata-guard.nft"
+    swapped = tmp_path / "swapped.nft"
+    swapped.write_text(
+        guard.read_text(encoding="utf-8").replace("kbot_upload }", "kbot_backup }"),
+        encoding="utf-8",
+    )
+    swapped.chmod(0o644)
+    tmp_path.chmod(0o755)
+    verdicts = []
+    for rules in (guard, swapped):
+        listed = run(
+            *as_root(
+                unshare,
+                "--net",
+                "sh",
+                "-c",
+                f"{nft} -f {rules} && {nft} -j list table inet kbot_guard",
+            )
+        )
+        assert listed.returncode == 0, listed.stderr
+        verdicts.append(check.metadata_guard(listed.stdout, names=names))
+    assert verdicts[0].ok, verdicts[0].detail
+    assert not verdicts[1].ok and "kbot_backup" in verdicts[1].detail
+
+
 _USER = (
     "getent passwd @USER@ >/dev/null || "
     "useradd --system --shell /usr/sbin/nologin --no-create-home @USER@"

@@ -13,7 +13,8 @@ would pass the cap raises ``BudgetExhausted``; one that cannot be made durable r
 ``PersistenceError``; in both cases nothing is sent. A crash after a reservation leaves the
 request counted although it never left: the count errs to the safe side, never below.
 Without its file, or with one that cannot be read, the counter refuses every reservation:
-05_copias.sh creates it, empty, when it installs the service.
+05_copias.sh creates it, empty, when it installs the service. If the clock goes back, the
+days that now look in the future are still counted (E4C2-08).
 """
 
 from __future__ import annotations
@@ -70,11 +71,14 @@ class RequestBudget:
         return self._days
 
     def _window(self, today: date) -> dict[date, int]:
+        """The days that count: the last 32 UTC days and, if the clock went back, every day
+        after today too (E4C2-08). Those requests were sent: they are kept and counted until
+        they are older than the window, so the count can only err upwards."""
         first = today - timedelta(days=WINDOW_DAYS - 1)
-        return {d: n for d, n in self._load().items() if first <= d <= today}
+        return {d: n for d, n in self._load().items() if first <= d}
 
     def used(self) -> int:
-        """The requests of the last 32 UTC days, today included."""
+        """The requests of the last 32 UTC days, today included, and of any later day."""
         return sum(self._window(self._clock().astimezone(UTC).date()).values())
 
     def remaining(self) -> int:

@@ -2,7 +2,7 @@
 
 Para el propietario. Son pasos en la consola web de Oracle (https://cloud.oracle.com), en castellano, con el nombre en inglés de cada botón. Lo que crea es gratuito, dentro de los límites de *Always Free*: 20 GB y 50.000 peticiones al mes.
 
-**El revisor aprobó el diseño de E4c-2** el 26 nov 2026 (`ae0b217`, `02` §13.1, punto 4), así que ya puedes hacerlo. Hasta que el código esté instalado nada lo usa, y no pasa nada porque ya exista.
+**Hecho por el propietario el 26 nov 2026**, tras la aprobación del diseño de E4c-2 (`ae0b217`). Hasta que el código esté instalado, nada lo usa; la subida de prueba de `05_copias.sh` lo comprueba.
 
 Haz los cuatro apartados en este orden: la regla de ciclo de vida necesita antes la política.
 
@@ -36,13 +36,13 @@ Haz los cuatro apartados en este orden: la regla de ciclo de vida necesita antes
 
 ## 3. La política: lo que puede hacer el servidor, y nada más
 
-1. Menú ☰ → **Identity & Security** (identidad y seguridad) → **Policies** (políticas).
+1. Menú ☰ → **Identity & Security** (identidad y seguridad) → **Policies** (políticas). Hay varias entradas «Policies»: la buena es la del bloque **Identity**, justo debajo de **Domains**. Las de *Web Application Firewall*, *Network Firewall*, *Security Zones* o *Cloud Guard* son de otros servicios.
 2. En **Compartment** (compartimento), el raíz.
 3. Pulsa **Create Policy** (crear política) y rellena:
    - **Name** (nombre): `kbot-copias`;
    - **Description** (descripción): `Copias del bot en kbot-backups`;
    - **Compartment**: el raíz.
-4. Activa **Show manual editor** (editor manual) y pega estas tres líneas tal cual:
+4. En el bloque **Policy Builder** (constructor de políticas), activa **Show manual editor** (editor manual). Según la versión de la consola, se llama **Customize (Advanced)** (personalizar, avanzado) o **Advanced**. Pega estas tres líneas tal cual:
 
    ```
    Allow dynamic-group 'Default'/'kbot-servidor' to manage objects in tenancy where all {target.bucket.name = 'kbot-backups', any {request.permission = 'OBJECT_CREATE', request.permission = 'OBJECT_INSPECT', request.permission = 'OBJECT_READ', request.permission = 'OBJECT_DELETE'}}
@@ -59,7 +59,7 @@ Haz los cuatro apartados en este orden: la regla de ciclo de vida necesita antes
 ## 4. La regla de ciclo de vida: las versiones anteriores, un día
 
 1. Vuelve al cubo `kbot-backups`: menú ☰ → **Storage** → **Buckets** → `kbot-backups`.
-2. En el menú del cubo, **Lifecycle Policy Rules** (reglas de ciclo de vida) → **Create Rule** (crear regla). Rellena:
+2. En la pestaña **Policies** (políticas) del cubo, **Lifecycle policy rules** (reglas de ciclo de vida) → **Create rule** (crear regla). En consolas antiguas está en el menú de la izquierda. Rellena:
    - **Name** (nombre): `borrar-versiones-anteriores`;
    - **Target** (objetivo): **Previous object versions** (versiones anteriores de los objetos);
    - **Lifecycle Action** (acción): **Delete** (borrar);

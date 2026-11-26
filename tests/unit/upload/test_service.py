@@ -1,5 +1,5 @@
 """The upload cycle against an Object Storage in memory with the versioning and the
-permissions of the policy (02 §13.1, point 4, E4c-2, points 3 and 7)."""
+permissions of the policy (02 Â§13.1, point 4, E4c-2, points 3 and 7)."""
 
 from __future__ import annotations
 
@@ -14,12 +14,13 @@ from kbot.backup import local
 from kbot.upload import retention, service
 from kbot.upload import state as upload_state
 from kbot.upload.budget import RequestBudget
-from kbot.upload.store import CountedStore
+from kbot.upload.store import CountedStore, Version
 from tests.unit.upload.support import (
     NAMESPACE,
     START,
     Clock,
     FakeObjectStorage,
+    Forbidden,
     counter,
     hot_name,
     publish,
@@ -77,7 +78,8 @@ def test_a_cycle_uploads_reads_again_and_verifies_each_copy(tmp_path: Path) -> N
     assert entry["visto"] is None  # not in this cycle's listing (E4C2-02)
     listing = state["listado"]
     assert listing["ok"] is True and listing["terminado"]  # type: ignore[index]
-    assert state["ultima_subida_completa"] == START.isoformat()
+    assert state["ultima_subida_completa"] == (START - timedelta(minutes=15)).isoformat()
+    assert state["ultimo_ciclo_sin_errores"] == START.isoformat()
     assert state["ultima_caliente_fuera"] == hot.path.name
     # Each object once, in one PutObject, and read once again (E4C2-01).
     assert sorted(s.storage.sent("PutObject")) == s.storage.current_names()
@@ -285,24 +287,36 @@ def test_the_service_applies_the_residual_with_an_index_it_rebuilds(tmp_path: Pa
     index = json.loads((s.uploads / upload_state.DEPENDENCIES).read_text(encoding="utf-8"))
     assert index == {h: [{"copy": h, "day_copy": "dia-2026-11-27", "generation": "G1"}]}
 
-    def cycle(hours: int, verified_outside: str) -> None:
+    def cycle(hours: int, verified_outside: str, by_generation: bool = True) -> None:
         moment = START + timedelta(hours=hours)
         knowledge = {
             "dias_elegibles": ["2026-11-27"],
             "generaciones_verificadas_fuera": [verified_outside],
         }
-        publish(s.backups, hot_name(moment), b"H%d" % hours, archivo=knowledge)
+        # From E4c-3 the hot copy leaves an eligible day out by its generation.
+        left_out = [{"dia": "2026-11-27", "copia_de_dia": None, "generacion": "G1"}]
+        publish(
+            s.backups,
+            hot_name(moment),
+            b"H%d" % hours,
+            archivo=knowledge,
+            dias_excluidos=left_out if by_generation else [],
+        )
         s.clock.now = moment
         assert s.run().errors == []
 
     cycle(1, "G2")  # eligible through another generation: H still needs S
     assert "dia/dia-2026-11-27/volcado.age" in s.storage.current_names()
+    # H is fine with G1 verified, but the newest hot copy still carries the day: without S
+    # the next ones would carry it again, so S stays.
+    cycle(2, "G1", by_generation=False)
+    assert "dia/dia-2026-11-27/volcado.age" in s.storage.current_names()
     (s.uploads / upload_state.DEPENDENCIES).unlink()
-    cycle(2, "G1")
+    cycle(3, "G1")
     assert f"caliente/{h}/{local.MANIFEST}" in s.storage.sent("GetObject")[-3:]
     assert "dia/dia-2026-11-27/volcado.age" not in s.storage.current_names()
     assert "dia-2026-11-27" not in s.state()["verificadas"]  # type: ignore[operator]
-    cycle(3, "G1")  # the local copy of an eligible day is never uploaded again
+    cycle(4, "G1")  # the local copy of an eligible day is never uploaded again
     assert s.storage.sent("PutObject").count("dia/dia-2026-11-27/volcado.age") == 1
 
 
@@ -319,3 +333,51 @@ def test_an_object_the_owner_deletes_is_uploaded_again_and_never_verified_meanwh
     entry = s.state()["verificadas"]["dia-2026-11-27"]  # type: ignore[index]
     assert entry["visto"] is None  # not seen by this listing: nothing relies on it yet
     assert s.state()["espacio"] == NAMESPACE
+
+
+def test_the_recoverable_point_moves_only_with_a_newer_hot_copy_verified_outside(
+    tmp_path: Path,
+) -> None:
+    """E4C2-06: the copy of 00:40 is verified at 00:55. The five cycles until 05:55 upload
+    nothing new and one of them only the global objects: the recoverable point stays at
+    00:40 while the last cycle without errors moves. The copy of 06:40 moves it. A copy whose
+    sealed-day copy leaves the bucket is no longer a recoverable point."""
+    s = Setup(tmp_path)
+    day = publish(s.backups, "dia-2026-11-27", b"day")
+    dependency = {"dia": "2026-11-27", "copia_de_dia": {"copia": day.path.name}, "generacion": None}
+    for hour in range(7):
+        moment = START.replace(hour=hour, minute=40)
+        extra = {"dias_excluidos": [dependency]} if hour == 6 else {}
+        publish(s.backups, hot_name(moment), b"h%d" % hour, **extra)
+        if hour == 3:
+            publish(s.globals_dir, "globales-20261201T034000Z", b"roles")
+        s.clock.now = moment + timedelta(minutes=15)
+        report = s.run(hot_every_hours=6)
+        assert report.errors == []
+        expected = START.replace(hour=0 if hour < 6 else 6, minute=40)
+        assert s.state()["ultima_subida_completa"] == expected.isoformat(), hour
+        assert s.state()["ultimo_ciclo_sin_errores"] == s.clock.now.isoformat()
+    assert report.uploaded == [hot_name(START.replace(hour=6, minute=40))]
+    s.storage.remove("dia/dia-2026-11-27/volcado.age")  # the owner deletes it
+    s.clock.advance(minutes=1)
+    s.storage.fail["PutObject"] = [Forbidden("not now")]  # it cannot come back yet
+    s.run(hot_every_hours=6)
+    assert s.state()["ultima_subida_completa"] == START.replace(minute=40).isoformat()
+
+
+def test_a_version_tied_in_time_with_a_delete_marker_does_not_count_as_current() -> None:
+    """Review of the code of E4c-2: the listing marks no current version, and nothing orders
+    two versions of the same time; the object then counts as not there."""
+    when = START
+    versions = [
+        Version("a", "v1", 5, when, False),
+        Version("a", "v2", 0, when, True),
+        Version("b", "v3", 5, when - timedelta(seconds=1), False),
+        Version("b", "v4", 6, when, False),
+        Version("c", "v5", 0, when - timedelta(seconds=1), True),
+        Version("c", "v6", 7, when, False),
+    ]
+    bucket = service.Bucket.of(versions)
+    assert set(bucket.current) == {"b", "c"}
+    assert bucket.current["b"].version_id == "v4"
+    assert bucket.used == 5 + 5 + 6 + 7

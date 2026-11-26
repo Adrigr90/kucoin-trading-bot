@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime
 
+import pytest
+
 from tools import simular_copias as sim
 
 
@@ -66,3 +68,57 @@ def test_the_simulation_uses_the_retention_of_the_service() -> None:
     first = datetime(2026, 11, 30, 0, 40, tzinfo=UTC)
     names = [(f"caliente-{first:%Y%m%dT%H%M}", first)]
     assert sim.keep_hot(names, sim.Parameters()) == {names[0][0]}
+
+
+def test_an_eligible_day_still_in_postgresql_counts_in_the_previa() -> None:
+    """E4C2-05: the previa of the code carries every day still in PostgreSQL; a day leaves
+    it only when eligible and older than 90 days."""
+    p = sim.Parameters(eligible_after_days=14)
+    moment = datetime(2027, 3, 1, 12, 40, tzinfo=UTC)
+    assert sim._eligible(p, date(2027, 1, 30), moment)
+    assert sim._present(p, date(2027, 1, 30), moment)  # eligible, 30 days old: still there
+    assert not sim._present(p, date(2026, 11, 30), moment)  # eligible and 91 days old
+    assert sim._present(sim.Parameters(), date(2026, 11, 17), moment)  # never eligible
+    with_all = sim.simulate(sim.Parameters(days=60, eligible_after_days=14))
+    without = sim.simulate(
+        sim.Parameters(days=60, eligible_after_days=14, previa_excludes_eligible=True)
+    )
+    assert with_all.peak > without.peak
+
+
+@pytest.mark.parametrize(
+    ("arguments", "peak_gb", "refused_on_day"),
+    [
+        (["--subida-caliente-cada", "1"], 19.00, 4),
+        ([], 19.00, 50),
+        (["--elegible-tras", "14"], 18.48, 64),
+        (["--elegible-tras", "14", "--previa-sin-elegibles"], 10.29, None),
+        (
+            [
+                "--elegible-tras",
+                "14",
+                "--previa-sin-elegibles",
+                "--dias",
+                "180",
+                "--crecimiento",
+                "0.1",
+            ],
+            17.55,
+            None,
+        ),
+    ],
+)
+def test_the_scenarios_published_in_02_come_from_this_model(
+    arguments: list[str],
+    peak_gb: float,
+    refused_on_day: int | None,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """E4C2-05: the table of 02 §13.1 («Implementado en E4c-2») is what this model gives."""
+    assert sim.main(arguments) == 0
+    text = capsys.readouterr().out
+    assert f"Máximo del cubo antes de una subida: {peak_gb:.2f} GB" in text
+    if refused_on_day is None:
+        assert "Todo cabe en los 19 GB" in text
+    else:
+        assert f"(día {refused_on_day});" in text

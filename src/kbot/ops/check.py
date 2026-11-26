@@ -346,10 +346,21 @@ METADATA_ALLOWED = frozenset({"root", "snap_daemon", "kbot_upload"})
 _FIXED_UIDS = {0: "root", 584788: "snap_daemon"}
 
 
-def _user_name(value: int | str) -> str:
+def uid_names(passwd: str) -> dict[int, str]:
+    """The users of /etc/passwd by id. ``nft -j`` prints a user of a rule by its number
+    (it translates only with ``--guid``), and kbot_upload has no fixed id (E4C2-07)."""
+    names: dict[int, str] = {}
+    for line in passwd.splitlines():
+        fields = line.split(":")
+        if len(fields) >= 3 and fields[2].isdigit():
+            names.setdefault(int(fields[2]), fields[0])
+    return names
+
+
+def _user_name(value: int | str, names: dict[int, str]) -> str:
     uid = int(value) if isinstance(value, str) and value.isdigit() else value
     if isinstance(uid, int):
-        return _FIXED_UIDS.get(uid, str(uid))
+        return names.get(uid) or _FIXED_UIDS.get(uid, str(uid))
     return uid
 
 
@@ -375,7 +386,7 @@ def _set_values(right: dict[str, Any]) -> set[Any]:
     return set(values)
 
 
-def _guard_rule_users(rule: dict[str, Any]) -> set[str] | None:
+def _guard_rule_users(rule: dict[str, Any], names: dict[int, str]) -> set[str] | None:
     """The users exempted by a rule that rejects the metadata address on the HTTP ports
     for every other user id, or None if the rule is not that rule."""
     exprs = rule.get("expr", [])
@@ -399,7 +410,7 @@ def _guard_rule_users(rule: dict[str, Any]) -> set[str] | None:
     rejects = any("reject" in e for e in exprs)
     if not (daddr and ports and users is not None and rejects):
         return None
-    return {_user_name(u) for u in users}
+    return {_user_name(u, names) for u in users}
 
 
 def _unconditional_accept(rule: dict[str, Any]) -> bool:
@@ -407,7 +418,11 @@ def _unconditional_accept(rule: dict[str, Any]) -> bool:
     return bool(exprs) and all("accept" in e for e in exprs)
 
 
-def metadata_guard(nft_json: str, allowed_users: frozenset[str] = METADATA_ALLOWED) -> Verdict:
+def metadata_guard(
+    nft_json: str,
+    allowed_users: frozenset[str] = METADATA_ALLOWED,
+    names: dict[int, str] | None = None,
+) -> Verdict:
     """``nft -j list table inet kbot_guard``: the rule of E4-D04 must sit in a chain hooked
     on output, before any unconditional accept, and exempt exactly the allowed users
     (review of E4a, E4a-04: a rule in a chain nothing calls filters nothing)."""
@@ -432,7 +447,7 @@ def metadata_guard(nft_json: str, allowed_users: frozenset[str] = METADATA_ALLOW
         if rule is None or rule.get("chain") not in hooked or rule["chain"] in blocked:
             continue
         try:
-            users = _guard_rule_users(rule)
+            users = _guard_rule_users(rule, names or {})
         except _NotUnderstood as error:
             return Verdict("metadata guard", False, str(error))
         if users is not None:
@@ -493,7 +508,10 @@ def run_all(
         ),
         checked(
             "metadata guard",
-            lambda: metadata_guard(output(["nft", "-j", "list", "table", "inet", "kbot_guard"])),
+            lambda: metadata_guard(
+                output(["nft", "-j", "list", "table", "inet", "kbot_guard"]),
+                names=uid_names(read("/etc/passwd")),
+            ),
         ),
         checked(
             "unattended-upgrades",

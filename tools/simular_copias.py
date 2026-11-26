@@ -14,9 +14,16 @@ the 19 GB of the budget, and the largest count of requests in any 32 UTC days.
 
 The hot copy carries the small tables, the days not sealed yet (a day is sealed at 00:20
 UTC four days after it starts) and every sealed day whose copy is not verified in the
-bucket. Until stage E4c-3 no day becomes ``elegible_para_exclusion_backup``, so no
-sealed-day copy is ever deleted, and every pre-update copy, which is self-contained,
-carries every day of the database.
+bucket. Until stages E4c-3 and E4c-4 no day becomes ``elegible_para_exclusion_backup``, so
+no sealed-day copy is ever deleted. With ``--elegible-tras`` the model assumes what E4c-3
+brings: the hot copy leaves out an eligible day by its generation verified outside
+(alternative 2 of point 4), and the copy of that day leaves the bucket.
+
+The pre-update copy is what the code makes today (E4C2-05): self-contained, with every day
+still in PostgreSQL. A day leaves PostgreSQL only when it is eligible and more than 90 days
+old (``--retirada-tras``); being eligible alone does not take it out. ``--previa-sin-
+elegibles`` models what the design allows once E4c-3 exists: a pre-update copy without the
+eligible days.
 
 The sizes by default were measured on the server on 26 Nov 2026: a sealed day with data,
 63 MB encrypted; the hot copy, 580 MB with six sealed days and 3.7 open ones, which leaves
@@ -63,6 +70,8 @@ class Parameters:
     previa_every_days: int = 7  # one update a week; 0 means none
     lifecycle_delay_days: float = 2.0
     eligible_after_days: int | None = None  # days after sealing; None until E4c-3
+    retire_after_days: int = 90  # an eligible day stays in PostgreSQL until this old
+    previa_excludes_eligible: bool = False  # the code today: it carries every day present
 
 
 @dataclass
@@ -120,6 +129,12 @@ def _eligible(p: Parameters, day: date, moment: datetime) -> bool:
         return False
     sealed_at = datetime.combine(day + timedelta(days=SEAL_LAG_DAYS), datetime.min.time(), UTC)
     return moment >= sealed_at + timedelta(days=p.eligible_after_days)
+
+
+def _present(p: Parameters, day: date, moment: datetime) -> bool:
+    """Whether the day is still in PostgreSQL: only an eligible day older than the
+    retirement horizon has left it (E4C2-05)."""
+    return not (_eligible(p, day, moment) and (moment.date() - day).days > p.retire_after_days)
 
 
 def _open_part(p: Parameters, moment: datetime) -> int:
@@ -211,7 +226,8 @@ def simulate(p: Parameters) -> Result:
             full = sum(
                 _day_size(p, d)
                 for d in _days(p.first_day_with_data, sealed)
-                if not _eligible(p, d, copy_at)
+                if _present(p, d, copy_at)
+                and not (p.previa_excludes_eligible and _eligible(p, d, copy_at))
             )
             size = int(p.small_mb * MB) + _open_part(p, copy_at) + full
             wanted.append(
@@ -265,6 +281,12 @@ def summary(result: Result) -> str:
             if p.eligible_after_days is None
             else f"días elegibles {p.eligible_after_days} días tras el sellado"
         )
+        + "; previas con "
+        + (
+            "los días no elegibles"
+            if p.previa_excludes_eligible
+            else f"todos los días aún en PostgreSQL (retirada a los {p.retire_after_days} días)"
+        )
         + ".",
         f"- Máximo del cubo antes de una subida: {result.peak / GB:.2f} GB (el {result.peak_day}).",
         "- Al máximo: "
@@ -303,6 +325,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--previa-cada", type=int, default=defaults.previa_every_days)
     parser.add_argument("--retraso-ciclo-de-vida", type=float, default=2.0, metavar="DIAS")
     parser.add_argument("--elegible-tras", type=int, default=None, metavar="DIAS")
+    parser.add_argument(
+        "--retirada-tras", type=int, default=defaults.retire_after_days, metavar="DIAS"
+    )
+    parser.add_argument("--previa-sin-elegibles", action="store_true")
     parser.add_argument("--crecimiento", type=float, default=0.0, help="por 30 días, 0.1 = 10 %%")
     a = parser.parse_args(argv)
     p = Parameters(
@@ -315,6 +341,8 @@ def main(argv: list[str] | None = None) -> int:
         previa_every_days=a.previa_cada,
         lifecycle_delay_days=a.retraso_ciclo_de_vida,
         eligible_after_days=a.elegible_tras,
+        retire_after_days=a.retirada_tras,
+        previa_excludes_eligible=a.previa_sin_elegibles,
         growth_per_30_days=a.crecimiento,
     )
     print(summary(simulate(p)))

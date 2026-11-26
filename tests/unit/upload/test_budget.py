@@ -4,7 +4,7 @@ E4c-2, points 5 and 7; E4C2-03 and its residual)."""
 from __future__ import annotations
 
 import json
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -130,3 +130,25 @@ def test_the_saving_threshold_and_the_coverage_of_a_whole_operation(tmp_path: Pa
     assert store.budget.saving()
     _, store, _ = setup(tmp_path, used(1, CAP - 3))
     assert not store.budget.covers(4) and store.budget.covers(3)
+
+
+def test_a_clock_that_goes_back_over_midnight_loses_no_reservation(tmp_path: Path) -> None:
+    """E4C2-08: 44,999 reservations, one more at 00:00:01 reaches the cap; the clock goes
+    back two seconds, to the day before: the reservation of the "future" day still counts,
+    nothing more goes out, and a new process sees the same."""
+    log: list[tuple[str, str]] = []
+    clock = Clock(datetime(2026, 12, 2, 0, 0, 1, tzinfo=UTC))
+    storage = FakeObjectStorage(clock=clock, log=log)
+    path = counter(tmp_path, {"2026-12-01": CAP - 1})
+    store = CountedStore(storage, RequestBudget(path, clock=clock))
+    store.namespace()
+    clock.now = datetime(2026, 12, 1, 23, 59, 59, tzinfo=UTC)
+    with pytest.raises(BudgetExhausted):
+        store.namespace()
+    restarted = RequestBudget(path, clock=clock)
+    assert restarted.used() == CAP and restarted.remaining() == 0
+    with pytest.raises(BudgetExhausted):
+        restarted.reserve()
+    kept = json.loads(path.read_text(encoding="utf-8"))["dias"]
+    assert kept == {"2026-12-01": CAP - 1, "2026-12-02": 1}
+    assert storage.sent("GetNamespace") == [""]

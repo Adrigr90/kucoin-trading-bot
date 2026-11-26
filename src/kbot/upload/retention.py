@@ -92,6 +92,8 @@ def dependencies_of(manifest: Mapping[str, object]) -> list[Dependency]:
     for item in manifest.get("dias_excluidos", []) or []:  # type: ignore[union-attr]
         if not isinstance(item, dict):
             raise ValueError("an omitted day that is not an object")
+        if item.get("copia_de_dia") is None:
+            continue  # left out by its generation: no sealed-day copy is needed
         generation = item.get("generacion")
         found.append(
             Dependency(

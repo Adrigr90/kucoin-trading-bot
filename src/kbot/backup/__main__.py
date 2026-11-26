@@ -52,7 +52,7 @@ def run(directory: Path, recipients_file: Path, upload_state: Path = local.UPLOA
             copy = local.sealed_day_copy(directory, recipients_file, day, now=datetime.now(UTC))
             log.info("sealed_day_copied", copy=copy.path.name)
         now = datetime.now(UTC)
-        listing, omit = local.omissions(directory, state.load(upload_state), now)
+        listing, omit = local.claim_omissions(directory, state.load(upload_state), now)
         copy = local.hot_copy(directory, recipients_file, now=now, omit=omit, listing=listing)
         log.info(
             "hot_copy_done",

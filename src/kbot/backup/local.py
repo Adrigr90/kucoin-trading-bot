@@ -68,6 +68,7 @@ import kbot
 from kbot.archive import archiver, parquet
 from kbot.archive.canonical import Fingerprint, json_text
 from kbot.db.roles import DATABASE, SOCKET_DIR
+from kbot.upload import durable
 from kbot.upload import state as upload_state
 
 DSN = f"host={SOCKET_DIR} dbname={DATABASE} user=kbot_backup"
@@ -75,6 +76,8 @@ BACKUP_DIR = Path("/srv/kbot/backups")
 GLOBALS_DIR = BACKUP_DIR / "globales"
 RECIPIENTS = Path("/etc/kbot/age-recipients.txt")
 UPLOAD_STATE = upload_state.UPLOAD_DIR / upload_state.STATE
+# The last listing of the uploads a hot copy relied on (E4C2-04), written by kbot_backup.
+CONSUMED_LISTING = "listado_consumido.json"
 REGISTER = "registro.jsonl"
 DUMP = "volcado.age"
 MANIFEST = "manifiesto.json"
@@ -571,13 +574,15 @@ def omissions(
     A day is left out only when its copy is published here and the state of the uploads
     says that copy is verified in the bucket, with the same partitions, and was seen by a
     listing that is the last attempt, finished well and is less than an hour old (E4C2-02).
-    Each listing authorises one hot copy only: the one that follows the copy that used it
-    relies on nothing. Anything missing or unreadable leaves nothing out."""
+    Each listing authorises one hot copy only (E4C2-04): ``claim_omissions`` records it
+    durably as consumed before the copy is made, and a consumed listing authorises
+    nothing more, whatever the copies in between did. Anything missing or unreadable
+    leaves nothing out."""
     listing = upload_state.usable_listing(state, now)
     if state is None or listing is None:
         return None, {}
-    hot = published(directory, HOT_PREFIX)
-    if hot and hot[-1].manifest.get("listado") == listing["id"]:
+    readable, consumed = consumed_listing(directory)
+    if not readable or consumed == listing["id"]:
         return None, {}
     omitted: dict[date, dict[str, Any]] = {}
     for copy in published(directory, DAY_PREFIX):
@@ -598,6 +603,31 @@ def omissions(
         if same:
             omitted[day] = dependency
     return str(listing["id"]), omitted
+
+
+def consumed_listing(directory: Path) -> tuple[bool, str | None]:
+    """The last listing a hot copy relied on: (True, None) when none ever did, and
+    (False, None) when the record cannot be read, which authorises nothing."""
+    path = directory / CONSUMED_LISTING
+    if not path.exists():
+        return True, None
+    try:
+        value = durable.read_json(path)
+        return True, str(value["listado"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return False, None
+
+
+def claim_omissions(
+    directory: Path, state: dict[str, Any] | None, now: datetime
+) -> tuple[str | None, dict[date, dict[str, Any]]]:
+    """``omissions``, with the listing recorded durably as consumed before the copy is
+    made (E4C2-04): a copy that then fails has used it anyway, a restart or the local
+    retention cannot bring it back, and the next copy relies on no older listing."""
+    listing, omitted = omissions(directory, state, now)
+    if listing is not None:
+        durable.write_json(directory / CONSUMED_LISTING, {"listado": listing})
+    return listing, omitted
 
 
 def _database_copy(

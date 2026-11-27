@@ -72,7 +72,9 @@ def test_three_visits_through_a_fake_sftp_verify_and_clean_up(
         FAKE_SFTP_RECIBOS=str(s.receipts),
     )
 
-    def visit(*extra: str, cut: str = "0", cut_put: str = "0") -> subprocess.CompletedProcess[str]:
+    def visit(
+        *extra: str, cut: str = "0", cut_put: str = "0", fail_get: str = ""
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [
                 shell,
@@ -94,7 +96,12 @@ def test_three_visits_through_a_fake_sftp_verify_and_clean_up(
             errors="replace",
             check=False,
             timeout=300,
-            env=dict(environment, FAKE_SFTP_CUT_AT_RM=cut, FAKE_SFTP_CUT_AT_PUT=cut_put),
+            env=dict(
+                environment,
+                FAKE_SFTP_CUT_AT_RM=cut,
+                FAKE_SFTP_CUT_AT_PUT=cut_put,
+                FAKE_SFTP_FAIL_GET=fail_get,
+            ),
         )
 
     s.run()
@@ -125,14 +132,14 @@ def test_three_visits_through_a_fake_sftp_verify_and_clean_up(
     # E4C3-09 and E4C3-17: the PC deletes what the server processed exactly as this disk sent
     # it, also when the connection is cut before the first deletion and after it.
     pending = receipts()
-    assert len(pending) == 3, pending  # the receipt, the answer and the point
+    assert len(pending) == 4, pending  # the receipt, the answer, the point, the closed request
     before = visit(cut="1")
     assert before.returncode != 0 and receipts() == pending, before.stdout + before.stderr
     after = visit(cut="2")
-    assert after.returncode != 0 and len(receipts()) == 2, after.stdout + after.stderr
+    assert after.returncode != 0 and len(receipts()) == 3, after.stdout + after.stderr
     third = visit()
     assert third.returncode == 0, third.stdout + third.stderr
-    assert receipts() == [observation.name]
+    assert receipts() == [observation.name, f"resincronizar_{marker}.json"]
     s.run()
     assert point() == {"copia": hot.path.name, "hora": "2026-11-27T00:40:00+00:00"}
 
@@ -141,7 +148,7 @@ def test_three_visits_through_a_fake_sftp_verify_and_clean_up(
     # observation file keeps the last one whole, because it goes up under a temporary name.
     old = observation.read_bytes()
     (s.base / "publico" / "discos.json").write_text("{}", encoding="utf-8")
-    cut_put = visit(cut_put="1")
+    cut_put = visit(cut_put="2")  # the first put is the closed request, the second the observation
     assert cut_put.returncode != 0, cut_put.stdout + cut_put.stderr
     assert observation.read_bytes() == old
     assert [p.name for p in s.receipts.glob(".subiendo-*")] == [f".subiendo-{observation.name}"]
@@ -223,5 +230,68 @@ def test_three_visits_through_a_fake_sftp_verify_and_clean_up(
     closed = json.loads((s.receipts / f"resincronizar_{marker}.json").read_text("utf-8"))
     assert closed["nonce"] is None  # the answered request is closed
     observation.write_bytes(sent_ahead)
+    assert any("not newer" in r for r in s.run().rejected)
+    assert point() is None
+
+    # Residual of E4C3-16 (sixth review): an answered request that was never closed.
+    request = s.receipts / f"resincronizar_{marker}.json"
+
+    def published() -> dict[str, object]:
+        return dict(json.loads(discos.read_text("utf-8"))[marker])
+
+    # 1. The disk loses its state and its observation cannot be downloaded: it asks with N,
+    # and the server answers N with its counter.
+    (disk / ".kbot-estado.json").write_text("", encoding="utf-8")
+    asked = visit(fail_get="recibo_punto_")
+    assert asked.returncode == 1 and "no se sabe con seguridad" in asked.stdout, asked.stdout
+    nonce = json.loads(request.read_text("utf-8"))["nonce"]
+    assert nonce
+    s.run()
+    counter = s.state()["discos"][marker]["observacion"]
+    assert published()["resincronizacion"] == nonce and published()["observacion"] == counter
+    # 2. A new hot copy. The disk loses its state again, and only its request cannot be
+    # downloaded: its observation, read back whole, is enough, and the request is closed
+    # before the observation goes up. The server accepts it privately; discos.json still
+    # shows N with the old counter.
+    h3 = publish(
+        s.copies,
+        "caliente-20261129T004000Z",
+        b"hot copy 3",
+        dias_excluidos=[{"dia": "2026-11-22", "copia_de_dia": identity, "generacion": GENERATION}],
+    )
+    (disk / ".kbot-estado.json").write_text("", encoding="utf-8")
+    with monkeypatch.context() as patched:
+        patched.setattr(durable, "write_json", no_discos)
+        sent = visit(fail_get="resincronizar_")
+        assert sent.returncode == 0, sent.stdout + sent.stderr
+        assert json.loads(request.read_text("utf-8"))["nonce"] is None  # closed
+        sent_bytes = observation.read_bytes()
+        with pytest.raises(durable.PersistenceError):
+            s.run()
+        assert published()["resincronizacion"] == nonce  # the public answer is behind
+        assert point() == {"copia": h3.path.name, "hora": "2026-11-29T00:40:00+00:00"}
+        accepted = s.state()["discos"][marker]["observacion"]
+        # 3. The disk loses its state, its observation and its hot copy, gone from the
+        # server too. N, closed, is not used again: a new request, and no observation.
+        (disk / ".kbot-estado.json").write_text("", encoding="utf-8")
+        observation.unlink()
+        shutil.rmtree(disk / "copias" / h3.path.name)
+        shutil.rmtree(h3.path)
+        blocked = visit()
+        assert blocked.returncode == 1, blocked.stdout + blocked.stderr
+        renewed = json.loads(request.read_text("utf-8"))["nonce"]
+        assert renewed and renewed != nonce and not observation.exists()
+        with pytest.raises(durable.PersistenceError):
+            s.run()
+        assert point() == {"copia": h3.path.name, "hora": "2026-11-29T00:40:00+00:00"}
+    # The new request is answered; the next observation is above the accepted one, and the
+    # point goes. The observation sent in step 2, sent again, is refused.
+    s.run()
+    final = visit()
+    assert final.returncode == 0, final.stdout + final.stderr
+    assert json.loads(observation.read_text("utf-8"))["secuencia"] > accepted
+    s.run()
+    assert point() is None
+    observation.write_bytes(sent_bytes)
     assert any("not newer" in r for r in s.run().rejected)
     assert point() is None

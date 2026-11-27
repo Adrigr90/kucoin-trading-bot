@@ -425,7 +425,9 @@ class Verifier:
                 raise NotAdmitted(f"disk {disk} not admitted: already {MAX_DISKS} disks")
             disks[disk] = {
                 "admitido": self.clock().isoformat(),
-                "observacion": 0,
+                # A disk admitted again goes on from its last accepted observation, so that
+                # none of its old observations counts as new.
+                "observacion": int(self.state.get("retirados", {}).get(disk, 0)),
                 "ultima_visita": None,
                 "ultima_sin_errores": None,
                 "punto": None,
@@ -442,7 +444,9 @@ class Verifier:
     def retire_disk(self, disk: str) -> None:
         self._load()
         self._confirm()
-        self.state["discos"].pop(_disk(disk), None)
+        record = self.state["discos"].pop(_disk(disk), None)
+        if record is not None:  # its counter is kept: one small number per disk ever retired
+            self.state.setdefault("retirados", {})[disk] = int(record.get("observacion", 0))
         for key in [k for k in self.state["pares"] if k.endswith(f"|{disk}")]:
             del self.state["pares"][key]
         self._disks_changed()

@@ -678,6 +678,28 @@ def test_a_request_of_resynchronization_is_answered_from_the_saved_state(tmp_pat
     assert public()["resincronizacion"] is None
 
 
+def test_a_disk_retired_and_admitted_again_keeps_its_counter(tmp_path: Path) -> None:
+    """E4C3-16: retiring a disk keeps its last accepted observation number, so that once
+    admitted again none of its old observations counts as new."""
+    s = Setup(tmp_path)
+    s.send(f"recibo_{GENERATION}.json", s.receipt())
+    s.run()
+    h = "caliente-20261127T004000Z"
+    dump, manifest = b"hot", manifest_of(h, [])
+    register(s, h, dump, manifest)
+    old = point(h, dump, manifest, [], 2)
+    s.send(POINT, point(h, dump, manifest, [], 3))
+    s.run()
+    s.verifier().retire_disk(DISK)
+    assert DISK not in s.state()["discos"]
+    s.send(f"recibo_{GENERATION}.json", s.receipt() | {"otra": 1})  # admitted again
+    s.run()
+    assert s.state()["discos"][DISK]["observacion"] == 3
+    s.send(POINT, old)
+    assert any("not newer" in r for r in s.run().rejected)
+    assert s.state()["discos"][DISK]["punto"] is None
+
+
 def test_a_file_still_being_sent_under_a_temporary_name_is_never_read(tmp_path: Path) -> None:
     """Residual of E4C3-16: the PC sends each file as ``.subiendo-<name>`` and renames it;
     until then the verifier does not read it, nor record it."""

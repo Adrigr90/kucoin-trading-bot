@@ -499,12 +499,13 @@ if (-not $observacion) {
 }
 if ($ContadorFiable) {
     Write-Utf8 (Join-Path $Salida $PuntoNombre) (ConvertTo-Json $observacion -Depth 6 -Compress)
-    if ($Resincronizado) {
-        # The answered request is closed, before the observation goes up: its nonce is never
-        # trusted again, even read back by a disk that lost its state later.
-        $cierre = [ordered]@{ tipo = 'resincronizar'; disco = $Disco; nonce = $null }
-        Write-Utf8 (Join-Path $Salida "resincronizar_$Disco.json") (ConvertTo-Json $cierre -Compress)
-    }
+    # Every observation goes up after closing the request of resynchronization of this disk,
+    # whether this visit knows of one or not (its download may have failed): a nonce answered
+    # before is never trusted again, even read back by a disk that loses its state later. The
+    # closing is the first file of the batch, and if it fails the batch stops before the
+    # observation (residual of E4C3-16).
+    $cierre = [ordered]@{ tipo = 'resincronizar'; disco = $Disco; nonce = $null }
+    Write-Utf8 (Join-Path $Salida "resincronizar_$Disco.json") (ConvertTo-Json $cierre -Compress)
 } else {
     # Without a reliable number, no observation is sent (residual of E4C3-16): one with a used
     # number would be refused and the server would keep a point this disk may have lost.

@@ -14,6 +14,9 @@ Like OpenSSH, put empties its target before writing any data. Two cuts of the co
   temporary names of the PC is not counted): n=1 before any deletion, n=2 after the first;
 - FAKE_SFTP_CUT_AT_PUT=n, in the n-th put of a batch, after emptying its target and before
   the first byte of data.
+
+FAKE_SFTP_FAIL_GET=text makes every get of a path that holds that text fail on its own, as a
+single failed download that ``-get`` lets the batch go past.
 """
 
 from __future__ import annotations
@@ -67,6 +70,9 @@ def run(line: str, cut_this_put: bool) -> None:
     words = shlex.split(line)
     command, arguments = words[0], [w for w in words[1:] if w not in ("-p", "-1")]
     if command == "get":
+        failing = os.environ.get("FAKE_SFTP_FAIL_GET", "")
+        if failing and failing in arguments[0]:
+            raise Failed(f"Couldn't read {arguments[0]}: Failure")
         get(arguments[0], arguments[1])
     elif command == "put":
         target = remote(arguments[1])

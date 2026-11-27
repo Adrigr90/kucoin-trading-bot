@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import sys
+import time
 import uuid
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -753,6 +754,34 @@ def test_a_retired_disk_rebuilds_its_pairs_from_byte_identical_receipts(
     assert s.run().accepted == []
     s.send(f"respuesta_{mine[0]['id']}.json", s.answer(mine[0]))
     assert s.run().verified == [GENERATION]
+
+
+def test_the_old_receipt_of_a_retired_disk_never_admits_it_again(tmp_path: Path) -> None:
+    """E4C3-19: a retired disk left its receipt in recibos/, untouched. Past the 30 days in
+    which the record of what was processed keeps it, and over several runs, that receipt
+    neither admits the disk again nor takes the place of the one that replaced it. With a
+    free place, the very same bytes sent again admit it and rebuild its pair."""
+    s = Setup(tmp_path)
+    for disk in (DISK, OTHER):
+        s.send(f"recibo_{disk}.json", s.receipt(disk=disk))
+    s.run()
+    time.sleep(0.05)  # the retirement comes after the receipt, also on a coarse clock
+    s.verifier().retire_disk(DISK)
+    s.send("recibo_tercero.json", s.receipt(disk=THIRD))
+    s.run()
+    assert set(s.state()["discos"]) == {OTHER, THIRD}
+    refused = []
+    for days in (29, 31, 32, 45, 61, 62):
+        s.now = NOW + timedelta(days=days)
+        refused += s.run().rejected
+        assert set(s.state()["discos"]) == {OTHER, THIRD}, days
+    assert any("before it was retired" in r for r in refused), refused
+    s.verifier().retire_disk(THIRD)
+    old = (s.receipts / f"recibo_{DISK}.json").read_bytes()
+    (s.receipts / f"recibo_{DISK}.json").write_bytes(old)  # sent again, byte for byte
+    assert s.run().accepted == [GENERATION]
+    assert set(s.state()["discos"]) == {OTHER, DISK}
+    assert s.state()["pares"][f"{GENERATION}|{DISK}"]["desafio"] is not None
 
 
 def test_a_file_still_being_sent_under_a_temporary_name_is_never_read(tmp_path: Path) -> None:

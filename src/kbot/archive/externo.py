@@ -119,9 +119,10 @@ def _stamp(info: os.stat_result) -> str:
 
 
 @contextmanager
-def _opened(path: Path, owner: int | None, limit: int) -> Iterator[tuple[bytes, str]]:
-    """The bytes of a file of ``recibos/`` and its stamp, read without following any link,
-    only if it is a regular file of ``owner`` (kbot_sync) and no bigger than ``limit``."""
+def _opened(path: Path, owner: int | None, limit: int) -> Iterator[tuple[bytes, os.stat_result]]:
+    """The bytes of a file of ``recibos/`` and what fstat says of it, read without following
+    any link, only if it is a regular file of ``owner`` (kbot_sync) and no bigger than
+    ``limit``."""
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
         descriptor = os.open(path, flags)
@@ -139,7 +140,7 @@ def _opened(path: Path, owner: int | None, limit: int) -> Iterator[tuple[bytes, 
             content = handle.read(limit + 1)
         if len(content) > limit:
             raise Ignored(f"bigger than {limit} bytes")
-        yield content, _stamp(info)
+        yield content, info
     finally:
         os.close(descriptor)
 
@@ -360,7 +361,8 @@ class Verifier:
         limit = POINT_LIMIT if name.startswith(POINT_PREFIX) else RECEIPT_LIMIT
         processed = self.state["procesados"]
         try:
-            with _opened(path, self.owner, limit) as (content, seen):
+            with _opened(path, self.owner, limit) as (content, info):
+                seen = _stamp(info)
                 digest = hashlib.sha256(content).hexdigest()
                 # Recorded by its stamp, and dispatched again even when its bytes are the
                 # ones seen before (E4C3-18): what makes a repeated receipt change nothing is
@@ -372,7 +374,9 @@ class Verifier:
                     raise Rejected("not a JSON object")
                 kind = document.get("tipo")
                 if kind == "generacion":
-                    self._receipt(conn, document, digest, generations, states, report)
+                    self._receipt(
+                        conn, document, digest, generations, states, report, info.st_mtime_ns
+                    )
                 elif kind == "respuesta":
                     self._answer(conn, document, states, report)
                 elif kind == "punto":
@@ -426,7 +430,9 @@ class Verifier:
                 "admitido": self.clock().isoformat(),
                 # A disk admitted again goes on from its last accepted observation, so that
                 # none of its old observations counts as new.
-                "observacion": int(self.state.get("retirados", {}).get(disk, 0)),
+                "observacion": int(
+                    self.state.get("retirados", {}).get(disk, {}).get("observacion", 0)
+                ),
                 "ultima_visita": None,
                 "ultima_sin_errores": None,
                 "punto": None,
@@ -444,8 +450,16 @@ class Verifier:
         self._load()
         self._confirm()
         record = self.state["discos"].pop(_disk(disk), None)
-        if record is not None:  # its counter is kept: one small number per disk ever retired
-            self.state.setdefault("retirados", {})[disk] = int(record.get("observacion", 0))
+        retired = self.state.setdefault("retirados", {})
+        before = retired.get(disk, {})
+        # Kept for good, one small entry per disk ever retired: its last accepted observation
+        # (E4C3-16), and when it was retired, by the clock the system stamps files with
+        # (E4C3-19). A receipt of this disk written before that never admits it again,
+        # whatever the record of what was processed forgets after 30 days.
+        retired[disk] = {
+            "observacion": int((record or before).get("observacion", 0)),
+            "desde_ns": self._now_in_files(),
+        }
         for key in [k for k in self.state["pares"] if k.endswith(f"|{disk}")]:
             del self.state["pares"][key]
         # What was refused for lack of room is read again (E4C3-12). What lies untouched in
@@ -454,6 +468,16 @@ class Verifier:
         self._disks_changed()
         self._save()
         self._announce()  # its challenges are withdrawn only once that is saved
+
+    def _now_in_files(self) -> int:
+        """The current time of the file system, in nanoseconds, as it stamps files: the time
+        of a file written now, so that it compares with the times of the receipts."""
+        marker = self.private / ".ahora"
+        marker.write_bytes(b"")
+        try:
+            return marker.stat().st_mtime_ns
+        finally:
+            marker.unlink(missing_ok=True)
 
     # -- generation receipts (E4C3-01 and its residual) ------------------------------------
     def _receipt(
@@ -464,6 +488,7 @@ class Verifier:
         generations: Mapping[str, tuple[date, Mapping[str, ServerFile]]],
         states: dict[str, set[str]],
         report: Report,
+        written_ns: int,
     ) -> None:
         disk = _disk(document["disco"])
         generation = str(uuid.UUID(str(document["generacion"])))
@@ -477,6 +502,11 @@ class Verifier:
         }
         if not valid and disk not in self.state["discos"]:
             raise Rejected("an invalid receipt from a disk that is not admitted")
+        retired = self.state.get("retirados", {}).get(disk)
+        if disk not in self.state["discos"] and retired and written_ns < int(retired["desde_ns"]):
+            # Left in recibos/ from before the retirement (E4C3-19): only a receipt sent after
+            # it, even with the very same bytes, admits the disk again.
+            raise Rejected(f"a receipt of disk {disk} written before it was retired")
         self._admit(disk)
         key = f"{generation}|{disk}"
         pair = self.state["pares"].setdefault(

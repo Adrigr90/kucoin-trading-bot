@@ -29,7 +29,7 @@ LockPersonality=yes
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 CapabilityBoundingSet=
-UMask=0077
+UMask=0027
 RestrictAddressFamilies=AF_UNIX
 # No network at all: PostgreSQL is reached through its Unix socket (B19, point 35).
 IPAddressDeny=any

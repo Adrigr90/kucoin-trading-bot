@@ -70,6 +70,7 @@ def test_the_units_are_verified_only_when_everything_they_need_exists() -> None:
         "03_postgresql.sh",
         "04_verificar.sh",
         "05_copias.sh",  # stage E4c, after the verification
+        "06_externo.sh",  # stage E4c-3, the external disk
     ]
     system = (DEPLOY / "install" / "01_sistema.sh").read_text(encoding="utf-8")
     verify = (DEPLOY / "install" / "04_verificar.sh").read_text(encoding="utf-8")
@@ -169,6 +170,101 @@ def test_sshd_drop_in_is_valid(tmp_path: Path) -> None:
     assert "permitrootlogin no" in effective
     assert "disableforwarding yes" in effective
     assert "authenticationmethods publickey" in effective
+    assert "allowusers ubuntu" in effective and "allowusers kbot_sync" in effective
+
+
+SYNC = ("user=kbot_sync", "host=localhost", "addr=127.0.0.1")
+ADMIN = ("user=ubuntu", "host=localhost", "addr=127.0.0.1")
+
+
+def test_kbot_sync_gets_only_sftp_in_its_chroot_and_the_administrator_nothing_of_it(
+    tmp_path: Path,
+) -> None:
+    """E4c-3 (02 §13.1, point 4, point 1): the Match block of kbot_sync, alone and inside the
+    whole configuration of Ubuntu 24.04 that includes the drop-in. kbot_sync gets SFTP in its
+    chroot with its own key, without TTY, forwarding or links; the administrator keeps the
+    image's settings, because a Match block in an included file stays in that file."""
+    sshd = tool("sshd")
+    keygen = tool("ssh-keygen")
+    host_key = tmp_path / "host_ed25519"
+    assert run(keygen, "-q", "-t", "ed25519", "-N", "", "-f", str(host_key)).returncode == 0
+    drop_in = DEPLOY / "etc" / "ssh" / "sshd_config.d" / "10-kbot.conf"
+    text = drop_in.read_text(encoding="utf-8")
+    assert text.rstrip().splitlines()[-9].startswith("Match User kbot_sync")  # the last block
+
+    def effective(config: Path, who: tuple[str, ...]) -> str:
+        done = run(sshd, "-T", "-f", str(config), "-h", str(host_key), "-C", ",".join(who))
+        assert done.returncode == 0, done.stderr
+        return done.stdout
+
+    sync = effective(drop_in, SYNC)
+    for line in (
+        "forcecommand internal-sftp -u 0027 -P symlink,hardlink",
+        "chrootdirectory /srv/kbot/sftp",
+        "authorizedkeysfile /etc/kbot/kbot_sync_authorized_keys",
+        "permittty no",
+        "disableforwarding yes",
+        "permittunnel no",
+        "authenticationmethods publickey",
+        "passwordauthentication no",
+    ):
+        assert line in sync.splitlines(), line
+    # The whole configuration of the image, as on the server: the drop-in is included at
+    # its top, and the image's own settings follow it.
+    main = Path("/etc/ssh/sshd_config")
+    if not main.exists():
+        pytest.skip("no /etc/ssh/sshd_config on this machine")
+    copy = tmp_path / "sshd_config"
+    lines = main.read_text(encoding="utf-8").splitlines()
+    assert any(line.startswith("Include /etc/ssh/sshd_config.d/") for line in lines)
+    copy.write_text(
+        "\n".join(
+            f"Include {drop_in}" if line.startswith("Include /etc/ssh/sshd_config.d/") else line
+            for line in lines
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    admin = effective(copy, ADMIN)
+    assert "forcecommand internal-sftp" not in admin
+    assert "chrootdirectory none" in admin.splitlines()
+    assert "permittty yes" in admin.splitlines()
+    assert any(line.startswith("subsystem sftp") for line in admin.splitlines())
+    assert "forcecommand internal-sftp -u 0027 -P symlink,hardlink" in effective(copy, SYNC)
+
+
+def test_the_external_disk_units_mount_read_only_and_the_verifier_reads_only_copies() -> None:
+    """E4c-3 (point 1 and E4C3-07): three read-only bind mounts and the 256 MiB image of
+    recibos/; the verifier, as kbot_archive, gets the group kbot_upload only in its unit;
+    the archive is written with UMask=0027 so that kbot_sync reads it."""
+    systemd = DEPLOY / "systemd"
+    for name, source in (
+        ("copias", "/srv/kbot/backups"),
+        ("archivo", "/srv/kbot/archive"),
+        ("desafios", "/srv/kbot/externo/publico"),
+    ):
+        unit = (systemd / f"srv-kbot-sftp-{name}.mount").read_text(encoding="utf-8")
+        assert f"What={source}\n" in unit and f"Where=/srv/kbot/sftp/{name}\n" in unit
+        assert "Options=bind,ro\n" in unit
+    receipts = (systemd / "srv-kbot-sftp-recibos.mount").read_text(encoding="utf-8")
+    assert "What=/srv/kbot/externo/recibos.img\n" in receipts and "Type=ext4\n" in receipts
+    assert "Options=loop,nodev,nosuid,noexec\n" in receipts
+    verifier = (systemd / "kbot-archive-externo.service").read_text(encoding="utf-8")
+    assert "User=kbot_archive\n" in verifier and "SupplementaryGroups=kbot_upload\n" in verifier
+    assert "ReadWritePaths=/srv/kbot/externo\n" in verifier and "IPAddressDeny=any" in verifier
+    assert "-m kbot.archive.externo run" in verifier
+    timer = (systemd / "kbot-archive-externo.timer").read_text(encoding="utf-8")
+    assert "OnCalendar=*-*-* *:03/15:00" in timer
+    for name in ("kbot-archive-daily.service", "kbot-archive-prepare.service"):
+        unit = (systemd / name).read_text(encoding="utf-8")
+        assert "UMask=0027" in unit and "SupplementaryGroups" not in unit, name
+    install = (DEPLOY / "install" / "06_externo.sh").read_text(encoding="utf-8")
+    # The key first, and sshd reloaded only after it accepts the whole configuration.
+    assert install.index("PRIVATE KEY") < install.index("usermod -a -G kbot_upload kbot_sync")
+    assert install.index("if ! sshd -t; then") < install.index("systemctl reload ssh")
+    assert 'cp -p "$backup" "$dropin"' in install  # the previous configuration comes back
+    assert 'must_fail as kbot_sync touch "$chroot/copias/x"' in install
+    assert "must_fail as kbot_sync ls /srv/kbot/subidas" in install
 
 
 def test_metadata_guard_is_valid_nftables_and_manages_only_its_table() -> None:

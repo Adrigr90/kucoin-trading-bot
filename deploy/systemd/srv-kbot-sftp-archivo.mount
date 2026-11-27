@@ -1,0 +1,14 @@
+# kbot (02 §13.1, point 4; stage E4c-3): inside the chroot of kbot_sync, the Parquet archive, read-only.
+# A bind mount: kbot_sync reads it only through its SFTP session, and cannot write in it.
+[Unit]
+Description=kbot: archivo/ in the SFTP chroot of kbot_sync (read-only)
+RequiresMountsFor=/srv/kbot
+
+[Mount]
+What=/srv/kbot/archive
+Where=/srv/kbot/sftp/archivo
+Type=none
+Options=bind,ro
+
+[Install]
+WantedBy=multi-user.target

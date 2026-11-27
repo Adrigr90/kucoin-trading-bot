@@ -1,0 +1,47 @@
+# kbot: the verification of the external disk, as kbot_archive (02 §13.1, point 4; stage
+# E4c-3). It publishes the index of the generations and the challenges for the owner's PC,
+# reads its receipts and answers without following any link, and inserts replicado_fuera and
+# verificado_fuera, never the eligibility. Only in this unit it gets the group kbot_upload,
+# to read the register and the manifests of the copies (E4C3-07); it modifies none of them,
+# and it does not see the state of the uploads. No network at all.
+[Unit]
+Description=kbot: verification of the external disk (receipts and challenges)
+Documentation=file:///opt/kbot/docs/especificacion/02_Especificacion_vigente.md
+After=postgresql.service srv-kbot-sftp-recibos.mount
+Requires=postgresql.service srv-kbot-sftp-recibos.mount
+
+[Service]
+Type=oneshot
+User=kbot_archive
+Group=kbot_archive
+SupplementaryGroups=kbot_upload
+WorkingDirectory=/opt/kbot
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/kbot/.venv/bin/python -m kbot.archive.externo run
+TimeoutStartSec=10min
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0027
+ReadWritePaths=/srv/kbot/externo
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any

@@ -1,0 +1,15 @@
+# kbot (02 §13.1, point 4; stage E4c-3): recibos/, the only place where kbot_sync writes, is
+# a filesystem of its own of 256 MiB (an ext4 image of kbot_archive's directory), so the
+# owner's PC can never fill the data volume the archive and the copies depend on.
+[Unit]
+Description=kbot: recibos/ in the SFTP chroot of kbot_sync (256 MiB of its own)
+RequiresMountsFor=/srv/kbot
+
+[Mount]
+What=/srv/kbot/externo/recibos.img
+Where=/srv/kbot/sftp/recibos
+Type=ext4
+Options=loop,nodev,nosuid,noexec
+
+[Install]
+WantedBy=multi-user.target

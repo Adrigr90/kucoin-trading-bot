@@ -152,7 +152,7 @@ verifier._point(
         "sha256": hashlib.sha256(dump).hexdigest(),
         "sha256_manifiesto": hashlib.sha256(manifest).hexdigest(),
         "manifiesto_base64": base64.b64encode(manifest).decode(),
-        "dependencias": held, "sin_errores": True,
+        "dependencias": held, "sin_errores": True, "secuencia": 1,
     },
     report,
 )
@@ -365,9 +365,15 @@ def test_two_visits_of_the_pc_verify_a_generation_through_the_real_sftp(
         b"newer hot copy",
         dias_excluidos=[{"dia": "2015-04-04", "copia_de_dia": s1, "generacion": generation}],
     )
+    # E4C3-11: the cache and the state of the disk, cut as by an unplugged disk.
+    (disk / ".kbot-huellas.json").write_text('{"archivo/x": {"sel', encoding="utf-8")
+    (disk / ".kbot-estado.json").write_text("", encoding="utf-8")
     second = visit(server)
     assert second.returncode == 0, second.stdout + second.stderr
     assert "Desafíos respondidos: 1." in second.stdout, second.stdout
+    for name in (".kbot-huellas.json", ".kbot-estado.json"):
+        assert f"({name}) no se puede leer" in second.stdout, second.stdout
+        json.loads((disk / name).read_text(encoding="utf-8"))  # written whole again
     assert f"{newer.path.name} no es recuperable desde el disco: falta dia-2015-04-04" in (
         second.stdout
     )
@@ -391,6 +397,13 @@ def test_two_visits_of_the_pc_verify_a_generation_through_the_real_sftp(
     assert after["punto"] == record["punto"]
     assert after["ultima_sin_errores"] == record["ultima_sin_errores"]
     assert after["ultima_visita"] > record["ultima_visita"]
+
+    # E4C3-10: the disk loses its only complete hot copy; the server keeps no point.
+    shutil.rmtree(disk / "copias" / hot.path.name)
+    fourth = visit(server)
+    assert "el disco aún no tiene ninguna copia caliente completa" in fourth.stdout, fourth.stdout
+    verifier.run()
+    assert disk_record()["punto"] is None
 
     # E4C3-07: what the verifier reads, as its unit runs it.
     marker = (disk / ".kbot-disco").read_text(encoding="utf-8").strip()

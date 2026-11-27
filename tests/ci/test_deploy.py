@@ -236,6 +236,60 @@ def test_kbot_sync_gets_only_sftp_in_its_chroot_and_the_administrator_nothing_of
     assert any(line.startswith("subsystem sftp ") for line in whole)
 
 
+# As root: the lines of 06_externo.sh that prepare the image of recibos/ (E4C3-15), in a
+# temporary directory. A creation cut short is done again; an image in use keeps its receipts;
+# an image that is not a file system stops the script and is left as it was.
+_IMAGE = r"""
+set -euo pipefail
+work="$(mktemp -d /tmp/kbot-recibos.XXXXXX)"
+trap 'umount -q "$work/m" 2>/dev/null || true; rm -rf "$work"' EXIT
+externo="$work"
+chroot="$work/sftp"
+mkdir -p "$chroot/recibos" "$work/m"
+prepare() (
+@BLOCK@
+)
+truncate -s 256M "$externo/recibos.img.tmp"  # cut before mkfs.ext4 ended
+prepare
+test -f "$externo/recibos.img" && test ! -e "$externo/recibos.img.tmp"
+e2fsck -n "$externo/recibos.img" >/dev/null
+echo "a cut creation is done again"
+mount -o loop "$externo/recibos.img" "$work/m"
+echo recibo > "$work/m/recibo_x.json"
+umount "$work/m"
+prepare
+mount -o loop,ro "$externo/recibos.img" "$work/m"
+grep -qx recibo "$work/m/recibo_x.json"
+umount "$work/m"
+echo "the receipts are kept"
+rm "$externo/recibos.img"
+truncate -s 256M "$externo/recibos.img"  # an image that is not a file system
+if prepare 2>/dev/null; then
+  echo "a broken image was accepted"
+  exit 1
+fi
+test "$(stat -c %s "$externo/recibos.img")" = 268435456
+cmp -n 1048576 "$externo/recibos.img" /dev/zero
+echo "a broken image is left alone"
+"""
+
+
+def test_the_image_of_the_receipts_survives_a_cut_and_is_never_formatted_again() -> None:
+    for name in ("mkfs.ext4", "e2fsck", "mountpoint"):
+        tool(name)
+    install = (DEPLOY / "install" / "06_externo.sh").read_text(encoding="utf-8")
+    begin = install.index("# begin: the image of recibos/")
+    end = install.index("# end: the image of recibos/")
+    done = run(*as_root("bash", "-c", _IMAGE.replace("@BLOCK@", install[begin:end])))
+    assert done.returncode == 0, done.stdout + done.stderr
+    for line in (
+        "a cut creation is done again",
+        "the receipts are kept",
+        "a broken image is left alone",
+    ):
+        assert line in done.stdout, done.stdout
+
+
 def test_the_external_disk_units_mount_read_only_and_the_verifier_reads_only_copies() -> None:
     """E4c-3 (point 1 and E4C3-07): three read-only bind mounts and the 256 MiB image of
     recibos/; the verifier, as kbot_archive, gets the group kbot_upload only in its unit;

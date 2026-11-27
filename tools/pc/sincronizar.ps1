@@ -40,6 +40,29 @@ function Write-Utf8([string]$Path, [string]$Text) {
     [System.IO.File]::WriteAllText($Path, $Text, $Utf8)
 }
 
+function Write-Utf8Durable([string]$Path, [string]$Text) {
+    # A temporary file next to it, flushed to the disk, then a replacement: a cut or an
+    # unplugged disk leaves the old file or the new one, never half of one (E4C3-11).
+    $tmp = $Path + '.tmp'
+    $bytes = $Utf8.GetBytes($Text)
+    $stream = New-Object System.IO.FileStream($tmp, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+    try { $stream.Write($bytes, 0, $bytes.Length); $stream.Flush($true) } finally { $stream.Dispose() }
+    if (Test-Path -LiteralPath $Path) {
+        [System.IO.File]::Replace($tmp, $Path, [NullString]::Value)
+    } else {
+        [System.IO.File]::Move($tmp, $Path)
+    }
+}
+
+function Read-Optional([string]$Path) {
+    # The JSON of a file of the disk's own, or $null when it is missing; $false when it is
+    # there and cannot be read (cut, empty, or not an object): its data are not trusted.
+    if (-not (Test-Path -LiteralPath $Path)) { return $null }
+    try { $value = Read-Json $Path } catch { return $false }
+    if ($null -eq $value -or $value -isnot [System.Management.Automation.PSCustomObject]) { return $false }
+    return $value
+}
+
 function Read-Json([string]$Path) {
     return ([System.IO.File]::ReadAllText($Path, $Utf8) | ConvertFrom-Json)
 }
@@ -68,7 +91,7 @@ if (-not (Test-Path -LiteralPath $Marca)) {
     }
     $bytes = New-Object byte[] 16
     [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
-    Write-Utf8 $Marca ((($bytes | ForEach-Object { $_.ToString('x2') }) -join '') + "`n")
+    Write-Utf8Durable $Marca ((($bytes | ForEach-Object { $_.ToString('x2') }) -join '') + "`n")
 }
 $Disco = ([System.IO.File]::ReadAllText($Marca, $Utf8)).Trim()
 if ($Disco -notmatch '^[0-9a-f]{32}$') { throw "$Marca no tiene un identificador válido." }
@@ -112,19 +135,38 @@ function Invoke-Sftp([string[]]$Commands, [switch]$Listing) {
 function Quote([string]$Path) { return '"' + $Path.Replace('\', '/') + '"' }
 
 # --- the fingerprints of the disk, with a cache by size and time (a full check ignores it) ------
+# A cache or a state that cannot be read is discarded, and this visit checks everything
+# (E4C3-11): nothing of what it said is trusted.
+$Ilegible = $false
 $Huellas = @{}
-if (Test-Path -LiteralPath $CacheHuellas) {
-    $cached = Read-Json $CacheHuellas
-    foreach ($p in $cached.PSObject.Properties) { $Huellas[$p.Name] = $p.Value }
+$cached = Read-Optional $CacheHuellas
+if ($cached -is [bool]) {
+    $Ilegible = $true
+    $Avisos.Add('la caché de huellas del disco (.kbot-huellas.json) no se puede leer: se descarta y esta visita lo comprueba todo')
+} elseif ($null -ne $cached) {
+    foreach ($p in $cached.PSObject.Properties) {
+        if ((Has-Property $p.Value 'sello') -and (Has-Property $p.Value 'sha256')) { $Huellas[$p.Name] = $p.Value }
+    }
 }
-$Estado = $null
-if (Test-Path -LiteralPath $EstadoDisco) { $Estado = Read-Json $EstadoDisco }
+$Estado = Read-Optional $EstadoDisco
+if ($Estado -is [bool]) {
+    $Ilegible = $true
+    $Estado = $null
+    $Avisos.Add('el estado del disco (.kbot-estado.json) no se puede leer: se descarta y esta visita lo comprueba todo')
+}
 $UltimaCompleta = $null
 if ((Has-Property $Estado 'ultima_completa') -and $Estado.ultima_completa) {
     $UltimaCompleta = [datetime]::Parse($Estado.ultima_completa, [Globalization.CultureInfo]::InvariantCulture)
 }
 $Ahora = [datetime]::UtcNow
-$TodoEntero = $Completa -or ($null -eq $UltimaCompleta) -or (($Ahora - $UltimaCompleta).TotalDays -ge 30)
+$TodoEntero = $Completa -or $Ilegible -or ($null -eq $UltimaCompleta) -or (($Ahora - $UltimaCompleta).TotalDays -ge 30)
+# What this disk last sent to recibos/, name by name, and the number of its last observation.
+$Subidos = @{}
+if ((Has-Property $Estado 'subidos') -and $null -ne $Estado.subidos) {
+    foreach ($p in $Estado.subidos.PSObject.Properties) { $Subidos[$p.Name] = [string]$p.Value }
+}
+$SecuenciaLocal = [int64]0
+if ((Has-Property $Estado 'secuencia') -and $Estado.secuencia) { $SecuenciaLocal = [int64]$Estado.secuencia }
 
 $EnEstaVisita = @{}   # what was hashed again in this visit: never twice
 function Get-Sha256([string]$Path, [switch]$Fresh) {
@@ -149,12 +191,21 @@ New-Item -ItemType Directory -Path $desafiosLocal -Force | Out-Null
 Invoke-Sftp @(
     "get desafios/generaciones.json $(Quote $meta)/",
     "get desafios/procesados.json $(Quote $meta)/",
+    "-get desafios/discos.json $(Quote $meta)/",
     "-get desafios/desafio_*.json $(Quote $desafiosLocal)/",
     "get copias/registro.jsonl $(Quote $meta)/registro.jsonl",
     "-get copias/globales/registro.jsonl $(Quote $meta)/registro_globales.jsonl"
 )
 $indice = @(Read-Json (Join-Path $meta 'generaciones.json'))
 $procesados = Read-Json (Join-Path $meta 'procesados.json')
+# The number of this visit's observation of the recoverable point: above the last one the
+# server accepted for this disk and above the last one this disk sent (E4C3-10).
+$observada = [int64]0
+$discosServidor = Read-Optional (Join-Path $meta 'discos.json')
+if ($discosServidor -and (Has-Property $discosServidor $Disco) -and (Has-Property $discosServidor.$Disco 'observacion')) {
+    $observada = [int64]$discosServidor.$Disco.observacion
+}
+$Secuencia = [Math]::Max($observada, $SecuenciaLocal) + 1
 $listaCopias = @(Invoke-Sftp @('ls -1 copias') -Listing)
 $listaGlobales = @(Invoke-Sftp @('-ls -1 copias/globales') -Listing)
 
@@ -375,7 +426,7 @@ if (Test-Path -LiteralPath $copiasDisco) {
             continue
         }
         $punto = [ordered]@{
-            tipo = 'punto'; disco = $Disco; copia = $name
+            tipo = 'punto'; disco = $Disco; secuencia = $Secuencia; copia = $name
             sha256 = $registro[$name].sha256_cifrado; sha256_manifiesto = $registro[$name].sha256_manifiesto
             manifiesto_base64 = [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($manifest))
             dependencias = $dependencias; sin_errores = ($Errores.Count -eq 0)
@@ -383,28 +434,54 @@ if (Test-Path -LiteralPath $copiasDisco) {
         break
     }
 }
-if ($punto) { Write-Utf8 (Join-Path $Salida 'recibo_punto.json') (ConvertTo-Json $punto -Depth 6 -Compress) }
+# The observation is sent in every visit, also when no hot copy is complete on the disk, so
+# that the server never keeps a point the disk has lost (E4C3-10).
+$observacion = $punto
+if (-not $observacion) {
+    $observacion = [ordered]@{ tipo = 'punto'; disco = $Disco; secuencia = $Secuencia; copia = $null; sin_errores = ($Errores.Count -eq 0) }
+}
+Write-Utf8 (Join-Path $Salida 'recibo_punto.json') (ConvertTo-Json $observacion -Depth 6 -Compress)
 
 # --- 7. delete what the server already processed, then upload ----------------------------------
+$salientes = @{}   # name -> SHA-256 of what this visit sends
+foreach ($file in @(Get-ChildItem -LiteralPath $Salida -File)) {
+    $salientes[$file.Name] = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName).Hash.ToLowerInvariant()
+}
 $comandos = @()
-foreach ($p in $procesados.PSObject.Properties) { $comandos += "-rm recibos/$($p.Name)" }
+foreach ($p in $procesados.PSObject.Properties) {
+    # Only a file the server processed exactly as this disk last sent it (E4C3-09); one that
+    # is sent again now is simply replaced.
+    if ($Subidos.ContainsKey($p.Name) -and $Subidos[$p.Name] -eq [string]$p.Value -and -not $salientes.ContainsKey($p.Name)) {
+        $comandos += "-rm recibos/$($p.Name)"
+        $Subidos.Remove($p.Name)
+    }
+}
 foreach ($file in @(Get-ChildItem -LiteralPath $Salida -File)) { $comandos += "put $(Quote $file.FullName) recibos/$($file.Name)" }
-if ($comandos.Count -gt 0) { Invoke-Sftp $comandos }
+foreach ($name in @($salientes.Keys)) { $Subidos[$name] = $salientes[$name] }
+
+function Save-State([bool]$Done) {
+    $estado = [ordered]@{
+        ultima_visita = $(if ($Done) { $Ahora.ToString('o') } elseif ((Has-Property $Estado 'ultima_visita')) { $Estado.ultima_visita } else { $null })
+        ultima_completa = $(if ($Done -and $TodoEntero) { $Ahora.ToString('o') } elseif ($UltimaCompleta) { $UltimaCompleta.ToString('o') } else { $null })
+        secuencia = $Secuencia
+        subidos = [pscustomobject]$Subidos
+    }
+    Write-Utf8Durable $EstadoDisco (ConvertTo-Json $estado -Depth 4)
+}
+# The number of the observation is kept before sending it, so that it is never used twice.
+Save-State $false
+Invoke-Sftp $comandos
 
 # --- 8. the state of the disk, and the summary ------------------------------------------------
-$nuevoEstado = [ordered]@{
-    ultima_visita = $Ahora.ToString('o')
-    ultima_completa = $(if ($TodoEntero) { $Ahora.ToString('o') } elseif ($UltimaCompleta) { $UltimaCompleta.ToString('o') } else { $null })
-}
-Write-Utf8 $EstadoDisco (ConvertTo-Json $nuevoEstado)
-Write-Utf8 $CacheHuellas (ConvertTo-Json ([pscustomobject]$Huellas) -Depth 4)
+Save-State $true
+Write-Utf8Durable $CacheHuellas (ConvertTo-Json ([pscustomobject]$Huellas) -Depth 4)
 Remove-Item -LiteralPath $Temporal -Recurse -Force
 
 $libre = $null
 try { $libre = [System.IO.DriveInfo]::new((Get-Item -LiteralPath $Destino).FullName).AvailableFreeSpace } catch { }
 Write-Host "== kbot: sincronización del disco $Disco"
 Write-Host "Descargado y comprobado: $($Descargados.Count) archivos."
-Write-Host "Recibos enviados: $recibosEscritos de generación$(if ($punto) { ' y el del punto recuperable' })."
+Write-Host "Recibos enviados: $recibosEscritos de generación y el del punto recuperable (observación $Secuencia)."
 Write-Host "Desafíos respondidos: $respondidos."
 if ($punto) {
     $hora = [datetime]::ParseExact($punto.copia.Substring(9), 'yyyyMMddTHHmmssZ', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AdjustToUniversal -bor [Globalization.DateTimeStyles]::AssumeUniversal)

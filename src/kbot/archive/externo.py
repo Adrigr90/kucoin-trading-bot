@@ -19,8 +19,17 @@ copies and modifies none. One run:
    to the last valid receipt, issued in an earlier run, with every SHA-256 equal;
 5. the receipt of the recoverable point carries the whole manifest of a hot copy, which is
    authenticated against the register of the copies, never deleted (E4C3-08); its
-   dependencies must be exactly the ones that manifest fixes (E4C3-02 and E4C3-03);
-6. at most two disks are admitted (E4C3-04); ``retirar-disco`` frees one.
+   dependencies must be exactly the ones that manifest fixes (E4C3-02 and E4C3-03). It is
+   the disk's current observation: a newer one replaces the point, also with an older copy
+   or with none, and an older one is refused (E4C3-10);
+6. at most two disks are admitted (E4C3-04); ``retirar-disco`` frees one, and what was
+   refused for lack of room is looked at again (E4C3-12).
+
+Every transition is saved before anything announces it (E4C3-09): the challenges, their
+withdrawal, the observations of each disk and the acknowledgements of ``procesados.json``
+are published only from the saved state, at the end of each run and again at the start of
+the next one. A file of ``recibos/`` already processed and not touched since is skipped
+without reading it, so the limit of reads per run always moves the queue on (E4C3-13).
 
 It never inserts ``elegible_para_exclusion_backup``: that comes with stage E4c-4.
 """
@@ -66,6 +75,15 @@ class Rejected(Exception):
     """A receipt or an answer that does not hold: it changes nothing but its own record."""
 
 
+class Ignored(Rejected):
+    """Not even read: a link, a directory, a file of another owner or too big."""
+
+
+class NotAdmitted(Rejected):
+    """Refused only because of which disks are admitted: looked at again when that set
+    changes (E4C3-12)."""
+
+
 @dataclass(frozen=True)
 class ServerFile:
     path: str  # relative to the archive root, as market.archive_files keeps it
@@ -93,28 +111,33 @@ def _disk(value: object) -> str:
     return value
 
 
+def _stamp(info: os.stat_result) -> str:
+    """What changes whenever a file of ``recibos/`` is written again or replaced."""
+    return f"{info.st_ino}:{info.st_size}:{info.st_mtime_ns}"
+
+
 @contextmanager
-def _opened(path: Path, owner: int | None, limit: int) -> Iterator[bytes]:
-    """The bytes of a file of ``recibos/``, read without following any link, only if it is
-    a regular file of ``owner`` (kbot_sync) and no bigger than ``limit``."""
+def _opened(path: Path, owner: int | None, limit: int) -> Iterator[tuple[bytes, str]]:
+    """The bytes of a file of ``recibos/`` and its stamp, read without following any link,
+    only if it is a regular file of ``owner`` (kbot_sync) and no bigger than ``limit``."""
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
         descriptor = os.open(path, flags)
     except OSError as error:
-        raise Rejected(f"cannot open without following links: {error.strerror}") from error
+        raise Ignored(f"cannot open without following links: {error.strerror}") from error
     try:
         info = os.fstat(descriptor)
         if not stat.S_ISREG(info.st_mode):
-            raise Rejected("not a regular file")
+            raise Ignored("not a regular file")
         if owner is not None and info.st_uid != owner:
-            raise Rejected("not a file of kbot_sync")
+            raise Ignored("not a file of kbot_sync")
         if info.st_size > limit:
-            raise Rejected(f"bigger than {limit} bytes")
+            raise Ignored(f"bigger than {limit} bytes")
         with os.fdopen(descriptor, "rb", closefd=False) as handle:
             content = handle.read(limit + 1)
         if len(content) > limit:
-            raise Rejected(f"bigger than {limit} bytes")
-        yield content
+            raise Ignored(f"bigger than {limit} bytes")
+        yield content, _stamp(info)
     finally:
         os.close(descriptor)
 
@@ -242,29 +265,64 @@ class Verifier:
             pass
         durable.write_json(path, value, self.ops)
 
-    def _withdraw(self, challenge: Mapping[str, Any] | None) -> None:
-        if challenge:
-            (self.public / f"desafio_{challenge['id']}.json").unlink(missing_ok=True)
+    def _announce(self) -> None:
+        """Publishes what the saved state says, and only that (E4C3-09): each pending
+        challenge and no other, the last observation of each disk, and the acknowledgements
+        the PC deletes by. Called only with the state as it is on disk."""
+        pending = {
+            pair["desafio"]["id"]: pair["desafio"]["publico"]
+            for pair in self.state["pares"].values()
+            if pair.get("desafio")
+        }
+        for identifier, public in sorted(pending.items()):
+            self._publish(f"desafio_{identifier}.json", public)
+        for path in sorted(self.public.glob("desafio_*.json")):
+            if path.name[len("desafio_") : -len(".json")] not in pending:
+                path.unlink(missing_ok=True)
+        self._publish(
+            "discos.json",
+            {
+                disk: {"observacion": int(record.get("observacion", 0))}
+                for disk, record in sorted(self.state["discos"].items())
+            },
+        )
+        self._publish(
+            "procesados.json",
+            {name: entry.get("sha256") for name, entry in sorted(self.state["procesados"].items())},
+        )
 
     # -- the run --------------------------------------------------------------------------
     def run(self) -> Report:
         report = Report()
         self._load()
+        self._announce()  # what an interrupted run could not publish, from the saved state
         self.state["ejecucion"] = int(self.state.get("ejecucion", 0)) + 1
         with self.connect() as conn:
             generations = server_generations(conn)
             states = generation_states(conn)
             self._publish("generaciones.json", index(generations, self._verified_disks()))
             report.published = True
-            for name in sorted(os.listdir(self.receipts))[:PER_RUN]:
+            reads = PER_RUN
+            for name in sorted(os.listdir(self.receipts)):
+                if reads == 0:
+                    break
+                if self._unchanged(name):
+                    continue  # processed and not touched since: not even read (E4C3-13)
+                reads -= 1
                 self._one(conn, name, generations, states, report)
         self._prune()
-        self._publish(
-            "procesados.json",
-            {name: entry["sha256"] for name, entry in sorted(self.state["procesados"].items())},
-        )
         self._save()
+        self._announce()
         return report
+
+    def _unchanged(self, name: str) -> bool:
+        entry = self.state["procesados"].get(name)
+        if not entry or "sello" not in entry:
+            return False
+        try:
+            return _stamp(os.lstat(self.receipts / name)) == entry["sello"]
+        except OSError:
+            return True  # gone since the listing: nothing to do
 
     def _one(
         self,
@@ -274,13 +332,18 @@ class Verifier:
         states: dict[str, set[str]],
         report: Report,
     ) -> None:
+        path = self.receipts / name
         limit = POINT_LIMIT if name == "recibo_punto.json" else RECEIPT_LIMIT
+        processed = self.state["procesados"]
+        previous = processed.get(name, {})
         try:
-            with _opened(self.receipts / name, self.owner, limit) as content:
+            with _opened(path, self.owner, limit) as (content, seen):
                 digest = hashlib.sha256(content).hexdigest()
-                if self.state["procesados"].get(name, {}).get("sha256") == digest:
-                    return  # already processed: the PC deletes it on its next visit
-                self.state["procesados"][name] = {"sha256": digest, "fecha": self._today()}
+                processed[name] = {"sha256": digest, "sello": seen, "fecha": self._today()}
+                if previous.get("sha256") == digest:
+                    if previous.get("por_discos"):
+                        processed[name]["por_discos"] = True
+                    return  # the same bytes written again: processed already
                 document = json.loads(content)
                 if not isinstance(document, dict):
                     raise Rejected("not a JSON object")
@@ -293,6 +356,17 @@ class Verifier:
                     self._point(document, report)
                 else:
                     raise Rejected(f"unknown kind {kind!r}")
+        except Ignored as error:
+            try:  # recorded by its stamp, so that it is not looked at again until it changes
+                seen = _stamp(os.lstat(path))
+            except OSError:
+                seen = None
+            if seen is not None:
+                processed[name] = {"sha256": None, "sello": seen, "fecha": self._today()}
+            report.rejected.append(f"{name}: {error}")
+        except NotAdmitted as error:
+            processed[name]["por_discos"] = True
+            report.rejected.append(f"{name}: {error}")
         except Rejected as error:
             report.rejected.append(f"{name}: {error}")
         except (ValueError, KeyError, TypeError) as error:
@@ -322,22 +396,31 @@ class Verifier:
         disks: dict[str, Any] = self.state["discos"]
         if disk not in disks:
             if len(disks) >= MAX_DISKS:
-                raise Rejected(f"disk {disk} not admitted: already {MAX_DISKS} disks")
+                raise NotAdmitted(f"disk {disk} not admitted: already {MAX_DISKS} disks")
             disks[disk] = {
                 "admitido": self.clock().isoformat(),
+                "observacion": 0,
                 "ultima_visita": None,
                 "ultima_sin_errores": None,
                 "punto": None,
             }
-        disks[disk]["ultima_visita"] = self.clock().isoformat()
+            self._disks_changed()
         return disks[disk]
+
+    def _disks_changed(self) -> None:
+        """What was refused only because of the admitted disks is read again (E4C3-12)."""
+        processed = self.state["procesados"]
+        for name in [n for n, e in processed.items() if e.get("por_discos")]:
+            del processed[name]
 
     def retire_disk(self, disk: str) -> None:
         self._load()
         self.state["discos"].pop(_disk(disk), None)
         for key in [k for k in self.state["pares"] if k.endswith(f"|{disk}")]:
-            self._withdraw(self.state["pares"].pop(key).get("desafio"))
+            del self.state["pares"][key]
+        self._disks_changed()
         self._save()
+        self._announce()  # its challenges are withdrawn only once that is saved
 
     # -- generation receipts (E4C3-01 and its residual) ------------------------------------
     def _receipt(
@@ -371,8 +454,7 @@ class Verifier:
         pair["recibo"] = digest
         if not valid:
             pair["valido"] = False
-            self._withdraw(pair["desafio"])
-            pair["desafio"] = None
+            pair["desafio"] = None  # annulled; withdrawn once that is saved
             raise Rejected(f"generation {generation}: its files are not the server's")
         pair["valido"] = True
         if "replicado_fuera" not in states.get(generation, set()):
@@ -381,8 +463,7 @@ class Verifier:
         report.accepted.append(generation)
         if pair["verificado"]:
             return  # a later check that still holds: nothing new to prove
-        self._withdraw(pair["desafio"])
-        pair["desafio"] = self._challenge(generation, disk, digest, files)
+        pair["desafio"] = self._challenge(generation, disk, digest, files)  # replaces the old
 
     def _challenge(
         self, generation: str, disk: str, receipt: str, files: Mapping[str, ServerFile]
@@ -399,12 +480,12 @@ class Verifier:
             items.append({"ruta": path, "desde": offset, "bytes": length, "nonce": nonce.hex()})
             expected.append(hashlib.sha256(nonce + chunk).hexdigest())
         public = {"id": identifier, "generacion": generation, "disco": disk, "pruebas": items}
-        self._publish(f"desafio_{identifier}.json", public)
-        return {
+        return {  # published only once the state that holds it is saved (E4C3-09)
             "id": identifier,
             "recibo": receipt,
             "ejecucion": self.state["ejecucion"],
             "esperadas": expected,
+            "publico": public,
         }
 
     # -- answers ------------------------------------------------------------------------
@@ -432,19 +513,39 @@ class Verifier:
                 insert_state(conn, generation, state)
                 states.setdefault(generation, set()).add(state)
         pair["verificado"] = True
-        self._withdraw(challenge)
-        pair["desafio"] = None
+        pair["desafio"] = None  # withdrawn once that is saved
         report.verified.append(generation)
 
-    # -- the recoverable point (E4C3-02, E4C3-03 and E4C3-08) --------------------------------
+    # -- the recoverable point (E4C3-02, E4C3-03, E4C3-08, E4C3-10 and E4C3-14) --------------
     def _point(self, document: Mapping[str, Any], report: Report) -> None:
+        """The disk's observation of its recoverable point in one visit. The PC numbers its
+        observations (``secuencia``), above the last one the server accepted; a newer one
+        replaces the point, even with an older hot copy or with none (``copia`` null), and
+        an older one is refused. Nothing of the disk changes unless it is accepted whole."""
         disk = _disk(document["disco"])
-        if disk not in self.state["discos"]:
-            raise Rejected(f"disk {disk} not admitted")
-        record = self._admit(disk)
+        record = self.state["discos"].get(disk)
+        if record is None:
+            raise NotAdmitted(f"disk {disk} not admitted")
+        sequence = document["secuencia"]
+        if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 1:
+            raise Rejected("the observation has no valid sequence number")
+        if sequence <= int(record.get("observacion", 0)):
+            raise Rejected(
+                f"an observation ({sequence}) not newer than the last accepted one"
+                f" ({record.get('observacion', 0)})"
+            )
+        name = document["copia"]
+        point = None if name is None else self._hot_point(str(name), document)
+        now = self.clock().isoformat()
+        record["observacion"] = sequence
+        record["punto"] = point
+        record["ultima_visita"] = now
         if document.get("sin_errores") is True:
-            record["ultima_sin_errores"] = self.clock().isoformat()
-        name = str(document["copia"])
+            record["ultima_sin_errores"] = now
+        if point is not None:
+            report.points.append(point["copia"])
+
+    def _hot_point(self, name: str, document: Mapping[str, Any]) -> dict[str, str]:
         entry = register_entries(self.copies).get(name)
         manifest_bytes = base64.b64decode(str(document["manifiesto_base64"]), validate=True)
         if entry is None or not name.startswith(HOT_PREFIX):
@@ -474,11 +575,7 @@ class Verifier:
         }
         if held != fixed:
             raise Rejected(f"{name}: the disk does not hold exactly the dependencies it fixes")
-        moment = copy_time(name)
-        current = record.get("punto")
-        if current is None or datetime.fromisoformat(current["hora"]) < moment:
-            record["punto"] = {"copia": name, "hora": moment.isoformat()}
-        report.points.append(name)
+        return {"copia": name, "hora": copy_time(name).isoformat()}
 
 
 @contextmanager

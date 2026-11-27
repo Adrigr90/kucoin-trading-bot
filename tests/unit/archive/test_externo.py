@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 
 from kbot.archive import externo
+from kbot.upload import durable
 
 GENERATION = str(uuid.UUID("1b9d6bcd-bbfd-4b2d-9b5d-ab8dfbbd4bed"))
 DAY = date(2026, 11, 22)
@@ -80,6 +81,7 @@ class Setup:
         (self.copies / externo.REGISTER).write_text("", encoding="utf-8")
         self.conn = FakeConn(self.files)
         self.now = NOW
+        self.ops: durable.FileOps = durable.REAL
 
     def verifier(self) -> externo.Verifier:
         return externo.Verifier(
@@ -90,6 +92,7 @@ class Setup:
             copies=self.copies,
             owner=None,
             clock=lambda: self.now,
+            ops=self.ops,
         )
 
     def run(self) -> externo.Report:
@@ -182,7 +185,7 @@ def test_an_answer_in_the_run_that_issued_the_challenge_does_not_count(
 
     def answer_at_once(*args: Any) -> dict[str, Any]:
         issued = original(*args)
-        s.send("respuesta_ya.json", s.answer(s.challenge()))
+        s.send("respuesta_ya.json", s.answer(issued["publico"]))
         return issued
 
     monkeypatch.setattr(verifier, "_challenge", answer_at_once)
@@ -308,11 +311,16 @@ def test_at_most_two_disks_and_bounded_output_for_repeated_receipts(tmp_path: Pa
     assert len(s.state()["pares"]) == 2
     s.send("recibo_tercero.json", s.receipt(disk=THIRD))
     assert any("not admitted" in r for r in s.run().rejected)
+    assert s.run().rejected == []  # the same file, untouched: not read again
     s.verifier().retire_disk(OTHER)
     assert len(list((s.base / "publico").glob("desafio_*.json"))) == 1
-    s.send("recibo_tercero.json", s.receipt(disk=THIRD) | {"filler": 1})
-    s.run()
+    # E4C3-12: the very same file of the third disk, not even sent again, is admitted now.
+    assert s.run().accepted == [GENERATION]
     assert set(s.state()["discos"]) == {DISK, THIRD}
+    assert len(list((s.base / "publico").glob("desafio_*.json"))) == 2
+    s.send("recibo_tercero.json", s.receipt(disk=THIRD))  # the same bytes written again
+    assert s.run().accepted == []  # an accepted receipt repeated is still idempotent
+    assert len(list((s.base / "publico").glob("desafio_*.json"))) == 2
 
 
 def manifest_of(name: str, dependencies: list[dict[str, str]]) -> bytes:
@@ -339,10 +347,13 @@ def register(s: Setup, name: str, dump: bytes, manifest: bytes) -> None:
         handle.write(json.dumps(entry) + "\n")
 
 
-def point(name: str, dump: bytes, manifest: bytes, held: list[dict[str, str]]) -> dict[str, Any]:
+def point(
+    name: str, dump: bytes, manifest: bytes, held: list[dict[str, str]], sequence: int = 1
+) -> dict[str, Any]:
     return {
         "tipo": "punto",
         "disco": DISK,
+        "secuencia": sequence,
         "copia": name,
         "sha256": hashlib.sha256(dump).hexdigest(),
         "sha256_manifiesto": hashlib.sha256(manifest).hexdigest(),
@@ -352,12 +363,11 @@ def point(name: str, dump: bytes, manifest: bytes, held: list[dict[str, str]]) -
     }
 
 
-def test_the_recoverable_point_is_authenticated_by_the_register_and_never_goes_back(
-    tmp_path: Path,
-) -> None:
-    """E4C3-02, E4C3-03 and E4C3-08: the manifest comes in the receipt and is authenticated
+def test_the_recoverable_point_is_authenticated_by_the_register(tmp_path: Path) -> None:
+    """E4C3-02, E4C3-08 and E4C3-14: the manifest comes in the receipt and is authenticated
     by the register, so the copy may already be gone from the server; the disk must hold
-    exactly the dependencies; an older point never replaces a newer one."""
+    exactly the dependencies; a refused observation changes nothing of the disk, not even
+    its last sync without errors."""
     s = Setup(tmp_path)
     s.send(f"recibo_{GENERATION}.json", s.receipt())  # admits the disk
     s.run()
@@ -370,22 +380,58 @@ def test_the_recoverable_point_is_authenticated_by_the_register_and_never_goes_b
     record = s.state()["discos"][DISK]
     assert record["punto"] == {"copia": h, "hora": "2026-11-27T00:41:39+00:00"}
     assert record["ultima_sin_errores"] == NOW.isoformat()
-    # An altered manifest, other dependencies, or an unknown copy are refused.
+    # An altered manifest, other dependencies, other SHA-256 or an unknown copy are refused,
+    # and leave the disk as it was (E4C3-14).
+    s.now = NOW + timedelta(hours=1)
     altered = manifest.replace(b"2026-11-22", b"2026-11-23")
     s.send(
         "recibo_punto.json",
-        point(h, dump, altered, [s1]) | {"sha256_manifiesto": hashlib.sha256(manifest).hexdigest()},
+        point(h, dump, altered, [s1], 2)
+        | {"sha256_manifiesto": hashlib.sha256(manifest).hexdigest()},
     )
     assert any("not the one of the register" in r for r in s.run().rejected)
     s2 = dict(s1, sha256="3" * 64)  # the same day with another identity (S1 / S2)
-    s.send("recibo_punto.json", point(h, dump, manifest, [s2]))
+    s.send("recibo_punto.json", point(h, dump, manifest, [s2], 3))
     assert any("dependencies" in r for r in s.run().rejected)
-    older = "caliente-20261126T004000Z"
-    old_dump, old_manifest = b"old", manifest_of(older, [])
-    register(s, older, old_dump, old_manifest)
-    s.send("recibo_punto.json", point(older, old_dump, old_manifest, []))
+    s.send("recibo_punto.json", point(h, b"other", manifest, [s1], 4))
+    assert any("not the ones of the register" in r for r in s.run().rejected)
+    s.send("recibo_punto.json", point("caliente-20261128T004000Z", dump, manifest, [s1], 5))
+    assert any("not a hot copy of the register" in r for r in s.run().rejected)
+    assert s.state()["discos"][DISK] == record
+
+
+def test_the_point_follows_the_disk_and_never_an_older_observation(tmp_path: Path) -> None:
+    """E4C3-10: H27 complete, then its dependency lost and H20 the newest complete one, then
+    none complete: the server keeps each situation, also going back or to none. An older
+    observation sent again is refused, and changes nothing."""
+    s = Setup(tmp_path)
+    s.send(f"recibo_{GENERATION}.json", s.receipt())  # admits the disk
     s.run()
-    assert s.state()["discos"][DISK]["punto"]["copia"] == h
+    d27 = {"copia": "dia-2026-11-22", "sha256": "1" * 64, "sha256_manifiesto": "2" * 64}
+    h27, h20 = "caliente-20261127T004000Z", "caliente-20261120T004000Z"
+    dump27, manifest27 = b"hot 27", manifest_of(h27, [d27])
+    dump20, manifest20 = b"hot 20", manifest_of(h20, [])
+    register(s, h27, dump27, manifest27)
+    register(s, h20, dump20, manifest20)
+
+    def observed() -> dict[str, Any] | None:
+        return s.state()["discos"][DISK]["punto"]  # type: ignore[no-any-return]
+
+    first = point(h27, dump27, manifest27, [d27], 1)
+    s.send("recibo_punto.json", first)
+    s.run()
+    assert observed() == {"copia": h27, "hora": "2026-11-27T00:40:00+00:00"}
+    s.send("recibo_punto.json", point(h20, dump20, manifest20, [], 2))  # d27 lost
+    s.run()
+    assert observed() == {"copia": h20, "hora": "2026-11-20T00:40:00+00:00"}
+    s.send("recibo_punto.json", point(h20, dump20, manifest20, [], 3) | {"copia": None})
+    s.run()
+    assert observed() is None  # nothing complete on the disk
+    public = json.loads((s.base / "publico" / "discos.json").read_text(encoding="utf-8"))
+    assert public == {DISK: {"observacion": 3}}
+    s.send("recibo_punto.json", first)  # an old observation, byte for byte
+    assert any("not newer" in r for r in s.run().rejected)
+    assert observed() is None
 
 
 def test_the_rpo_of_the_disk_is_the_age_of_its_point_and_not_of_the_visit(
@@ -409,12 +455,118 @@ def test_the_rpo_of_the_disk_is_the_age_of_its_point_and_not_of_the_visit(
     )
     assert record["ultima_visita"] == record["ultima_sin_errores"] == s.now.isoformat()
     s.now += timedelta(days=1)
-    s.send("recibo_punto.json", point(h, dump, manifest, []) | {"sin_errores": False})
+    s.send("recibo_punto.json", point(h, dump, manifest, [], 2) | {"sin_errores": False})
     s.run()
     later = s.state()["discos"][DISK]
     assert later["punto"] == record["punto"]
     assert later["ultima_visita"] == s.now.isoformat()
     assert later["ultima_sin_errores"] == record["ultima_sin_errores"]  # that visit had errors
+
+
+class StateFails(durable.FileOps):
+    """The private state cannot be written; everything else can."""
+
+    def write(self, path: Path, data: bytes) -> None:
+        if path.name == ".estado.json.tmp":
+            raise OSError(28, "No space left on device")
+        super().write(path, data)
+
+
+def published(s: Setup) -> tuple[set[str], dict[str, Any]]:
+    challenges = {p.name for p in (s.base / "publico").glob("desafio_*.json")}
+    acknowledged = json.loads((s.base / "publico" / "procesados.json").read_text("utf-8"))
+    return challenges, acknowledged
+
+
+def test_nothing_is_announced_before_the_state_that_holds_it_is_saved(tmp_path: Path) -> None:
+    """E4C3-09: while the state cannot be saved, no challenge, withdrawal or acknowledgement
+    is published, however many runs; once it can, the runs go on from the saved state, and
+    an invalidation is never lost: the old answer is refused."""
+    s = Setup(tmp_path)
+    s.send(f"recibo_{GENERATION}.json", s.receipt())
+    s.run()
+    challenge = s.challenge()
+    before = published(s)
+    s.ops = StateFails()
+    for n in range(3):  # three runs with new receipts of another disk
+        s.send("recibo_otro.json", s.receipt(disk=OTHER) | {"visita": n})
+        with pytest.raises(durable.PersistenceError):
+            s.run()
+        assert published(s) == before  # no orphan challenge, no acknowledgement
+    # The disk goes bad: its new receipt annuls the challenge, but the state is not saved.
+    corrupted = dict(s.files)
+    path = f"market/{DAY}/g{GENERATION}/depth_metrics.parquet"
+    corrupted[path] = b"y" + s.files[path][1:]
+    s.send(f"recibo_{GENERATION}.json", s.receipt(files=corrupted))
+    old_answer = s.answer(challenge)
+    s.send(f"respuesta_{challenge['id']}.json", old_answer)
+    with pytest.raises(durable.PersistenceError):
+        s.run()
+    challenges, acknowledged = published(s)
+    assert challenges == before[0]
+    receipt = (s.receipts / f"recibo_{GENERATION}.json").read_bytes()
+    assert acknowledged.get(f"recibo_{GENERATION}.json") != hashlib.sha256(receipt).hexdigest()
+    assert f"respuesta_{challenge['id']}.json" not in acknowledged  # the PC keeps both
+    # The state can be saved again (a restart): the invalidation comes first, and the old
+    # answer is refused.
+    s.ops = durable.REAL
+    report = s.run()
+    assert any("no such pending challenge" in r for r in report.rejected), report
+    assert (GENERATION, "verificado_fuera") not in s.conn.inserted
+    challenges, acknowledged = published(s)
+    disks = [json.loads((s.base / "publico" / c).read_text("utf-8"))["disco"] for c in challenges]
+    assert disks == [OTHER]  # the annulled challenge withdrawn, the other disk's published
+    assert acknowledged[f"recibo_{GENERATION}.json"] == hashlib.sha256(receipt).hexdigest()
+
+
+def test_a_challenge_that_could_not_be_published_is_published_by_the_next_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """E4C3-09: a failure while publishing, after the state was saved, is mended at the start
+    of the next run, from the saved state."""
+    s = Setup(tmp_path)
+    s.send(f"recibo_{GENERATION}.json", s.receipt())
+    original = externo.Verifier._publish
+    failed = []
+
+    def fails_once(self: externo.Verifier, name: str, value: Any) -> None:
+        if name.startswith("desafio_") and not failed:
+            failed.append(name)
+            raise durable.PersistenceError(name)
+        original(self, name, value)
+
+    monkeypatch.setattr(externo.Verifier, "_publish", fails_once)
+    with pytest.raises(durable.PersistenceError):
+        s.run()
+    assert not list((s.base / "publico").glob("desafio_*.json"))
+    pending = s.state()["pares"][f"{GENERATION}|{DISK}"]["desafio"]  # saved before publishing
+    s.run()
+    assert s.challenge()["id"] == pending["id"]
+    assert f"recibo_{GENERATION}.json" in published(s)[1]
+
+
+def test_a_queue_longer_than_the_reads_of_one_run_moves_on_without_the_pc(
+    tmp_path: Path,
+) -> None:
+    """E4C3-13: 1,000 receipts and the receipt of the point. The first run reads the 1,000;
+    the next one skips them by their stamp, without reading them, and reads the point. No
+    file is deleted in between."""
+    s = Setup(tmp_path)
+    receipt = s.receipt()
+    for n in range(externo.PER_RUN):
+        s.send(f"recibo_{n:04d}.json", receipt)
+    h = "caliente-20261127T004000Z"
+    dump, manifest = b"hot", manifest_of(h, [])
+    register(s, h, dump, manifest)
+    s.send("recibo_punto.json", point(h, dump, manifest, []))
+    first = s.run()
+    assert first.accepted == [GENERATION] and first.points == []
+    second = s.run()
+    assert second.points == [h] and second.rejected == []
+    assert len(json.loads((s.base / "publico" / "procesados.json").read_text("utf-8"))) == (
+        externo.PER_RUN + 1
+    )
+    assert s.run() == externo.Report(published=True)  # nothing left to read
 
 
 def test_processed_files_are_published_for_the_pc_and_forgotten_after_30_days(

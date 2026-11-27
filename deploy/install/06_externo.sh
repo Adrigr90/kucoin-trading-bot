@@ -66,12 +66,25 @@ step "the directories of the verifier and the 256 MiB of recibos/"
 install -d -o kbot_archive -g kbot_archive -m 0700 "$externo"
 install -d -o kbot_archive -g kbot_sync -m 2750 "$externo/publico"
 install -d -o kbot_archive -g kbot_archive -m 0700 "$externo/privado"
-if [[ ! -e "$externo/recibos.img" ]]; then
-  truncate -s 256M "$externo/recibos.img"
-  mkfs.ext4 -q -F -L kbot-recibos "$externo/recibos.img"
+# begin: the image of recibos/ (E4C3-15)
+image="$externo/recibos.img"
+if [[ ! -e "$image" ]]; then
+  # Prepared aside and published by a rename: a cut leaves no image, never half of one.
+  rm -f "$image.tmp"
+  truncate -s 256M "$image.tmp"
+  mkfs.ext4 -q -F -L kbot-recibos "$image.tmp"
+  sync "$image.tmp"
+  mv "$image.tmp" "$image"
+elif ! mountpoint -q "$chroot/recibos"; then
+  # An image already there may hold receipts: checked read-only, never formatted again.
+  if ! e2fsck -n "$image" >/dev/null 2>&1; then
+    echo "$image does not pass e2fsck -n: stopping without formatting it" >&2
+    exit 1
+  fi
 fi
-chown root:root "$externo/recibos.img"
-chmod 0600 "$externo/recibos.img"
+chown root:root "$image"
+chmod 0600 "$image"
+# end: the image of recibos/
 
 step "the chroot of kbot_sync: root's, and nobody else writes in it"
 install -d -o root -g root -m 0755 "$chroot"

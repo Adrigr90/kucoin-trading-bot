@@ -3169,7 +3169,7 @@ El revisor lo reprodujo de forma sintética, no en Oracle. **Verificación del r
 - conectar el disco al menos una vez por semana y ejecutar el guion (P-E4-2);
 - la instalación en el servidor, con su permiso, como siempre.
 
-**Implementado en E4c-3** [27 nov 2026, rama `fase-2-e4c3`; **pendiente de la revisión del código**; sin instalar]. Aplica el diseño de detalle aprobado en `4227572`.
+**Implementado en E4c-3** [27 nov 2026, rama `fase-2-e4c3`; primera revisión del código en `79cbbdc`: APROBABLE CON CORRECCIONES, con E4C3-09 a E4C3-15 corregidos e incorporados abajo; **pendiente de la segunda revisión**; sin instalar]. Aplica el diseño de detalle aprobado en `4227572`.
 
 - **El código:**
   - **`kbot.archive.externo`:** `Verifier.run` es una ejecución del verificador (puntos 2 y 4), `retire_disk` retira un disco y `main` da las dos órdenes (`run` y `retirar-disco <id>`). El estado privado se escribe con la secuencia de persistencia de E4c-2 (`kbot.upload.durable`).
@@ -3186,13 +3186,20 @@ El revisor lo reprodujo de forma sintética, no en Oracle. **Verificación del r
   - **El orden de `06_externo.sh`:**
     1. la clave;
     2. `kbot_sync` en el grupo `kbot_upload`, y el archivo pasado a `kbot_archive:kbot_sync` con `2750`;
-    3. los directorios del verificador y la imagen de `recibos/`, que se crea una sola vez;
+    3. los directorios del verificador y la imagen de `recibos/` (E4C3-15): se prepara aparte, como `recibos.img.tmp`, y se publica con un cambio de nombre, así que un corte nunca deja media imagen. Una imagen que ya existe puede tener recibos: solo se comprueba con `e2fsck -n`, y si no pasa la instalación se detiene sin formatearla;
     4. el chroot y los montajes;
     5. las comprobaciones como `kbot_sync`, con `setpriv`: lee las tres vistas y escribe en `recibos/`; no escribe en las otras tres ni lee `privado` ni `/srv/kbot/subidas`;
     6. **solo después, `sshd`:** guarda el drop-in anterior y pasa `sshd -t`; si falla, vuelve a poner el anterior y no recarga nada. Luego comprueba con `sshd -T` lo efectivo para `kbot_sync`, incluida la línea `Subsystem sftp` de la imagen (sin ella, `sshd` rechaza la sesión SFTP antes de aplicar `ForceCommand`), y que el administrador no recibe `ForceCommand internal-sftp` ni un chroot;
     7. una primera verificación y el temporizador.
   - **El índice** (`generaciones.json`) lleva también `verificada_en_discos`: los discos en los que cada generación quedó verificada y cuyo último recibo sigue siendo válido. El guion vuelve a probar en cada visita las generaciones que no están verificadas en su disco, y todas en la comprobación mensual. **Tras un recibo con fallo,** el disco sale de esa lista, así que la generación se prueba de nuevo en la visita siguiente, no al mes.
-  - **Lo ya procesado:** el verificador anota cada archivo de `recibos/` con su nombre y su SHA-256. Si el mismo archivo sigue ahí sin cambios, no lo procesa de nuevo; el guion lo borrará en su visita siguiente. La idempotencia de los recibos no depende de esto: se mide contra el último recibo del par.
+  - **Nada se anuncia antes de guardarse** (E4C3-09). Una ejecución procesa en memoria, guarda el estado con la secuencia de persistencia y solo entonces publica lo que dice el estado guardado:
+    - cada desafío pendiente, y ningún otro: los anulados o sustituidos se retiran ahí;
+    - `discos.json`, con la última observación aceptada de cada disco;
+    - `procesados.json`, los acuses.
+
+    El desafío público se guarda en el estado privado junto con sus respuestas esperadas. Si la publicación se corta, la ejecución siguiente la rehace al empezar, desde el estado guardado. Si el estado no se puede guardar, no se publica nada nuevo, por muchas ejecuciones que fallen. `retirar-disco` guarda primero y retira después.
+  - **Lo ya procesado** (E4C3-13): el verificador anota cada archivo de `recibos/` con su SHA-256 y su sello (inodo, tamaño y hora de modificación, en nanosegundos). Un archivo con el mismo sello se salta **sin leerlo**, y el límite de 1.000 por ejecución cuenta solo los que se leen, así que la cola siempre avanza. Lo que no se llega a leer (un enlace, un directorio, un archivo de otro dueño o demasiado grande) se anota igual, por su sello. La idempotencia de los recibos no depende de esto: se mide contra el último recibo del par.
+  - **Lo que el PC borra de `recibos/`** (E4C3-09): un archivo solo si el servidor lo dio por procesado con exactamente el SHA-256 que este disco subió con ese nombre, que el guion guarda en `.kbot-estado.json` (`subidos`). Uno que se vuelve a subir en esa visita simplemente se sustituye.
   - **El caché de huellas del guion** (`.kbot-huellas.json`, en el disco) guarda el SHA-256 de cada archivo junto con su tamaño y su hora de modificación.
     - Se calcula de nuevo sobre el disco todo lo que se acaba de descargar y todos los archivos de las generaciones que se prueban en esa visita. Cada archivo se lee como mucho una vez por visita.
     - **El punto recuperable:** la copia caliente y las copias de día de las que depende se comprueban al descargarlas, y de nuevo, enteras, en la comprobación mensual o con `-Completa`. Entre medias vale el caché, si no han cambiado ni el tamaño ni la hora. Es el mismo criterio que fija el diseño para las generaciones ya verificadas, y por la misma razón: que no haya que leer el disco entero cada semana.
@@ -3201,6 +3208,13 @@ El revisor lo reprodujo de forma sintética, no en Oracle. **Verificación del r
   - **Un archivo que no se puede descargar** se informa como error y la visita sigue con los demás.
   - **La copia caliente diaria** que se descarga es la primera del día UTC más reciente que tiene el servidor. Las que ya están en el disco se quedan.
   - **Un disco se admite solo con un recibo de generación válido.** El recibo del punto recuperable de un disco no admitido se rechaza.
+  - **Lo rechazado por falta de plaza se vuelve a mirar** (E4C3-12): un recibo rechazado solo por qué discos están admitidos queda marcado. Cuando cambia ese conjunto, al admitir o retirar un disco, se olvida su marca y se vuelve a leer, aunque sus bytes no hayan cambiado.
+  - **El punto recuperable sigue al disco** (E4C3-10):
+    - cada visita envía su observación, también cuando el disco no tiene ninguna copia caliente completa (`copia` nula);
+    - cada observación lleva un número (`secuencia`), mayor que el último que el servidor aceptó para ese disco, que publica en `discos.json`, y mayor que el último que envió el propio disco. El guion lo guarda en el disco antes de enviarlo, así que nunca se usa dos veces;
+    - el servidor acepta solo una observación con un número mayor que el último aceptado, y entonces **la sustituye entera**: el punto puede ir hacia atrás (H27 pierde una dependencia y queda H20) o quedarse vacío. Una observación antigua, aunque llegue de nuevo byte a byte, se rechaza.
+  - **Una observación rechazada no cambia nada del disco** (E4C3-14): ni el punto, ni la última visita, ni la última sincronización sin errores. Las tres se anotan solo cuando la observación se acepta entera.
+  - **El estado y el caché del disco** (E4C3-11): `.kbot-estado.json`, `.kbot-huellas.json` y `.kbot-disco` se escriben en un temporal, se vuelcan al disco y lo sustituyen de una vez. Si el estado o el caché no se pueden leer, se descartan con un aviso y esa visita lo comprueba todo, sin confiar en ninguna huella guardada.
   - **`retirar-disco` y la verificación nunca escriben el estado a la vez:** las dos toman un candado (`flock`) en `/srv/kbot/externo/privado/.lock`, y la segunda espera.
   - **Con dos discos, los nombres de los recibos coinciden** (`recibo_<generación>.json` y `recibo_punto.json`). Si los dos visitan el servidor dentro de los mismos 15 minutos, el recibo de uno puede sustituir al del otro antes de procesarse. Eso solo lo retrasa a la visita siguiente de ese disco.
   - **El resumen del guion** da la antigüedad del punto recuperable desde la hora de su copia caliente (punto 6), y avisa si pasa de 7 días.
@@ -3211,12 +3225,14 @@ El revisor lo reprodujo de forma sintética, no en Oracle. **Verificación del r
     - recibo y respuesta en ejecuciones distintas, y las dos barreras de una misma ejecución;
     - recibos con otros bytes o sin un archivo, y una respuesta con los bytes de otra posición;
     - E4C3-01 y su residual: A, luego B con un byte cambiado fuera del rango desafiado, y A otra vez. Cada paso usa un verificador nuevo, como tras un reinicio;
-    - E4C3-04: retransmisiones, un tercer disco y la retirada;
+    - E4C3-04 y E4C3-12: retransmisiones, un tercer disco y la retirada, tras la que se admite el mismo archivo del tercero, sin volver a enviarlo;
     - E4C3-02, E4C3-03 y E4C3-08 en el punto recuperable:
       - el manifiesto autenticado por el registro, con la copia ya borrada del servidor;
-      - un manifiesto alterado y otras dependencias, rechazados;
-      - el punto nunca va hacia atrás;
+      - un manifiesto alterado, otras dependencias, otros SHA-256 o una copia desconocida, rechazados sin cambiar nada del disco (E4C3-14);
+      - E4C3-10: H27 completa, luego H20 al perder H27 una dependencia, luego ninguna; la observación antigua, enviada de nuevo byte a byte, se rechaza;
       - la caliente de las 00:40 a las 23:00 da 22 h 20 min, y una visita sin caliente nueva no mueve el punto;
+    - E4C3-09: tres ejecuciones sin poder guardar el estado no publican ningún desafío ni acuse; una invalidación sin guardar no se pierde y la respuesta antigua se rechaza; un desafío que no se pudo publicar lo publica la ejecución siguiente;
+    - E4C3-13: 1.000 recibos y el del punto: la primera ejecución lee los 1.000, la segunda el del punto, y la tercera no lee nada, sin que el PC borre nada entre medias;
     - lo procesado se olvida a los 30 días;
     - tamaños, tipos, y la elegibilidad nunca insertada;
     - en Linux: enlaces, directorios y archivos de otro dueño, y el candado.
@@ -3224,15 +3240,17 @@ El revisor lo reprodujo de forma sintética, no en Oracle. **Verificación del r
     - `sshd -T` con el bloque solo, y dentro de la configuración entera de Ubuntu 24.04 (la del ejecutor de la CI), para `kbot_sync` y para el administrador;
     - las unidades de los montajes, del verificador y del archivo;
     - el orden de `06_externo.sh`;
+    - E4C3-15, como root: una creación de la imagen cortada antes de `mkfs.ext4` se rehace; una imagen con recibos los conserva; una imagen que no es un sistema de archivos detiene la instalación y se queda como estaba;
     - `shellcheck` del guion de instalación.
   - **`tests/db/test_externo_e2e.py`, como root en la CI:**
     - **el montaje:** el `sshd` de prueba en 127.0.0.1:2222 con el drop-in real, el chroot, los tres montajes `bind,ro` y la imagen de 256 MiB, y un día sellado y archivado en PostgreSQL;
     - **las visitas de `sincronizar.ps1` con `pwsh`:**
       - sin el disco, o con una carpeta sin `.kbot-disco`, se detiene sin escribir nada;
       - la primera, con `-Inicializar`, da `replicado_fuera` y el punto recuperable;
-      - la segunda responde los desafíos y da `verificado_fuera`, nunca la elegibilidad;
+      - la segunda, con el caché y el estado del disco cortados (E4C3-11), los descarta con un aviso, lo comprueba todo, responde los desafíos y da `verificado_fuera`, nunca la elegibilidad;
     - **E4C3-02 en el guion:** una caliente más nueva que fija S1 (en el cubo) mientras el servidor y el disco tienen S2 no mueve el punto, y el resumen dice qué falta;
     - **E4C3-03:** en una tercera visita, una caliente que no coincide con su registro, como una descarga a medias, no se guarda. La visita termina con error y no mueve ni el punto ni la última sincronización sin errores;
+    - **E4C3-10:** en una cuarta visita, el disco ya no tiene ninguna caliente completa, y el servidor se queda sin punto;
     - **E4C3-07:** como `kbot_archive` con el grupo `kbot_upload`, valida un punto leyendo el registro y el manifiesto, y no puede modificar ninguna copia ni leer `/srv/kbot/subidas`. Sin el grupo, no lee el registro;
     - **lo que `kbot_sync` no puede hacer, por el SFTP real:** escribir en `copias/`, `archivo/` o `desafios/`, pasar de 256 MiB en `recibos/`, crear un enlace simbólico o duro, leer `privado`, salir del chroot, abrir una shell o reenviar un puerto.
 - **Lo que queda para la instalación,** con el permiso del propietario:
@@ -3693,3 +3711,5 @@ $$\Delta Cap=\underbrace{8}_{\text{distancia mark-stop de lo cerrado}}+\underbra
 | 27 nov 2026 | **Residual de E4C3-01, E4C3-07 y E4C3-08, corregidos** (§13.1, punto 4). La idempotencia se mide contra el último recibo del par, no contra un historial. `kbot-archive-externo` lee las copias con `SupplementaryGroups=kbot_upload` solo en su unidad, sin poder modificarlas ni leer el estado de las subidas. `recibo_punto.json` lleva el manifiesto entero, autenticado contra el SHA-256 del registro, que nunca se borra | Claude |
 | 27 nov 2026 | **Tercera revisión del diseño de detalle de E4c-3 (commit `4227572`): APROBADO.** El residual de E4C3-01, RESUELTO: A → A conserva el desafío, y A → B inválido → A reparado se recupera con un único desafío nuevo, también tras reinicios. E4C3-07, RESUELTO: el grupo suplementario, limitado a `kbot-archive-externo.service`. E4C3-08, RESUELTO: el manifiesto en el recibo, autenticado contra el registro permanente. E4C3-02 a E4C3-06 siguen resueltos. Sin hallazgos nuevos ni residuales. La aprobación cubre el diseño: quedan el código, sus pruebas y la instalación; la elegibilidad y las omisiones por generación siguen bloqueadas hasta E4c-4. **Verificación del revisor:** los 314 archivos del ZIP, el diff y modelos de cierre | Revisor |
 | 27 nov 2026 | **E4c-3 programada** (rama `fase-2-e4c3`, **pendiente de la revisión del código**; §13.1, punto 4, «Implementado en E4c-3»). `kbot.archive.externo`: el índice de generaciones, los recibos y los desafíos atados al último recibo válido de cada par, como mucho 2 discos, el punto recuperable autenticado con el manifiesto del recibo contra el registro, y nunca la elegibilidad. `tools/pc/sincronizar.ps1`, para PowerShell 5.1 y 7. El bloque `Match` de `kbot_sync`, los montajes de solo lectura y la imagen de 256 MiB de `recibos/`, `kbot-archive-externo` cada 15 minutos, el archivo con `UMask=0027` y `06_externo.sh`. La guía `docs/operacion/disco_externo.md`. Las pruebas de extremo a extremo, en la CI con `sshd`, `pwsh` y PostgreSQL reales, cubren cada punto de la lista del punto 7 | Claude |
+| 27 nov 2026 | **Primera revisión del código de E4c-3 (commit `79cbbdc`): APROBABLE CON CORRECCIONES**, con cinco hallazgos MEDIOS y dos BAJOS. **E4C3-09:** se publicaban desafíos y acuses antes de guardar el estado que los justificaba, y podía perderse una invalidación. **E4C3-10:** el servidor conservaba un punto recuperable que el disco ya había perdido. **E4C3-11:** un caché o un estado del PC cortados bloqueaban las visitas siguientes. **E4C3-12:** el recibo de un tercer disco seguía ignorado tras liberar una plaza. **E4C3-13:** lo ya procesado impedía avanzar por una cola de más de 1.000 archivos. **E4C3-14** (BAJO): un punto rechazado adelantaba la última sincronización sin errores. **E4C3-15** (BAJO): un corte al formatear la imagen de `recibos/` impedía reanudar la instalación. Revisó la zona de cada hallazgo y no ve más. **Verificación del revisor:** los 326 archivos del ZIP y el diff; reproducciones sintéticas, también con Windows PowerShell 5.1 | Revisor |
+| 27 nov 2026 | **E4C3-09 a E4C3-15, corregidos** (§13.1, punto 4, «Implementado en E4c-3»). (9) Cada ejecución guarda el estado y solo entonces publica los desafíos, sus retiradas, `discos.json` y los acuses, desde el estado guardado; el PC borra solo lo procesado con el SHA-256 que subió. (10) Cada visita envía su observación numerada, también sin ninguna caliente completa, y una más nueva sustituye el punto, aunque vaya hacia atrás; una antigua se rechaza. (11) El estado y el caché del disco se escriben con temporal y sustitución, y uno ilegible se descarta y fuerza la comprobación completa. (12) Lo rechazado por falta de plaza se vuelve a leer cuando cambian los discos admitidos. (13) Lo procesado se salta por su sello sin leerlo, y el límite cuenta solo lo leído. (14) Una observación rechazada no cambia nada del disco. (15) La imagen se prepara aparte y se publica con un cambio de nombre; una existente solo se comprueba con `e2fsck -n`. Cada corrección tiene su prueba de aceptación | Claude |

@@ -2995,6 +2995,121 @@ El revisor lo reprodujo de forma sintética, no en Oracle. **Verificación del r
 
 **Verificación del revisor:** 87 pruebas locales y las reproducciones de cada hallazgo; sin acciones en Oracle.
 
+**E4c-3: diseño de detalle del disco externo** [27 nov 2026, **pendiente de revisión**, antes del código]. Aplica el diseño aprobado de este punto 4 («Copia al disco externo» y «Lo que un recibo demuestra y lo que no»; E4-D01, E4-D03 y R-E4-05) y precisa lo que aquel dejaba abierto.
+
+- **Lo medido en el servidor** el 27 nov 2026:
+  - el archivo Parquet ocupa 225 MB; un día completo con datos, unos 90 MB (el 18 nov, 94 MB, de ellos 60 MB de `depth_metrics`);
+  - cada copia de día sellado, unos 63 MB, y la copia caliente, unos 600 MB mientras lleva todos los días;
+  - los archivos del archivo son hoy solo de `kbot_archive` (`0700` y `0600`, por su `UMask=0077`), y `/srv/kbot/sftp` existe, de `root`, vacío.
+- **Lo que se lleva el disco en una visita semanal:** los Parquet de unos 7 días (unos 630 MB), sus copias de día (unos 440 MB), la última copia diaria (de 250 a 600 MB) y los globales, es decir, de 1,3 a 1,7 GB. El disco lo guarda todo sin plazo: **unos 60 GB al año**. El propietario usará un pen drive de 128 GB, o un disco externo.
+- **Lo que E4c-3 no hace:**
+  - ninguna generación pasa a `elegible_para_exclusion_backup`, porque eso exige la restauración integral de E4c-4 (§3.9);
+  - la copia caliente y la previa no omiten aún nada por generación: llega con E4c-4, a la vez en las dos y con los primeros días elegibles (punto 4, «Implementado en E4c-2»; revisión del código de E4c-2).
+
+**1. El acceso SFTP de `kbot_sync`** (`deploy/etc/ssh/sshd_config.d/10-kbot.conf`)
+- `AllowUsers ubuntu kbot_sync`, y un bloque `Match User kbot_sync` al final del archivo con:
+  - `ForceCommand internal-sftp -u 0027 -P symlink,hardlink`: crea con `0640`, y el servidor rechaza crear enlaces simbólicos y duros;
+  - `ChrootDirectory /srv/kbot/sftp`;
+  - `AuthorizedKeysFile /etc/kbot/kbot_sync_authorized_keys` (de `root`, `0644`): la clave pública que genera el propietario en su PC, distinta de la del administrador;
+  - `AuthenticationMethods publickey`, `PasswordAuthentication no`, `PermitTTY no`, `DisableForwarding yes` y `PermitTunnel no`.
+- **El chroot:** `/srv/kbot/sftp` y todos sus ancestros son de `root` y nadie más puede escribir en ellos [H: `ChrootDirectory`]. Dentro:
+  - `copias/`: montaje `bind` de solo lectura de `/srv/kbot/backups`;
+  - `archivo/`: montaje `bind` de solo lectura de `/srv/kbot/archive`;
+  - `desafios/`: montaje `bind` de solo lectura de `/srv/kbot/externo/publico`, donde `kbot_archive` publica el índice de generaciones y los desafíos;
+  - `recibos/`: el único sitio donde escribe el PC, para sus recibos y respuestas:
+    - es de `kbot_sync:kbot_archive`, `2750`, y `kbot_archive` lo lee;
+    - es **un sistema de archivos propio de 256 MiB**: un archivo imagen `ext4` en `/srv/kbot/externo/recibos.img`, montado ahí. Así `kbot_sync` nunca puede llenar el volumen de datos, del que dependen el archivo y las copias;
+  - `restauracion/` no se crea todavía: llega con E4c-4, con su propio límite de espacio.
+- **Los montajes** son unidades de systemd, no líneas de `/etc/fstab`, así que se instalan y se verifican como las demás unidades:
+  - `srv-kbot-sftp-copias.mount`, `…-archivo.mount` y `…-desafios.mount`, con `Options=bind,ro`;
+  - `…-recibos.mount`, la imagen con `nodev,nosuid,noexec`.
+- **Cambio respecto al diseño aprobado:** los desafíos van en `desafios/`, de solo lectura para `kbot_sync`, y no en `recibos/`. Un directorio con dos escritores obligaría a dar a cada uno permisos sobre lo del otro.
+- **Los permisos de lectura:**
+  - `kbot_sync` entra en el grupo `kbot_upload`, que ya lee las copias y su registro desde E4c-2;
+  - `/srv/kbot/archive` pasa a `kbot_archive:kbot_sync`, `2750`, y las dos unidades del archivo a `UMask=0027`. `05_copias.sh` pasa también lo ya archivado, como hizo con las copias.
+  - **`kbot_sync` solo lee:** copias cifradas, Parquet de mercado (datos públicos de KuCoin) y lo que `kbot_archive` publica para él. No lee el estado privado de la verificación ni nada de `/srv/kbot/subidas`.
+- **`fail2ban`** vigila también a `kbot_sync`, porque es el mismo `sshd`.
+- **El guardián de metadatos** sigue rechazando a `kbot_sync`. Su sesión SFTP no puede ejecutar programas, y la comprobación desde su contexto real ya existe (E4-D04).
+
+**2. Lo que publica el servidor para el PC** (`kbot_archive`)
+- **`/srv/kbot/externo`** es de `kbot_archive`, `0700`. Dentro:
+  - `publico`, `kbot_archive:kbot_sync`, `2750`, montado en `desafios/`;
+  - `privado`, `0700`;
+  - la imagen de `recibos/`.
+
+  Un montaje `bind` no exige atravesar el directorio de origen, así que `kbot_sync` lee `publico` solo por el chroot.
+- `generaciones.json`: cada generación `archivado_local`, con su día y el conjunto completo de sus archivos (ruta relativa, bytes, filas y SHA-256), tal como lo fijan `market.archive_generations` y `market.archive_files`.
+- `desafio_<id>.json`: un desafío por cada recibo válido. Por cada archivo de la generación lleva:
+  - un desplazamiento y una longitud aleatorios, de 4 KiB, o el archivo entero si es más pequeño;
+  - un nonce aleatorio de 32 bytes.
+
+  La respuesta esperada, el SHA-256 de `nonce ‖ bytes`, la calcula `kbot_archive` de su propia copia y la guarda en `/srv/kbot/externo/privado` (`0700`), que `kbot_sync` no ve.
+- **Nada de esto es secreto:** son metadatos de datos públicos. Los nonces solo sirven si no se conocen antes de la visita siguiente.
+
+**3. El guion del PC** (`tools/pc/sincronizar.ps1`; PowerShell 5.1 de Windows y PowerShell 7, sin módulos externos)
+- **Lo usa el propietario cuando quiere,** con el disco conectado:
+
+  `sincronizar.ps1 -Destino E:\kbot -Clave $HOME\.ssh\kbot_sync`
+
+  Usa el `sftp.exe` de Windows con `BatchMode=yes`, `IdentitiesOnly=yes` y la huella del servidor fijada en `known_hosts`, que el PC ya tiene del administrador.
+- **El disco correcto:** la primera vez, `-Inicializar` escribe en el destino un archivo `.kbot-disco` con un identificador aleatorio. Después, sin ese archivo el guion se detiene. Así **falla si el disco no está conectado** (R-E4-05) y nunca escribe en otra carpeta del PC por error.
+- **Qué descarga:**
+  - las generaciones de `generaciones.json` que no tenga;
+  - las copias de día sellado y los globales que no tenga;
+  - la última copia caliente diaria, la primera de su día UTC.
+- **Cómo:** cada archivo va primero a una carpeta temporal del mismo disco. Se comprueba su SHA-256: los Parquet, contra el índice; las copias, contra `registro.jsonl` de `copias/`, con el volcado y el manifiesto. Solo entonces se mueve a su sitio. Un archivo que no coincide se borra y se informa.
+- **Los recibos:** por cada generación completa en el disco, un `recibo_<generation_id>.json`. Lleva la generación, el día, el identificador del disco (`.kbot-disco`) y el conjunto completo de archivos con bytes y SHA-256, **calculados de nuevo sobre el disco**. Las filas se copian del índice: el PC no lee Parquet, y no se presentan como comprobadas por él.
+- **Los desafíos:** el guion responde los `desafio_*.json` que haya leyendo esos bytes **del disco**, nunca del servidor, y escribe `respuesta_<id>.json`. Un desafío nuevo no se puede responder en la misma visita en que se envió su recibo, porque el servidor lo emite después (punto 4).
+- **Al final:** sube los recibos y las respuestas a `recibos/`. Escribe un resumen en castellano: qué descargó, qué comprobó, qué desafíos respondió, el espacio libre del disco y los días desde la visita anterior, con aviso a partir de 7 (P-E4-2).
+- **Credenciales:**
+  - el PC no tiene ninguna credencial de Oracle, y el servidor ninguna del PC;
+  - la clave de `kbot_sync` la genera el propietario con `ssh-keygen -t ed25519`, con frase de paso guardada en el agente de Windows, como la del administrador, y solo pasa a Claude la pública.
+
+**4. La verificación en el servidor** (`python -m kbot.archive.externo`, como `kbot_archive`, temporizador cada 15 minutos)
+1. Rehace `generaciones.json` cuando cambian las generaciones.
+2. **Por cada recibo nuevo** en `recibos/`:
+   - lo abre con `O_NOFOLLOW` y solo si es un archivo normal de `kbot_sync`, de como mucho 1 MiB y entre los 1.000 primeros de la ejecución. Los demás se ignoran y se anotan. Así un enlace u otro objeto en `recibos/` nunca le hace leer otra cosa con sus permisos;
+   - se **rechaza** si no es JSON válido, si su generación no existe o si su conjunto de archivos no es exactamente el del servidor: mismas rutas, bytes y SHA-256 (E4-D01);
+   - si es válido, inserta `replicado_fuera`, si no estaba, y emite el desafío. Anota el disco que lo envió.
+3. **Por cada respuesta nueva:** si cada SHA-256 coincide con la respuesta esperada y el desafío se emitió antes que la respuesta llegase, inserta `verificado_fuera`. Si no coincide, se rechaza y se emite otro desafío en la visita siguiente.
+4. **Lo procesado** se anota en `/srv/kbot/externo/privado/estado.json`, durable, con la secuencia de E4C2-03. `kbot_archive` no borra lo que escribe `kbot_sync`.
+5. Los estados se insertan con el permiso que `kbot_archive` ya tiene sobre `market.archive_generation_states` (§3.9). **Nunca inserta `elegible_para_exclusion_backup`.**
+
+**5. Lo que esto demuestra y lo que no** (R-E4-05, sin cambios): una lectura diferida hecha por un cliente confiable.
+- **Lo que sí se comprueba:**
+  - el guion falla sin el disco;
+  - un recibo incompleto, de otra generación o con otras huellas se rechaza;
+  - un desafío se responde con los bytes del disco y en otra visita.
+- **Lo que no:** quien tenga la clave de `kbot_sync` puede responder leyendo del servidor. El PC y el disco son parte confiable.
+
+**6. El RPO de la copia externa:** el tiempo desde la última sincronización, en el estado de las copias y en el resumen del guion. Con visitas semanales, una generación queda `verificado_fuera` en una o dos visitas: el recibo en una y el desafío en la siguiente, de 7 a 14 días.
+
+**7. Pruebas** (en la CI)
+- **`sshd -T`** con el bloque `Match` da para `kbot_sync`: `forcecommand internal-sftp -u 0027`, el chroot, `disableforwarding yes`, `permittty no` y solo clave.
+- **De extremo a extremo, como root:**
+  - en un `sshd` de prueba en otro puerto, con el bloque real, el chroot y los montajes `bind,ro`, se ejecuta `sincronizar.ps1` con `pwsh` y una clave de prueba;
+  - descarga, comprueba y escribe los recibos;
+  - `kbot.archive.externo`, con PostgreSQL, los acepta (`replicado_fuera`) y emite los desafíos;
+  - una segunda visita los responde (`verificado_fuera`).
+- **Rechazos:**
+  - un recibo con un byte o un SHA-256 cambiado, o al que le falta un archivo;
+  - una respuesta con bytes de otra posición;
+  - un enlace simbólico o un directorio en `recibos/`, creados por fuera del SFTP, que el servicio no sigue;
+  - el guion sin el disco, o sin `.kbot-disco`, se detiene sin escribir nada.
+- **Lo que `kbot_sync` no puede hacer:**
+  - escribir en `copias/`, `archivo/` o `desafios/`, ni pasar de 256 MiB en `recibos/`;
+  - crear un enlace simbólico o duro;
+  - leer `/srv/kbot/externo/privado`;
+  - abrir una shell, reenviar un puerto o salir del chroot.
+- **El servicio no inserta nunca `elegible_para_exclusion_backup`.**
+- **En el servidor,** con informe en `docs/operacion/`: la primera sincronización real del propietario, la siguiente con los desafíos y las comprobaciones de aislamiento desde la sesión SFTP real.
+
+**8. Qué hace el propietario:**
+- un pen drive de 128 GB, o un disco externo, formateado en NTFS;
+- la clave de `kbot_sync`, con una guía paso a paso (`docs/operacion/disco_externo.md`): solo pasa la pública;
+- conectar el disco al menos una vez por semana y ejecutar el guion (P-E4-2);
+- la instalación en el servidor, con su permiso, como siempre.
+
 **Revisión del diseño (11 nov 2026): APROBABLE CON CORRECCIONES.** El revisor confirmó el orden instantánea → comprobaciones → `pg_dump --snapshot` y lo contrastó en PostgreSQL 18.6 (una inserción concurrente no aparece ni en el volcado ni en el manifiesto si van en la misma instantánea). Hallazgos, todos incorporados arriba: **E4-D01** (ALTO) un recibo podía acreditar una copia externa inexistente → recibo completo, desafío en una sincronización posterior y parte confiable con garantía acotada; **E4-D02** (MEDIO) `pg_restore` reponía el sello antes de cargar el Parquet (`23514`) → restauración por fases; **E4-D03** (MEDIO) el perfil SFTP permitía reenvíos y `AllowUsers` excluía a `kbot_sync` → bloque `Match` completo con `DisableForwarding`; **E4-D04** (MEDIO) `IPAddressDeny` no acreditaba el aislamiento de metadatos → cortafuegos por usuario, comprobación desde cada contexto real y parada de la instalación si no funciona; **E4-D05** (MEDIO) faltaba el descifrado para la restauración mensual → ensayo automático con clave de prueba y restauración integral descifrada en el PC; **E4-D06** (MEDIO) el bloqueo REST no era escribible con `ProtectSystem=strict` → precreado por `tmpfiles.d` y `ReadWritePaths`; **E4-D07** (MEDIO) la cadencia semanal no garantizaba copias de 3-7 días → copia de cada día sellado una sola vez, medición del presupuesto y antigüedad de la última subida como RPO efectivo.
 
 **Segunda revisión del diseño (11 nov 2026): APROBABLE CON CORRECCIONES.** E4-D01, D02, D03, D05 y D06 resueltos como diseño; D04 y D07 parciales. Hallazgos nuevos, incorporados arriba: **R-E4-01** (ALTO) una copia de día sellado podía caducar a los 120 días mientras una copia caliente aún la necesitaba → nada caduca por edad, el manifiesto fija la dependencia exacta, el servicio comprueba que existe y, si no, el día vuelve a las copias calientes; las copias previas a actualización son autocontenidas; **R-E4-02** (MEDIO) el ciclo de vida por edad daba 24/8/3 copias y unas 120 de días sellados, no las 3/7/2 de D25 → la retención la aplica el servicio, exactamente D25, con `OBJECT_DELETE` pero sin `OBJECT_VERSION_DELETE` ni `OBJECT_OVERWRITE`, versionado del cubo y una ventana de un día de versiones anteriores (una ventana de recuperación limitada: después el ciclo de vida borra esas versiones); la ampliación de D25 se somete al propietario (P-E4-4) y una simulación de 120 días comprueba el presupuesto; **R-E4-03** (MEDIO) el perfil de red de `svc-backup` bloqueaba el servicio de autenticación regional → sin lista blanca por IP para Oracle, los destinos los acota el SDK con sus dos puntos de acceso explícitos, y la prueba crea el firmante, sube, lee y renueva el testigo; **R-E4-04** (MEDIO) faltaba autenticar el volcado recibido y aislar el restaurador → SHA-256 en claro registrado al crear la copia y comprobado sobre una copia privada antes de `pg_restore`, y clúster de restauración de un usuario del sistema propio sin acceso a producción; **R-E4-05** (BAJO) el desafío se describía como prueba de persistencia → es una lectura diferida por un cliente confiable, con el límite documentado y el guion que falla sin el disco.
@@ -3439,3 +3554,6 @@ $$\Delta Cap=\underbrace{8}_{\text{distancia mark-stop de lo cerrado}}+\underbra
 | 27 nov 2026 | **Cuarta revisión del código de E4c-2 (commit `7b4c374`): APROBABLE CON CORRECCIONES.** E4C2-10, RESUELTO. **E4C2-11** (MEDIO): la comprobación de espacio pedía sitio para una copia entera antes de volver a leer una cuyos objetos ya estaban en el cubo, ambiguos. En el límite: «no cabe», ninguna lectura y el RPO en H00:40, cuando releer no añade bytes. Reproducción con almacenamiento simulado y límite reducido. **Verificación del revisor:** el ZIP con los 314 archivos y 59 pruebas de subida | Revisor |
 | 27 nov 2026 | **E4C2-11, corregido** (§13.1, punto 4). El presupuesto de espacio cuenta los bytes de los objetos que de verdad se subirían, los que no están en el cubo ni actuales ni ambiguos: releer lo que ya está no añade nada. La prueba lo hace en el límite, y rechaza a la vez una copia nueva que sí añadiría bytes | Claude |
 | 27 nov 2026 | **Quinta revisión del código de E4c-2 (commit `8a83cc2`): APROBADO.** E4C2-11, RESUELTO: con el límite igual a lo ocupado, dos lecturas, ninguna subida, ningún aumento de espacio y la vuelta a H06:40; las copias que no caben se siguen rechazando. Sin hallazgos nuevos ni residuales. La aprobación cubre el código; quedan las comprobaciones reales de la instalación en Oracle. **Verificación del revisor:** el ZIP con los 314 archivos y 60 pruebas de subida | Revisor |
+| 27 nov 2026 | **E4c-2 integrada en `main`** (`4c906e0`, con el «si» del propietario) e **instalada en el servidor** con `v0.2.9-copias`. `02_codigo.sh` a las 08:46 UTC, sin reiniciar el grabador, cuyo código no cambia. `05_copias.sh`: el usuario `kbot_upload`, los grupos de las copias, el guardián comprobado desde cada usuario y la primera subida de prueba (38 copias verificadas en el cubo, 1,01 GB, 157 peticiones). El ciclo de las 08:55, sin errores. La migración `0004` de F3-E5b, aplicada a las 09:01 sin reiniciar PostgreSQL, por decisión del propietario: solo los pasos de roles y de migración de `03_postgresql.sh`, que reiniciaría el clúster. `04_verificar.sh`: todo en verde. `svc-strategy` sigue sin instalar | Claude |
+| 27 nov 2026 | **El revisor, en una conversación nueva de codex** a la que Claude manda las rondas directamente, con la autorización del propietario. Cada mensaje y cada respuesta, enteros, en `revision_actual/CONVERSACION_REVISOR.md`. La conversación anterior escribió su traspaso (`revision_actual/TRASPASO_REVISOR_2026-11-27.md`), y la nueva pasó una prueba de control de ocho preguntas. El propietario decide además que diseño y código se revisan siempre por separado, y que los hallazgos solo teóricos siguen parando la aprobación | Propietario |
+| 27 nov 2026 | **Diseño de detalle de E4c-3: el disco externo** (§13.1, punto 4; rama `fase-2-e4c3`, **pendiente de revisión**, antes del código). El SFTP de `kbot_sync` con su chroot, los montajes de solo lectura y un sistema de archivos propio de 256 MiB para los recibos, sin enlaces. Lo que publica `kbot_archive` (el índice de generaciones y los desafíos, con las respuestas esperadas en privado). El guion de Windows, que falla sin el disco correcto. La verificación cada 15 minutos (`replicado_fuera` y `verificado_fuera`, nunca `elegible_para_exclusion_backup`). Medido: unos 90 MB de Parquet por día completo, y de 1,3 a 1,7 GB por visita semanal | Claude |

@@ -237,12 +237,17 @@ if ($aBajar.Count -gt 0) {
     New-Item -ItemType Directory -Path $bajada | Out-Null
     $comandos = @()
     for ($i = 0; $i -lt $aBajar.Count; $i++) {
-        $comandos += "get -p $($aBajar[$i][0]) $(Quote (Join-Path $bajada "$i"))"
+        # "-get": a file that cannot be downloaded is reported below, and the rest go on.
+        $comandos += "-get -p $($aBajar[$i][0]) $(Quote (Join-Path $bajada "$i"))"
     }
     Invoke-Sftp $comandos
     for ($i = 0; $i -lt $aBajar.Count; $i++) {
         $remote, $final, $expected = $aBajar[$i]
         $file = Join-Path $bajada "$i"
+        if (-not (Test-Path -LiteralPath $file)) {
+            $Errores.Add("$remote no se pudo descargar")
+            continue
+        }
         if ((Get-FileHash -Algorithm SHA256 -LiteralPath $file).Hash.ToLowerInvariant() -ne $expected) {
             Remove-Item -LiteralPath $file -Force
             $Errores.Add("$remote no coincide con su SHA-256: no se guarda")

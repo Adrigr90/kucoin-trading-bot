@@ -293,9 +293,21 @@ def states(connect: Connect, generation: str) -> set[str]:
 
 
 def test_two_visits_of_the_pc_verify_a_generation_through_the_real_sftp(
-    connect: Connect, partitions: Callable[[date, date], None], server: dict[str, Path]
+    connect: Connect,
+    partitions: Callable[[date, date], None],
+    server: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import pwd  # only on Linux, like the server
+
+    # The database of the CI is shared with the other tests, whose generations keep their
+    # files in their own directories: the verifier sees here only the day of this test.
+    every = externo.server_generations
+    monkeypatch.setattr(
+        externo,
+        "server_generations",
+        lambda conn: {g: v for g, v in every(conn).items() if v[0] == DAY},
+    )
 
     sealed_day(connect, partitions, DAY)
     archiver.archive_pending(lambda: connect("kbot_archive"), Path("/srv/kbot/archive"))

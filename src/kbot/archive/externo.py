@@ -47,7 +47,7 @@ import uuid
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -67,7 +67,6 @@ RECEIPT_LIMIT = 1 << 20  # a generation receipt or an answer
 POINT_LIMIT = 4 << 20  # the receipt of the recoverable point carries a whole manifest
 PER_RUN = 1000
 CHALLENGE_BYTES = 4096
-PROCESSED_DAYS = 30
 HOT_PREFIX = "caliente-"
 POINT_PREFIX = "recibo_punto_"  # recibo_punto_<disk>.json: one per disk, never deleted
 _DISK = frozenset("0123456789abcdef")
@@ -113,16 +112,51 @@ def _disk(value: object) -> str:
     return value
 
 
-def _stamp(info: os.stat_result) -> str:
-    """What changes whenever a file of ``recibos/`` is written again or replaced."""
-    return f"{info.st_ino}:{info.st_size}:{info.st_mtime_ns}"
+FS_IOC_GETVERSION = 0x80087601  # _IOR('v', 1, long): the generation of an inode (ext4)
+
+
+def _generation(descriptor: int) -> str:
+    """The generation of the inode, which ext4 gives anew each time an inode is allocated, so
+    that a new file never takes the identity of a deleted one; ``-`` where there is none."""
+    try:
+        import fcntl  # only on Linux, as the server
+    except ImportError:
+        return "-"
+    try:
+        answer = fcntl.ioctl(descriptor, FS_IOC_GETVERSION, bytes(8))
+    except OSError:
+        return "-"
+    return str(int.from_bytes(answer[:4], "little"))
+
+
+def _stamp(info: os.stat_result, generation: str = "-") -> str:
+    """The identity of a file of ``recibos/``, without any clock but as a last resort: a file
+    put in place by the PC (written under a temporary name and renamed) is a new inode, with
+    a new generation, even when its bytes and its time are those of an earlier one
+    (E4C3-19). Size and time only tell an in-place change."""
+    return f"{info.st_dev}:{info.st_ino}:{generation}:{info.st_size}:{info.st_mtime_ns}"
+
+
+def _identity(path: Path) -> str | None:
+    """The stamp of whatever ``path`` is, without following a link."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        try:  # a link, or what this system does not open: its lstat
+            return _stamp(os.lstat(path))
+        except OSError:
+            return None
+    try:
+        return _stamp(os.fstat(descriptor), _generation(descriptor))
+    finally:
+        os.close(descriptor)
 
 
 @contextmanager
-def _opened(path: Path, owner: int | None, limit: int) -> Iterator[tuple[bytes, os.stat_result]]:
-    """The bytes of a file of ``recibos/`` and what fstat says of it, read without following
-    any link, only if it is a regular file of ``owner`` (kbot_sync) and no bigger than
-    ``limit``."""
+def _opened(path: Path, owner: int | None, limit: int) -> Iterator[tuple[bytes, str]]:
+    """The bytes of a file of ``recibos/`` and its stamp, read without following any link,
+    only if it is a regular file of ``owner`` (kbot_sync) and no bigger than ``limit``."""
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
         descriptor = os.open(path, flags)
@@ -140,7 +174,7 @@ def _opened(path: Path, owner: int | None, limit: int) -> Iterator[tuple[bytes, 
             content = handle.read(limit + 1)
         if len(content) > limit:
             raise Ignored(f"bigger than {limit} bytes")
-        yield content, info
+        yield content, _stamp(info, _generation(descriptor))
     finally:
         os.close(descriptor)
 
@@ -344,10 +378,8 @@ class Verifier:
         entry = self.state["procesados"].get(name)
         if not entry or "sello" not in entry:
             return False
-        try:
-            return _stamp(os.lstat(self.receipts / name)) == entry["sello"]
-        except OSError:
-            return True  # gone since the listing: nothing to do
+        seen = _identity(self.receipts / name)
+        return seen is None or seen == entry["sello"]  # gone since the listing: nothing to do
 
     def _one(
         self,
@@ -361,8 +393,7 @@ class Verifier:
         limit = POINT_LIMIT if name.startswith(POINT_PREFIX) else RECEIPT_LIMIT
         processed = self.state["procesados"]
         try:
-            with _opened(path, self.owner, limit) as (content, info):
-                seen = _stamp(info)
+            with _opened(path, self.owner, limit) as (content, seen):
                 digest = hashlib.sha256(content).hexdigest()
                 # Recorded by its stamp, and dispatched again even when its bytes are the
                 # ones seen before (E4C3-18): what makes a repeated receipt change nothing is
@@ -374,9 +405,7 @@ class Verifier:
                     raise Rejected("not a JSON object")
                 kind = document.get("tipo")
                 if kind == "generacion":
-                    self._receipt(
-                        conn, document, digest, generations, states, report, info.st_mtime_ns
-                    )
+                    self._receipt(conn, document, digest, generations, states, report)
                 elif kind == "respuesta":
                     self._answer(conn, document, states, report)
                 elif kind == "punto":
@@ -386,10 +415,7 @@ class Verifier:
                 else:
                     raise Rejected(f"unknown kind {kind!r}")
         except Ignored as error:
-            try:  # recorded by its stamp, so that it is not looked at again until it changes
-                seen = _stamp(os.lstat(path))
-            except OSError:
-                seen = None
+            seen = _identity(path)  # recorded, so that it is not looked at again until it changes
             if seen is not None:
                 processed[name] = {"sha256": None, "sello": seen, "fecha": self._today()}
             report.rejected.append(f"{name}: {error}")
@@ -405,9 +431,13 @@ class Verifier:
         return self.clock().astimezone(UTC).date().isoformat()
 
     def _prune(self) -> None:
-        horizon = (self.clock().astimezone(UTC).date() - timedelta(days=PROCESSED_DAYS)).isoformat()
+        """What was processed is remembered while its file is in ``recibos/``, and forgotten
+        once it is gone (E4C3-19): a receipt left there untouched, such as one of a retired
+        disk, is never read again, however long it stays. It stays bounded by the files of
+        the 256 MiB of ``recibos/``."""
+        present = set(os.listdir(self.receipts))
         processed = self.state["procesados"]
-        for name in [n for n, e in processed.items() if e.get("fecha", "") < horizon]:
+        for name in [n for n in processed if n not in present]:
             del processed[name]
 
     def _verified_disks(self) -> dict[str, list[str]]:
@@ -453,13 +483,9 @@ class Verifier:
         retired = self.state.setdefault("retirados", {})
         before = retired.get(disk, {})
         # Kept for good, one small entry per disk ever retired: its last accepted observation
-        # (E4C3-16), and when it was retired, by the clock the system stamps files with
-        # (E4C3-19). A receipt of this disk written before that never admits it again,
-        # whatever the record of what was processed forgets after 30 days.
-        retired[disk] = {
-            "observacion": int((record or before).get("observacion", 0)),
-            "desde_ns": self._now_in_files(),
-        }
+        # (E4C3-16). Its receipts left in recibos/ are not read again (E4C3-19): what was
+        # processed is remembered while its file is there.
+        retired[disk] = {"observacion": int((record or before).get("observacion", 0))}
         for key in [k for k in self.state["pares"] if k.endswith(f"|{disk}")]:
             del self.state["pares"][key]
         # What was refused for lack of room is read again (E4C3-12). What lies untouched in
@@ -468,16 +494,6 @@ class Verifier:
         self._disks_changed()
         self._save()
         self._announce()  # its challenges are withdrawn only once that is saved
-
-    def _now_in_files(self) -> int:
-        """The current time of the file system, in nanoseconds, as it stamps files: the time
-        of a file written now, so that it compares with the times of the receipts."""
-        marker = self.private / ".ahora"
-        marker.write_bytes(b"")
-        try:
-            return marker.stat().st_mtime_ns
-        finally:
-            marker.unlink(missing_ok=True)
 
     # -- generation receipts (E4C3-01 and its residual) ------------------------------------
     def _receipt(
@@ -488,7 +504,6 @@ class Verifier:
         generations: Mapping[str, tuple[date, Mapping[str, ServerFile]]],
         states: dict[str, set[str]],
         report: Report,
-        written_ns: int,
     ) -> None:
         disk = _disk(document["disco"])
         generation = str(uuid.UUID(str(document["generacion"])))
@@ -502,11 +517,6 @@ class Verifier:
         }
         if not valid and disk not in self.state["discos"]:
             raise Rejected("an invalid receipt from a disk that is not admitted")
-        retired = self.state.get("retirados", {}).get(disk)
-        if disk not in self.state["discos"] and retired and written_ns < int(retired["desde_ns"]):
-            # Left in recibos/ from before the retirement (E4C3-19): only a receipt sent after
-            # it, even with the very same bytes, admits the disk again.
-            raise Rejected(f"a receipt of disk {disk} written before it was retired")
         self._admit(disk)
         key = f"{generation}|{disk}"
         pair = self.state["pares"].setdefault(

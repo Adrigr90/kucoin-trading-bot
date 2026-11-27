@@ -647,17 +647,21 @@ def test_a_queue_longer_than_the_reads_of_one_run_moves_on_without_the_pc(
     assert s.run() == externo.Report(published=True)  # nothing left to read
 
 
-def test_processed_files_are_published_for_the_pc_and_forgotten_after_30_days(
+def test_processed_files_are_remembered_while_they_are_there_and_forgotten_once_gone(
     tmp_path: Path,
 ) -> None:
+    """E4C3-19: no time limit. A file still in recibos/ stays recorded however long; once
+    the PC deletes it, it is forgotten."""
     s = Setup(tmp_path)
     s.send(f"recibo_{GENERATION}.json", s.receipt())
     s.run()
     processed = json.loads((s.base / "publico" / "procesados.json").read_text(encoding="utf-8"))
     content = (s.receipts / f"recibo_{GENERATION}.json").read_bytes()
     assert processed == {f"recibo_{GENERATION}.json": hashlib.sha256(content).hexdigest()}
+    s.now = NOW + timedelta(days=400)
+    assert s.run() == externo.Report(published=True)  # still there: not read again
+    assert f"recibo_{GENERATION}.json" in s.state()["procesados"]
     (s.receipts / f"recibo_{GENERATION}.json").unlink()  # the PC deletes it
-    s.now = NOW + timedelta(days=31)
     s.run()
     assert json.loads((s.base / "publico" / "procesados.json").read_text(encoding="utf-8")) == {}
 
@@ -756,29 +760,39 @@ def test_a_retired_disk_rebuilds_its_pairs_from_byte_identical_receipts(
     assert s.run().verified == [GENERATION]
 
 
-def test_the_old_receipt_of_a_retired_disk_never_admits_it_again(tmp_path: Path) -> None:
-    """E4C3-19: a retired disk left its receipt in recibos/, untouched. Past the 30 days in
-    which the record of what was processed keeps it, and over several runs, that receipt
-    neither admits the disk again nor takes the place of the one that replaced it. With a
-    free place, the very same bytes sent again admit it and rebuild its pair."""
+@pytest.mark.parametrize("ahead_s", [0, 5])
+def test_the_old_receipt_of_a_retired_disk_never_admits_it_again(
+    tmp_path: Path, ahead_s: int
+) -> None:
+    """E4C3-19, with no clock in it. A retired disk left its receipt in recibos/, untouched,
+    with a time equal to or later than the retirement (a clock that went back). Past 30
+    days, over several runs and even with a free place, it neither admits the disk again nor
+    takes the place of the one that replaced it. A genuine resend of the same bytes, put in
+    place as the PC does and with a time even earlier, admits it and rebuilds its pair."""
     s = Setup(tmp_path)
-    for disk in (DISK, OTHER):
-        s.send(f"recibo_{disk}.json", s.receipt(disk=disk))
+    receipt = s.receipts / f"recibo_{DISK}.json"
+    s.send(receipt.name, s.receipt(disk=DISK))
+    s.send(f"recibo_{OTHER}.json", s.receipt(disk=OTHER))
+    when = time.time_ns() + ahead_s * 10**9
+    os.utime(receipt, ns=(when, when))
     s.run()
-    time.sleep(0.05)  # the retirement comes after the receipt, also on a coarse clock
     s.verifier().retire_disk(DISK)
     s.send("recibo_tercero.json", s.receipt(disk=THIRD))
     s.run()
     assert set(s.state()["discos"]) == {OTHER, THIRD}
-    refused = []
     for days in (29, 31, 32, 45, 61, 62):
         s.now = NOW + timedelta(days=days)
-        refused += s.run().rejected
+        s.run()
         assert set(s.state()["discos"]) == {OTHER, THIRD}, days
-    assert any("before it was retired" in r for r in refused), refused
+        assert receipt.name in s.state()["procesados"]  # remembered while it is there
     s.verifier().retire_disk(THIRD)
-    old = (s.receipts / f"recibo_{DISK}.json").read_bytes()
-    (s.receipts / f"recibo_{DISK}.json").write_bytes(old)  # sent again, byte for byte
+    s.run()
+    assert set(s.state()["discos"]) == {OTHER}  # a free place, and still not read again
+    temporary = s.receipts / f".subiendo-{receipt.name}"
+    temporary.write_bytes(receipt.read_bytes())  # the very same bytes
+    earlier = when - 5 * 10**9
+    os.utime(temporary, ns=(earlier, earlier))
+    os.replace(temporary, receipt)
     assert s.run().accepted == [GENERATION]
     assert set(s.state()["discos"]) == {OTHER, DISK}
     assert s.state()["pares"][f"{GENERATION}|{DISK}"]["desafio"] is not None

@@ -300,6 +300,7 @@ class Verifier:
                 disk: {
                     "observacion": int(record.get("observacion", 0)),
                     "sha256": record.get("sha256_observacion"),
+                    "resincronizacion": record.get("resincronizacion"),
                 }
                 for disk, record in sorted(self.state["discos"].items())
             },
@@ -377,6 +378,8 @@ class Verifier:
                     self._answer(conn, document, states, report)
                 elif kind == "punto":
                     self._point(document, digest, report, name)
+                elif kind == "resincronizar":
+                    self._resync(document, name)
                 else:
                     raise Rejected(f"unknown kind {kind!r}")
         except Ignored as error:
@@ -565,12 +568,33 @@ class Verifier:
         now = self.clock().isoformat()
         record["observacion"] = sequence
         record["sha256_observacion"] = digest  # the PC compares it with what it sent
+        record.pop("resincronizacion", None)  # answered: a newer observation came after it
         record["punto"] = point
         record["ultima_visita"] = now
         if document.get("sin_errores") is True:
             record["ultima_sin_errores"] = now
         if point is not None:
             report.points.append(point["copia"])
+
+    def _resync(self, document: Mapping[str, Any], name: str) -> None:
+        """A request of resynchronization (residual of E4C3-16): a disk that has no reliable
+        number for its next observation sends a fresh nonce, and the server answers it in
+        discos.json, next to its counter, only from its saved state. The PC sends no
+        observation while it waits, so that counter is the current one. A request with no
+        nonce closes the previous one."""
+        disk = _disk(document["disco"])
+        if name != f"resincronizar_{disk}.json":
+            raise Rejected(f"the request of disk {disk} goes in resincronizar_{disk}.json")
+        record = self.state["discos"].get(disk)
+        if record is None:
+            raise NotAdmitted(f"disk {disk} not admitted")
+        nonce = document["nonce"]
+        if nonce is None:
+            record.pop("resincronizacion", None)
+            return
+        if not isinstance(nonce, str) or len(nonce) != 32 or not set(nonce) <= _DISK:
+            raise Rejected("the nonce is not 32 hexadecimal characters")
+        record["resincronizacion"] = nonce
 
     def _hot_point(self, name: str, document: Mapping[str, Any]) -> dict[str, str]:
         entry = register_entries(self.copies).get(name)

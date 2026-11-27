@@ -86,10 +86,12 @@ if (-not (Test-Path -LiteralPath $Destino)) {
     }
 }
 $Marca = Join-Path $Destino '.kbot-disco'
+$MarcaNueva = $false   # a disk initialized in this visit: nothing of it was ever accepted
 if (-not (Test-Path -LiteralPath $Marca)) {
     if (-not $Inicializar) {
         throw "$Destino no es el disco de kbot (falta .kbot-disco). Si es un disco nuevo, usa -Inicializar."
     }
+    $MarcaNueva = $true
     $bytes = New-Object byte[] 16
     [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
     Write-Utf8Durable $Marca ((($bytes | ForEach-Object { $_.ToString('x2') }) -join '') + "`n")
@@ -194,6 +196,7 @@ Invoke-Sftp @(
     "get desafios/procesados.json $(Quote $meta)/",
     "-get desafios/discos.json $(Quote $meta)/",
     "-get recibos/recibo_punto_$Disco.json $(Quote $meta)/ultima_observacion.json",
+    "-get recibos/resincronizar_$Disco.json $(Quote $meta)/ultima_resincronizacion.json",
     "-get desafios/desafio_*.json $(Quote $desafiosLocal)/",
     "get copias/registro.jsonl $(Quote $meta)/registro.jsonl",
     "-get copias/globales/registro.jsonl $(Quote $meta)/registro_globales.jsonl"
@@ -215,23 +218,43 @@ if ($discosServidor -and (Has-Property $discosServidor $Disco)) {
 }
 $enviada = [int64]0
 $shaEnviada = $null
-$ContadorFiable = $true
+$remotaFiable = $false
 $ultimaEnviada = Join-Path $meta 'ultima_observacion.json'
 if (Test-Path -LiteralPath $ultimaEnviada) {
     $shaEnviada = (Get-FileHash -Algorithm SHA256 -LiteralPath $ultimaEnviada).Hash.ToLowerInvariant()
     $ultima = Read-Optional $ultimaEnviada
     if ($ultima -and (Has-Property $ultima 'disco') -and $ultima.disco -eq $Disco -and (Has-Property $ultima 'secuencia')) {
         $enviada = [int64]$ultima.secuencia
-    } elseif (-not ((Has-Property $procesados $PuntoNombre) -and [string]$procesados.$PuntoNombre -eq $shaEnviada)) {
-        # The disk's own file cannot be read and the server has not processed it yet, so
-        # discos.json may be behind it. When the server has processed it, discos.json is at
-        # least as recent: the server writes it before procesados.json, and this visit reads
-        # procesados.json first.
-        $ContadorFiable = $false
+        $remotaFiable = $true
     }
-} elseif ($SecuenciaLocal -eq 0 -and $observada -gt 0) {
-    # Something of this disk was accepted, but its file is gone and the disk lost its state.
-    $ContadorFiable = $false
+}
+# A reliable number needs one of these: the number this disk kept (it keeps one only when it
+# was reliable), its last observation read back whole from recibos/, a disk initialized in
+# this very visit (nothing of it can have been accepted), or a resynchronization the server
+# has confirmed. discos.json alone is not enough: it can be behind.
+$Pendiente = $null   # the nonce of this disk's request of resynchronization, if any
+if ((Has-Property $Estado 'resincronizar') -and $Estado.resincronizar) {
+    $Pendiente = [string]$Estado.resincronizar
+} else {
+    $peticion = Read-Optional (Join-Path $meta 'ultima_resincronizacion.json')
+    if ($peticion -and (Has-Property $peticion 'disco') -and $peticion.disco -eq $Disco -and (Has-Property $peticion 'nonce')) {
+        $Pendiente = [string]$peticion.nonce
+    }
+}
+$Resincronizado = $false
+if ($Pendiente -and $discosServidor -and (Has-Property $discosServidor $Disco) -and
+    (Has-Property $discosServidor.$Disco 'resincronizacion') -and [string]$discosServidor.$Disco.resincronizacion -eq $Pendiente) {
+    # The server answered this very request, from its saved state, after every observation
+    # this disk had sent: the counter in this discos.json is the current one.
+    $Resincronizado = $true
+}
+$ContadorFiable = ($SecuenciaLocal -gt 0) -or $remotaFiable -or $MarcaNueva -or $Resincronizado
+if ($ContadorFiable) {
+    $Pendiente = $null
+} elseif (-not $Pendiente) {
+    $bytes = New-Object byte[] 16
+    [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+    $Pendiente = (($bytes | ForEach-Object { $_.ToString('x2') }) -join '')
 }
 $Secuencia = [Math]::Max([Math]::Max($observada, $SecuenciaLocal), $enviada) + 1
 # The last observation this disk sent, already processed by the server but not the accepted
@@ -476,10 +499,19 @@ if (-not $observacion) {
 }
 if ($ContadorFiable) {
     Write-Utf8 (Join-Path $Salida $PuntoNombre) (ConvertTo-Json $observacion -Depth 6 -Compress)
+    if ($Resincronizado) {
+        # The answered request is closed, before the observation goes up: its nonce is never
+        # trusted again, even read back by a disk that lost its state later.
+        $cierre = [ordered]@{ tipo = 'resincronizar'; disco = $Disco; nonce = $null }
+        Write-Utf8 (Join-Path $Salida "resincronizar_$Disco.json") (ConvertTo-Json $cierre -Compress)
+    }
 } else {
     # Without a reliable number, no observation is sent (residual of E4C3-16): one with a used
     # number would be refused and the server would keep a point this disk may have lost.
-    $Errores.Add('no se sabe con seguridad el número de la última observación de este disco, así que esta vez no se envía. Vuelve a ejecutar el guion dentro de 15 minutos; si se repite, avisa a Claude')
+    # Instead, a request of resynchronization with a fresh nonce, the same until answered.
+    $peticion = [ordered]@{ tipo = 'resincronizar'; disco = $Disco; nonce = $Pendiente }
+    Write-Utf8 (Join-Path $Salida "resincronizar_$Disco.json") (ConvertTo-Json $peticion -Compress)
+    $Errores.Add('no se sabe con seguridad el número de la última observación de este disco, así que esta vez no se envía y se pide al servidor que lo confirme. Vuelve a ejecutar el guion dentro de 15 minutos; si se repite, avisa a Claude')
 }
 
 # --- 7. delete what the server already processed, then upload ----------------------------------
@@ -498,7 +530,9 @@ foreach ($p in $procesados.PSObject.Properties) {
         $comandos += "-rm recibos/$($p.Name)"
     }
 }
-foreach ($file in @(Get-ChildItem -LiteralPath $Salida -File)) {
+# The request of resynchronization goes first: a closed request is in place before the
+# observation that follows it.
+foreach ($file in @(Get-ChildItem -LiteralPath $Salida -File | Sort-Object { -not $_.Name.StartsWith('resincronizar_') }, Name)) {
     # put empties its target before writing, so each file goes up under a temporary name
     # that the server never reads, and a rename puts it in place whole: a cut connection
     # leaves the previous file, never an empty one (residual of E4C3-16).
@@ -511,7 +545,10 @@ function Save-State([bool]$Done) {
     $estado = [ordered]@{
         ultima_visita = $(if ($Done) { $Ahora.ToString('o') } elseif ((Has-Property $Estado 'ultima_visita')) { $Estado.ultima_visita } else { $null })
         ultima_completa = $(if ($Done -and $TodoEntero) { $Ahora.ToString('o') } elseif ($UltimaCompleta) { $UltimaCompleta.ToString('o') } else { $null })
-        secuencia = $Secuencia
+        # A number is kept only when it is reliable; otherwise the pending request is kept,
+        # and the next visit waits for its answer (residual of E4C3-16).
+        secuencia = $(if ($ContadorFiable) { $Secuencia } else { $null })
+        resincronizar = $Pendiente
         subidos = [pscustomobject]$Subidos
     }
     Write-Utf8Durable $EstadoDisco (ConvertTo-Json $estado -Depth 4)

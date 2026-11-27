@@ -430,7 +430,7 @@ def test_the_point_follows_the_disk_and_never_an_older_observation(tmp_path: Pat
     assert observed() is None  # nothing complete on the disk
     public = json.loads((s.base / "publico" / "discos.json").read_text(encoding="utf-8"))
     sent = hashlib.sha256((s.receipts / POINT).read_bytes()).hexdigest()
-    assert public == {DISK: {"observacion": 3, "sha256": sent}}  # E4C3-16: what was accepted
+    assert public == {DISK: {"observacion": 3, "sha256": sent, "resincronizacion": None}}
     s.send(POINT, first)  # an old observation, byte for byte
     assert any("not newer" in r for r in s.run().rejected)
     assert observed() is None
@@ -641,6 +641,41 @@ def test_processed_files_are_published_for_the_pc_and_forgotten_after_30_days(
     s.now = NOW + timedelta(days=31)
     s.run()
     assert json.loads((s.base / "publico" / "procesados.json").read_text(encoding="utf-8")) == {}
+
+
+def test_a_request_of_resynchronization_is_answered_from_the_saved_state(tmp_path: Path) -> None:
+    """Residual of E4C3-16: the nonce of the request comes back in discos.json next to the
+    counter; a newer accepted observation, or a closing request, withdraws it; the request
+    of one disk in the file of another is refused."""
+    s = Setup(tmp_path)
+    s.send(f"recibo_{GENERATION}.json", s.receipt())  # admits the disk
+    s.run()
+    request = f"resincronizar_{DISK}.json"
+    s.send(request, {"tipo": "resincronizar", "disco": DISK, "nonce": "f" * 32})
+
+    def public() -> dict[str, Any]:
+        value = json.loads((s.base / "publico" / "discos.json").read_text(encoding="utf-8"))
+        return dict(value[DISK])
+
+    s.run()
+    assert public()["resincronizacion"] == "f" * 32 and public()["observacion"] == 0
+    h = "caliente-20261127T004000Z"
+    dump, manifest = b"hot", manifest_of(h, [])
+    register(s, h, dump, manifest)
+    s.send(POINT, point(h, dump, manifest, [], 1))
+    s.run()
+    assert public()["resincronizacion"] is None and public()["observacion"] == 1
+    s.send(request, {"tipo": "resincronizar", "disco": DISK, "nonce": "e" * 32})
+    s.run()
+    assert public()["resincronizacion"] == "e" * 32
+    s.send(request, {"tipo": "resincronizar", "disco": DISK, "nonce": None})  # closed
+    s.run()
+    assert public()["resincronizacion"] is None
+    s.send(
+        f"resincronizar_{OTHER}.json", {"tipo": "resincronizar", "disco": DISK, "nonce": "d" * 32}
+    )
+    assert any("goes in" in r for r in s.run().rejected)
+    assert public()["resincronizacion"] is None
 
 
 def test_a_file_still_being_sent_under_a_temporary_name_is_never_read(tmp_path: Path) -> None:

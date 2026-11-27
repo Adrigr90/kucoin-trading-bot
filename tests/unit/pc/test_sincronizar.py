@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from kbot.backup import local
+from kbot.upload import durable
 from tests.unit.archive.test_externo import GENERATION, Setup
 from tests.unit.upload.support import publish
 
@@ -44,7 +45,9 @@ def fake_sftp(folder: Path) -> Path:
     return wrapper
 
 
-def test_three_visits_through_a_fake_sftp_verify_and_clean_up(tmp_path: Path) -> None:
+def test_three_visits_through_a_fake_sftp_verify_and_clean_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     shell = powershell()
     s = Setup(tmp_path / "servidor")
     day = publish(s.copies, "dia-2026-11-22", b"day copy")
@@ -160,17 +163,65 @@ def test_three_visits_through_a_fake_sftp_verify_and_clean_up(tmp_path: Path) ->
     assert any("not newer" in r for r in s.run().rejected)
     assert point() is None
 
-    # Without a reliable number the visit sends no observation and says so; once the server
-    # has processed the disk's file, discos.json is recent enough and the next visit goes on.
-    observation.write_text('{"tipo": "punto", "secu', encoding="utf-8")
-    (disk / ".kbot-estado.json").write_text("", encoding="utf-8")
-    stopped = visit()
-    assert stopped.returncode == 1 and "no se sabe con seguridad" in stopped.stdout, stopped.stdout
-    assert observation.read_text("utf-8") == '{"tipo": "punto", "secu'
-    s.run()  # processes it: a malformed file, acknowledged
+    # Residual of E4C3-16 (fifth review). A new hot copy gives the disk a point again.
+    h2 = publish(
+        s.copies,
+        "caliente-20261128T004000Z",
+        b"hot copy 2",
+        dias_excluidos=[{"dia": "2026-11-22", "copia_de_dia": identity, "generacion": GENERATION}],
+    )
+    regained = visit()
+    assert regained.returncode == 0, regained.stdout + regained.stderr
+    s.run()
+    assert point() == {"copia": h2.path.name, "hora": "2026-11-28T00:40:00+00:00"}
+    # From now on the server cannot publish a new discos.json: its counter goes on privately
+    # and the published one falls behind.
+    write_json = durable.write_json
+
+    def no_discos(path: Path, value: object, ops: durable.FileOps = durable.REAL) -> None:
+        if path.name == "discos.json":
+            raise durable.PersistenceError("discos.json: cannot be published")
+        write_json(path, value, ops)
+
+    discos = s.base / "publico" / "discos.json"
+    behind = json.loads(discos.read_text("utf-8"))[marker]["observacion"]
+    with monkeypatch.context() as patched:
+        patched.setattr(durable, "write_json", no_discos)
+        ahead = visit()
+        assert ahead.returncode == 0, ahead.stdout + ahead.stderr
+        sent_ahead = observation.read_bytes()
+        with pytest.raises(durable.PersistenceError):
+            s.run()  # accepted privately, not published
+        accepted = s.state()["discos"][marker]["observacion"]
+        assert accepted > behind == json.loads(discos.read_text("utf-8"))[marker]["observacion"]
+        # The disk loses its state, and its copy, gone from the server too. Its file on the
+        # server first is gone (the first case), then comes back as empty bytes (the second).
+        shutil.rmtree(disk / "copias" / h2.path.name)
+        shutil.rmtree(h2.path)
+        observation.unlink()
+        (disk / ".kbot-estado.json").write_text("", encoding="utf-8")
+        for stop in range(2):
+            stopped = visit()
+            assert stopped.returncode == 1, stopped.stdout + stopped.stderr
+            assert "no se sabe con seguridad" in stopped.stdout, stopped.stdout
+            assert (s.receipts / f"resincronizar_{marker}.json").exists()
+            assert not observation.exists() or observation.read_bytes() == b""  # nothing sent
+            with pytest.raises(durable.PersistenceError):
+                s.run()  # no answer can be published
+            if stop == 0:
+                observation.write_bytes(b"")
+        assert point() == {"copia": h2.path.name, "hora": "2026-11-28T00:40:00+00:00"}
+    # discos.json can be published again: the answer to the request comes with the counter,
+    # and the next visit sends a number above the one accepted. The point goes; the old
+    # observation sent again is refused.
+    s.run()
     resumed = visit()
     assert resumed.returncode == 0, resumed.stdout + resumed.stderr
-    # Above the last accepted one; the stopped visit kept a number it never used.
-    assert json.loads(observation.read_text("utf-8"))["secuencia"] > number
-    report = s.run()
-    assert report.rejected == [] and point() is None
+    assert json.loads(observation.read_text("utf-8"))["secuencia"] > accepted
+    s.run()
+    assert point() is None
+    closed = json.loads((s.receipts / f"resincronizar_{marker}.json").read_text("utf-8"))
+    assert closed["nonce"] is None  # the answered request is closed
+    observation.write_bytes(sent_ahead)
+    assert any("not newer" in r for r in s.run().rejected)
+    assert point() is None

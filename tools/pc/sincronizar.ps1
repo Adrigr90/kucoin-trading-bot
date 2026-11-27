@@ -176,7 +176,8 @@ foreach ($g in $indice) {
     $verificada = @($g.verificada_en_discos) -contains $Disco
     if ($TodoEntero -or -not $verificada) { $pendientes += $g }
 }
-$aBajar = New-Object System.Collections.Generic.List[object]   # remote, local final, expected SHA
+# Each download: remote, local final, expected SHA, and the folder of its copy (none for Parquet).
+$aBajar = New-Object System.Collections.Generic.List[object]
 foreach ($g in $indice) {
     foreach ($f in $g.archivos) {
         $local = Join-Path $archivoDisco $f.ruta
@@ -186,7 +187,7 @@ foreach ($g in $indice) {
             $mal = $comprobar -and ((Get-Sha256 $local -Fresh:$comprobar) -ne $f.sha256)
             if ((Get-Item -LiteralPath $local).Length -ne $f.bytes) { $mal = $true }
         }
-        if ($mal) { $aBajar.Add(@("archivo/$($f.ruta)", $local, $f.sha256)) }
+        if ($mal) { $aBajar.Add(@("archivo/$($f.ruta)", $local, $f.sha256, $null)) }
     }
 }
 
@@ -207,12 +208,15 @@ function Find-Copy([string]$Folder, [string]$Name, [string]$DumpSha, [string]$Ma
 function Add-Copy([string]$RemoteFolder, [string]$LocalFolder, [string]$Name, $Entry) {
     if (Find-Copy $LocalFolder $Name $Entry.sha256_cifrado $Entry.sha256_manifiesto) { return }
     $target = Join-Path $LocalFolder $Name
-    if (Test-Path -LiteralPath $target) {
+    $n = 1
+    while (Test-Path -LiteralPath $target) {
         # Another copy with the same name and another identity: nothing is overwritten.
-        $target = Join-Path $LocalFolder ($Name + '~' + $Entry.sha256_cifrado.Substring(0, 8))
+        $suffix = '~' + $Entry.sha256_cifrado.Substring(0, 8) + $(if ($n -gt 1) { "-$n" } else { '' })
+        $target = Join-Path $LocalFolder ($Name + $suffix)
+        $n += 1
     }
-    $aBajar.Add(@("$RemoteFolder/$Name/volcado.age", (Join-Path $target 'volcado.age'), $Entry.sha256_cifrado))
-    $aBajar.Add(@("$RemoteFolder/$Name/manifiesto.json", (Join-Path $target 'manifiesto.json'), $Entry.sha256_manifiesto))
+    $aBajar.Add(@("$RemoteFolder/$Name/volcado.age", (Join-Path $target 'volcado.age'), $Entry.sha256_cifrado, $target))
+    $aBajar.Add(@("$RemoteFolder/$Name/manifiesto.json", (Join-Path $target 'manifiesto.json'), $Entry.sha256_manifiesto, $target))
 }
 
 $copiasDisco = Join-Path $Destino 'copias'
@@ -241,22 +245,54 @@ if ($aBajar.Count -gt 0) {
         $comandos += "-get -p $($aBajar[$i][0]) $(Quote (Join-Path $bajada "$i"))"
     }
     Invoke-Sftp $comandos
+    $copiasMalas = @{}   # a copy with any file missing or wrong: none of its files is kept
     for ($i = 0; $i -lt $aBajar.Count; $i++) {
-        $remote, $final, $expected = $aBajar[$i]
+        $remote, $final, $expected, $copia = $aBajar[$i]
         $file = Join-Path $bajada "$i"
         if (-not (Test-Path -LiteralPath $file)) {
             $Errores.Add("$remote no se pudo descargar")
+            if ($copia) { $copiasMalas[$copia] = $true }
             continue
         }
         if ((Get-FileHash -Algorithm SHA256 -LiteralPath $file).Hash.ToLowerInvariant() -ne $expected) {
             Remove-Item -LiteralPath $file -Force
             $Errores.Add("$remote no coincide con su SHA-256: no se guarda")
+            if ($copia) { $copiasMalas[$copia] = $true }
+        }
+    }
+    # A Parquet file goes into place on its own. A copy is assembled whole in the temporary
+    # folder of the same disk and moved into place in one step, so that the disk never holds
+    # half a copy.
+    $montadas = [ordered]@{}   # final folder of the copy -> its folder in the temporary area
+    $remotas = @{}             # final folder of the copy -> what was downloaded for it
+    for ($i = 0; $i -lt $aBajar.Count; $i++) {
+        $remote, $final, $expected, $copia = $aBajar[$i]
+        $file = Join-Path $bajada "$i"
+        if (-not (Test-Path -LiteralPath $file)) { continue }
+        if (-not $copia) {
+            New-Item -ItemType Directory -Path (Split-Path -Parent $final) -Force | Out-Null
+            Move-Item -LiteralPath $file -Destination $final -Force
+            $null = Get-Sha256 $final -Fresh
+            $Descargados.Add($remote)
             continue
         }
-        New-Item -ItemType Directory -Path (Split-Path -Parent $final) -Force | Out-Null
-        Move-Item -LiteralPath $file -Destination $final -Force
-        $null = Get-Sha256 $final -Fresh
-        $Descargados.Add($remote)
+        if ($copiasMalas.ContainsKey($copia)) {
+            Remove-Item -LiteralPath $file -Force
+            continue
+        }
+        if (-not $montadas.Contains($copia)) {
+            $montadas[$copia] = Join-Path $Temporal ('copia-' + $montadas.Count)
+            New-Item -ItemType Directory -Path $montadas[$copia] | Out-Null
+            $remotas[$copia] = New-Object System.Collections.Generic.List[string]
+        }
+        Move-Item -LiteralPath $file -Destination (Join-Path $montadas[$copia] (Split-Path -Leaf $final))
+        $remotas[$copia].Add($remote)
+    }
+    foreach ($copia in @($montadas.Keys)) {
+        New-Item -ItemType Directory -Path (Split-Path -Parent $copia) -Force | Out-Null
+        Move-Item -LiteralPath $montadas[$copia] -Destination $copia
+        foreach ($name in @('volcado.age', 'manifiesto.json')) { $null = Get-Sha256 (Join-Path $copia $name) -Fresh }
+        foreach ($remote in $remotas[$copia]) { $Descargados.Add($remote) }
     }
 }
 

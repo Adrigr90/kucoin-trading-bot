@@ -3196,7 +3196,9 @@ El revisor lo reprodujo de forma sintética, no en Oracle. **Verificación del r
   - **El caché de huellas del guion** (`.kbot-huellas.json`, en el disco) guarda el SHA-256 de cada archivo junto con su tamaño y su hora de modificación.
     - Se calcula de nuevo sobre el disco todo lo que se acaba de descargar y todos los archivos de las generaciones que se prueban en esa visita. Cada archivo se lee como mucho una vez por visita.
     - **El punto recuperable:** la copia caliente y las copias de día de las que depende se comprueban al descargarlas, y de nuevo, enteras, en la comprobación mensual o con `-Completa`. Entre medias vale el caché, si no han cambiado ni el tamaño ni la hora. Es el mismo criterio que fija el diseño para las generaciones ya verificadas, y por la misma razón: que no haya que leer el disco entero cada semana.
-  - **Las copias del mismo nombre con otra identidad** se guardan como `<nombre>~<8 primeros del SHA-256 del volcado>`. Una dependencia se busca en el nombre exacto y en esas variantes.
+  - **Las copias del mismo nombre con otra identidad** se guardan como `<nombre>~<8 primeros del SHA-256 del volcado>` (con `-2`, `-3`… si también ese nombre está ocupado). Una dependencia se busca en el nombre exacto y en esas variantes.
+  - **Una copia entra en el disco entera o no entra:** su volcado y su manifiesto se comprueban en la carpeta temporal del mismo disco y la carpeta de la copia se mueve a su sitio de una vez, solo si coinciden los dos. Si falla uno, se borran los dos y se informa. Un Parquet entra por sí solo.
+  - **Un archivo que no se puede descargar** se informa como error y la visita sigue con los demás.
   - **La copia caliente diaria** que se descarga es la primera del día UTC más reciente que tiene el servidor. Las que ya están en el disco se quedan.
   - **Un disco se admite solo con un recibo de generación válido.** El recibo del punto recuperable de un disco no admitido se rechaza.
   - **`retirar-disco` y la verificación nunca escriben el estado a la vez:** las dos toman un candado (`flock`) en `/srv/kbot/externo/privado/.lock`, y la segunda espera.

@@ -312,6 +312,8 @@ class Verifier:
                 self._one(conn, name, generations, states, report)
         self._prune()
         self._save()
+        # The index again, from the saved state: what this run verified is known at once.
+        self._publish("generaciones.json", index(generations, self._verified_disks()))
         self._announce()
         return report
 

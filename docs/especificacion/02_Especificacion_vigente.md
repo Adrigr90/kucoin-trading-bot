@@ -3193,6 +3193,7 @@ El revisor lo reprodujo de forma sintética, no en Oracle. **Verificación del r
     7. una primera verificación y el temporizador.
   - **El índice** (`generaciones.json`) lleva también `verificada_en_discos`: los discos en los que cada generación quedó verificada y cuyo último recibo sigue siendo válido. El guion vuelve a probar en cada visita las generaciones que no están verificadas en su disco, y todas en la comprobación mensual. **Tras un recibo con fallo,** el disco sale de esa lista, así que la generación se prueba de nuevo en la visita siguiente, no al mes.
   - **Nada se anuncia antes de guardarse** (E4C3-09). Una ejecución procesa en memoria, guarda el estado con la secuencia de persistencia y solo entonces publica lo que dice el estado guardado:
+    - el índice (`generaciones.json`), así que lo que esa ejecución verificó se ve en el acto;
     - cada desafío pendiente, y ningún otro: los anulados o sustituidos se retiran ahí;
     - `discos.json`, con la última observación aceptada de cada disco;
     - `procesados.json`, los acuses.
@@ -3236,6 +3237,7 @@ El revisor lo reprodujo de forma sintética, no en Oracle. **Verificación del r
     - lo procesado se olvida a los 30 días;
     - tamaños, tipos, y la elegibilidad nunca insertada;
     - en Linux: enlaces, directorios y archivos de otro dueño, y el candado.
+  - **`tests/unit/pc/test_sincronizar.py`:** el guion entero contra el verificador real, a través de un `sftp` simulado (`fake_sftp.py`) que sirve las cuatro carpetas del chroot desde carpetas locales. Corre con **Windows PowerShell 5.1** en el PC y con `pwsh` en la CI. Tres visitas: la primera da `replicado_fuera` y el punto; la segunda, con el caché y el estado cortados (E4C3-11), responde el desafío; la tercera borra solo lo que el servidor procesó tal como lo subió ese disco (E4C3-09);
   - **`tests/ci/test_deploy.py`:**
     - `sshd -T` con el bloque solo, y dentro de la configuración entera de Ubuntu 24.04 (la del ejecutor de la CI), para `kbot_sync` y para el administrador;
     - las unidades de los montajes, del verificador y del archivo;

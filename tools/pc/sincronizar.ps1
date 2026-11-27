@@ -73,7 +73,8 @@ function Get-Lines([string]$Path) {
 }
 
 function Has-Property($Object, [string]$Name) {
-    return ($null -ne $Object) -and ($Object.PSObject.Properties.Name -contains $Name)
+    # By the indexer: under StrictMode, '.Name' of an object without properties fails.
+    return ($null -ne $Object) -and ($null -ne $Object.PSObject.Properties[$Name])
 }
 
 # --- the right disk: a marker with a random identifier, written once (R-E4-05) ----------------

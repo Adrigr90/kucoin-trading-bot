@@ -2995,7 +2995,7 @@ El revisor lo reprodujo de forma sintética, no en Oracle. **Verificación del r
 
 **Verificación del revisor:** 87 pruebas locales y las reproducciones de cada hallazgo; sin acciones en Oracle.
 
-**E4c-3: diseño de detalle del disco externo** [27 nov 2026; revisado en `4c8ed9e`: APROBABLE CON CORRECCIONES, con E4C3-01 a E4C3-06 incorporados abajo; **pendiente de la segunda revisión**, antes del código]. Aplica el diseño aprobado de este punto 4 («Copia al disco externo» y «Lo que un recibo demuestra y lo que no»; E4-D01, E4-D03 y R-E4-05) y precisa lo que aquel dejaba abierto.
+**E4c-3: diseño de detalle del disco externo** [27 nov 2026; revisado en `4c8ed9e` y en `1c8cfee`: APROBABLE CON CORRECCIONES, con E4C3-01 a E4C3-08 incorporados abajo; **pendiente de la tercera revisión**, antes del código]. Aplica el diseño aprobado de este punto 4 («Copia al disco externo» y «Lo que un recibo demuestra y lo que no»; E4-D01, E4-D03 y R-E4-05) y precisa lo que aquel dejaba abierto.
 
 - **Lo medido en el servidor** el 27 nov 2026:
   - el archivo Parquet ocupa 225 MB; un día completo con datos, unos 90 MB (el 18 nov, 94 MB, de ellos 60 MB de `depth_metrics`);
@@ -3032,6 +3032,10 @@ El revisor lo reprodujo de forma sintética, no en Oracle. **Verificación del r
 - **Cambio respecto al diseño aprobado:** los desafíos van en `desafios/`, de solo lectura para `kbot_sync`, y no en `recibos/`. Un directorio con dos escritores obligaría a dar a cada uno permisos sobre lo del otro.
 - **Los permisos de lectura:**
   - `kbot_sync` entra en el grupo `kbot_upload`, que ya lee las copias y su registro desde E4c-2;
+  - **el verificador** (E4C3-07): `kbot-archive-externo.service` corre como `kbot_archive` con `SupplementaryGroups=kbot_upload` solo en esa unidad, como la de los globales. Así lee el registro y los manifiestos de las copias, y nada más:
+    - no puede modificar ninguna copia (`2750`, y `ProtectSystem=strict` con `ReadWritePaths` solo en `/srv/kbot/externo`);
+    - no lee el estado de las subidas, porque `/srv/kbot/subidas` es del grupo `kbot_backup`;
+    - las demás unidades de `kbot_archive` siguen sin ese grupo;
   - `/srv/kbot/archive` pasa a `kbot_archive:kbot_sync`, `2750`, y las dos unidades del archivo a `UMask=0027`. `05_copias.sh` pasa también lo ya archivado, como hizo con las copias.
   - **`kbot_sync` solo lee:** copias cifradas, Parquet de mercado (datos públicos de KuCoin) y lo que `kbot_archive` publica para él. No lee el estado privado de la verificación ni nada de `/srv/kbot/subidas`.
 - **`fail2ban`** vigila también a `kbot_sync`, porque es el mismo `sshd`.
@@ -3074,7 +3078,12 @@ El revisor lo reprodujo de forma sintética, no en Oracle. **Verificación del r
   - Las filas se copian del índice: el PC no lee Parquet, y no se presentan como comprobadas por él.
   - Un recibo es el mismo de una visita a otra mientras el disco no cambie, así que reenviarlo no genera nada nuevo en el servidor (punto 4).
   - **Las generaciones ya verificadas** se recomprueban enteras una vez al mes, o con `-Completa`. Así leer el disco entero no se vuelve semanal a medida que crece. Un fallo se avisa en el resumen y llega al servidor como recibo inválido, que lo anota como error. No hay estados nuevos, porque son de solo inserción: qué hacer entonces con la elegibilidad de esa generación lo decide E4c-4.
-- **El recibo del punto recuperable** (E4C3-03): un `recibo_punto.json` con la copia caliente más reciente que es recuperable desde el disco (nombre, SHA-256 del volcado y del manifiesto, calculados sobre el disco) y la identidad de cada dependencia que el disco cumple.
+- **El recibo del punto recuperable** (E4C3-03 y E4C3-08): un `recibo_punto.json` con la copia caliente más reciente que es recuperable desde el disco. Lleva:
+  - su nombre y el SHA-256 de su volcado y de su manifiesto, calculados sobre el disco;
+  - **su manifiesto entero**: hoy unos 130 KB, y crece con los días que hay en la base. Por eso este recibo admite hasta 4 MiB, y los de generación, 1 MiB;
+  - la identidad de cada dependencia que el disco cumple.
+
+  Así el servidor puede validarlo aunque la retención local ya haya borrado esa copia.
 - **Los desafíos:** el guion responde solo los desafíos de **su** disco y solo si la generación ha pasado entera, en esa misma visita, la comprobación de bytes y SHA-256 de todos sus archivos (E4C3-01). Lee esos bytes **del disco**, nunca del servidor, y escribe `respuesta_<id>.json`.
   - Si algún archivo de la generación no coincide, no responde: lo descarga de nuevo, lo comprueba, y el recibo de esa visita ya refleja el arreglo.
   - Un desafío nuevo no se puede responder en la misma visita en que se envió su recibo, porque el servidor lo emite después (punto 4).
@@ -3089,11 +3098,11 @@ El revisor lo reprodujo de forma sintética, no en Oracle. **Verificación del r
   - la clave de `kbot_sync` la genera el propietario con `ssh-keygen -t ed25519`, con frase de paso guardada en el agente de Windows, como la del administrador, y solo pasa a Claude la pública.
 
 **4. La verificación en el servidor** (`python -m kbot.archive.externo`, como `kbot_archive`, temporizador cada 15 minutos)
-1. Rehace `generaciones.json` cuando cambian las generaciones, y `procesados.json` con los nombres y SHA-256 de lo que ya procesó.
+1. Rehace `generaciones.json` cuando cambian las generaciones, y `procesados.json` con los nombres y SHA-256 de los archivos de `recibos/` que ya procesó, para que el guion los borre.
 2. **Discos admitidos** (E4C3-04): como mucho 2 identificadores de disco a la vez. El primero que llega con un recibo válido se admite. Uno más se rechaza y se anota, salvo que el propietario retire otro con `python -m kbot.archive.externo retirar-disco <id>`, como `kbot_archive`.
 3. **Por cada recibo de generación** en `recibos/`:
-   - lo abre con `O_NOFOLLOW` y solo si es un archivo normal de `kbot_sync`, de como mucho 1 MiB y entre los 1.000 primeros de la ejecución. Los demás se ignoran y se anotan. Así un enlace u otro objeto en `recibos/` nunca le hace leer otra cosa con sus permisos;
-   - si su SHA-256 ya está procesado, se ignora sin generar nada: la retransmisión es idempotente;
+   - lo abre con `O_NOFOLLOW` y solo si es un archivo normal de `kbot_sync`, de como mucho 1 MiB (4 MiB el del punto recuperable) y entre los 1.000 primeros de la ejecución. Los demás se ignoran y se anotan. Así un enlace u otro objeto en `recibos/` nunca le hace leer otra cosa con sus permisos;
+   - **la idempotencia se mide contra el estado vigente del par** (residual de E4C3-01): si su SHA-256 es el del último recibo del par, se ignora sin generar nada. Cualquier otro se procesa, también uno ya visto antes. Así A → A no multiplica desafíos, y A → B → A, con B inválido y A otra vez tras reparar, devuelve el par a válido con un único desafío nuevo;
    - se **rechaza** si no es JSON válido, si su disco no está admitido, si su generación no existe o si su conjunto de archivos no es exactamente el del servidor: mismas rutas, bytes y SHA-256 (E4-D01);
    - **el último recibo de cada par (generación, disco) es el que vale** (E4C3-01). Si es inválido, el par queda «con fallo»: el desafío pendiente de ese par se anula, y sus respuestas ya no cuentan, hasta un recibo válido posterior;
    - si es válido, inserta `replicado_fuera`, si no estaba, y emite el desafío del par, **atado a ese recibo** (su SHA-256), a la generación y al disco. Un par tiene como mucho un desafío pendiente: uno nuevo sustituye al anterior.
@@ -3101,12 +3110,14 @@ El revisor lo reprodujo de forma sintética, no en Oracle. **Verificación del r
    - nombra el desafío pendiente de su par, y ese desafío está atado al último recibo válido del par;
    - el desafío se emitió en una ejecución anterior a la llegada de la respuesta;
    - cada SHA-256 coincide con la respuesta esperada.
-5. **El recibo del punto recuperable** (E4C3-03): la copia caliente que nombra tiene que estar en el registro de las copias, con ese SHA-256 de volcado y de manifiesto, y sus dependencias tienen que ser exactamente las que fija su manifiesto.
+5. **El recibo del punto recuperable** (E4C3-03 y E4C3-08): la copia caliente que nombra tiene que estar en el registro de las copias, que nunca se borra, con ese SHA-256 de volcado y de manifiesto.
+   - **El manifiesto que trae el recibo** tiene que dar exactamente ese SHA-256 del registro: así queda autenticado sin depender de que la copia siga en el servidor. Uno alterado se rechaza.
+   - **Sus dependencias** tienen que ser exactamente las que fija ese manifiesto.
    - Si se cumple, anota el **punto recuperable del disco**: la hora de esa copia caliente.
    - Nunca lo adelanta por una visita sin una caliente nueva y completa.
 6. **El estado, acotado** (E4C3-04), en `/srv/kbot/externo/privado/estado.json`, durable, con la secuencia de E4C2-03. Guarda:
    - por cada par (generación, disco admitido): el último recibo, su resultado, el desafío pendiente con su respuesta esperada, y si quedó verificado;
-   - los SHA-256 de lo procesado de los últimos 30 días;
+   - los nombres y SHA-256 de los archivos de `recibos/` procesados de los últimos 30 días, solo para `procesados.json`: la idempotencia no depende de ellos;
    - por disco: la última visita, la última sincronización sin errores y el punto recuperable.
 
    Su tamaño está acotado por las generaciones por los 2 discos, y el de `desafios/` también: un desafío por par, que se borra cuando el par queda verificado. `kbot_archive` no borra lo que escribe `kbot_sync`: lo borra el guion, cuando el servidor lo da por procesado.
@@ -3136,6 +3147,9 @@ El revisor lo reprodujo de forma sintética, no en Oracle. **Verificación del r
   - un recibo con un byte o un SHA-256 cambiado, o al que le falta un archivo;
   - una respuesta con bytes de otra posición;
   - **E4C3-01:** un byte alterado fuera del rango desafiado entre dos visitas. El recibo nuevo falla, el desafío anterior se anula, y no aparece `verificado_fuera` aunque la respuesta parcial coincida. Tras reparar el archivo y completar el protocolo, sí aparece;
+  - **su residual:** A válido, B inválido y A otra vez tras reparar, dentro de los 30 días y con reinicios del servicio entre los pasos. La verificación se completa con un único desafío nuevo, y A → A sin cambios no multiplica desafíos;
+  - **E4C3-07:** bajo el UID y los grupos efectivos de `kbot-archive-externo`, como root en la CI, se valida un punto completo leyendo el registro y el manifiesto. No puede modificar ninguna copia ni leer `/srv/kbot/subidas`;
+  - **E4C3-08:** se envía un recibo válido, la retención borra la copia caliente y el verificador se reinicia antes de procesarlo. Se valida con el manifiesto del recibo, y se rechaza uno con el manifiesto alterado;
   - **E4C3-02:** con S1 en el cubo, S2 en el servidor, H dependiendo de S1 y sin generación alternativa, el disco no acredita H, y el punto recuperable se queda en la caliente anterior completa;
   - **E4C3-03:** la caliente de las 00:40 copiada a las 23:00 da 22 h 20 min; una visita sin caliente nueva, una descarga a medias o una dependencia ausente no adelantan el punto;
   - **E4C3-04:** retransmisiones del mismo recibo, identificadores de disco desconocidos más allá de 2, y reinicios del servicio. Lo generado en `desafios/` y en el estado sigue acotado, y un intercambio legítimo se completa;
@@ -3604,3 +3618,5 @@ $$\Delta Cap=\underbrace{8}_{\text{distancia mark-stop de lo cerrado}}+\underbra
 | 27 nov 2026 | **Diseño de detalle de E4c-3: el disco externo** (§13.1, punto 4; rama `fase-2-e4c3`, **pendiente de revisión**, antes del código). El SFTP de `kbot_sync` con su chroot, los montajes de solo lectura y un sistema de archivos propio de 256 MiB para los recibos, sin enlaces. Lo que publica `kbot_archive` (el índice de generaciones y los desafíos, con las respuestas esperadas en privado). El guion de Windows, que falla sin el disco correcto. La verificación cada 15 minutos (`replicado_fuera` y `verificado_fuera`, nunca `elegible_para_exclusion_backup`). Medido: unos 90 MB de Parquet por día completo, y de 1,3 a 1,7 GB por visita semanal | Claude |
 | 27 nov 2026 | **Revisión del diseño de detalle de E4c-3 (commit `4c8ed9e`): APROBABLE CON CORRECCIONES**, con cuatro hallazgos MEDIOS y dos BAJOS. **E4C3-01:** un desafío anterior podía acreditar una generación cuyo recibo actual detecta corrupción fuera del rango desafiado. **E4C3-02:** la descarga no garantizaba las dependencias exactas de la caliente (S1 en el cubo, S2 en el servidor). **E4C3-03:** el RPO externo se rejuvenecía con la visita. **E4C3-04:** los 256 MiB no acotaban lo que el servidor genera (desafíos y estado). **E4C3-05:** la estimación anual omitía las calientes semanales: de 69 a 87 GB, no 60. **E4C3-06:** F2-A11 seguía diciendo «sin instalar». Revisó la zona de cada hallazgo y no ve más. **Verificación del revisor:** los 314 archivos del ZIP, el diff y el bloque idéntico entre el paquete y el commit; modelos sintéticos | Revisor |
 | 27 nov 2026 | **E4C3-01 a E4C3-06, corregidos** en el diseño de detalle de E4c-3 (§13.1, punto 4). (1) Cada desafío se ata al último recibo válido del par generación-disco; un recibo posterior con fallo lo anula, y el guion solo responde si la generación pasa entera la comprobación en esa visita. (2) Una caliente es recuperable desde el disco solo si el disco tiene cada dependencia con su identidad exacta, y las copias de un mismo día con otra identidad se guardan aparte. (3) El punto recuperable del disco, separado de la última visita y de la última sincronización sin errores. (4) Recibos idempotentes, como mucho 2 discos admitidos, un desafío por par y el estado acotado; el guion borra lo ya procesado. (5) De 69 a 87 GB al año, con sus supuestos. (6) F2-A11 corregida | Claude |
+| 27 nov 2026 | **Segunda revisión del diseño de detalle de E4c-3 (commit `1c8cfee`): APROBABLE CON CORRECCIONES.** E4C3-02 a E4C3-06, RESUELTOS. **E4C3-01, PARCIAL:** deduplicar contra 30 días de SHA-256 bloqueaba la recuperación tras reparar (A → B inválido → A otra vez). **E4C3-07** (MEDIO): el verificador, como `kbot_archive`, no tenía acceso definido al registro ni a los manifiestos de las copias. **E4C3-08** (MEDIO): la retención podía borrar el manifiesto de la caliente antes de validar su recibo. Revisó la zona de cada uno y no ve más. **Verificación del revisor:** los 314 archivos del ZIP y el diff; modelos sintéticos | Revisor |
+| 27 nov 2026 | **Residual de E4C3-01, E4C3-07 y E4C3-08, corregidos** (§13.1, punto 4). La idempotencia se mide contra el último recibo del par, no contra un historial. `kbot-archive-externo` lee las copias con `SupplementaryGroups=kbot_upload` solo en su unidad, sin poder modificarlas ni leer el estado de las subidas. `recibo_punto.json` lleva el manifiesto entero, autenticado contra el SHA-256 del registro, que nunca se borra | Claude |

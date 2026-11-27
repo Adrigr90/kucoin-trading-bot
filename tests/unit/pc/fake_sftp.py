@@ -4,10 +4,16 @@ the environment (FAKE_SFTP_COPIAS, FAKE_SFTP_ARCHIVO, FAKE_SFTP_DESAFIOS, FAKE_S
 
 Like sftp -b: each line is echoed as ``sftp> …``; a command that fails stops the batch with
 exit code 1, unless it starts with ``-``; a path outside the four folders does not exist,
-as in the chroot. Only what the script uses: get [-p], ls -1, rm and put.
+as in the chroot. Only what the script uses: get [-p], ls -1 (without the names that start
+with a dot, like sftp), rm (with ``*``), put and rename (which replaces its target, like the
+posix-rename of OpenSSH).
 
-FAKE_SFTP_CUT_AT_RM=n cuts the connection (exit code 255) just before the n-th ``rm`` of a
-batch, as a dropped network would: n=1 before any deletion, n=2 after the first one.
+Like OpenSSH, put empties its target before writing any data. Two cuts of the connection
+(exit code 255), as a dropped network would:
+- FAKE_SFTP_CUT_AT_RM=n, just before the n-th deletion of a batch (the clean-up of the
+  temporary names of the PC is not counted): n=1 before any deletion, n=2 after the first;
+- FAKE_SFTP_CUT_AT_PUT=n, in the n-th put of a batch, after emptying its target and before
+  the first byte of data.
 """
 
 from __future__ import annotations
@@ -26,6 +32,10 @@ class Failed(Exception):
     pass
 
 
+class Cut(Exception):
+    pass
+
+
 def remote(path: str) -> Path:
     parts = path.strip("/").split("/") if not path.startswith("/") else []
     if not parts or parts[0] not in VIEWS:
@@ -34,13 +44,16 @@ def remote(path: str) -> Path:
     return Path(folder, *parts[1:])
 
 
+def matching(pattern: Path) -> list[Path]:
+    if "*" not in pattern.name:
+        return [pattern] if pattern.is_file() else []
+    if not pattern.parent.is_dir():
+        return []
+    return sorted(p for p in pattern.parent.iterdir() if fnmatch.fnmatch(p.name, pattern.name))
+
+
 def get(source: str, target: str) -> None:
-    pattern = remote(source)
-    matches = (
-        sorted(p for p in pattern.parent.glob("*") if fnmatch.fnmatch(p.name, pattern.name))
-        if "*" in pattern.name and pattern.parent.is_dir()
-        else ([pattern] if pattern.is_file() else [])
-    )
+    matches = matching(remote(source))
     if not matches:
         raise Failed(f'File "{source}" not found.')
     for match in matches:
@@ -50,44 +63,61 @@ def get(source: str, target: str) -> None:
         shutil.copyfile(match, local)
 
 
-def run(line: str) -> None:
+def run(line: str, cut_this_put: bool) -> None:
     words = shlex.split(line)
     command, arguments = words[0], [w for w in words[1:] if w not in ("-p", "-1")]
     if command == "get":
         get(arguments[0], arguments[1])
     elif command == "put":
-        shutil.copyfile(arguments[0], remote(arguments[1]))
+        target = remote(arguments[1])
+        target.write_bytes(b"")  # emptied first: OpenSSH opens its target with O_TRUNC
+        if cut_this_put:
+            raise Cut()
+        shutil.copyfile(arguments[0], target)
+    elif command == "rename":
+        source, target = remote(arguments[0]), remote(arguments[1])
+        if not source.is_file():
+            raise Failed(f'Couldn\'t rename file "{arguments[0]}": not found')
+        os.replace(source, target)
     elif command == "rm":
-        target = remote(arguments[0])
-        if not target.is_file():
+        matches = matching(remote(arguments[0]))
+        if not matches:
             raise Failed(f'Couldn\'t delete file: "{arguments[0]}" not found')
-        target.unlink()
+        for match in matches:
+            match.unlink()
     elif command == "ls":
         folder = remote(arguments[0])
         if not folder.is_dir():
             raise Failed(f'Can\'t ls: "{arguments[0]}" not found')
         for entry in sorted(folder.iterdir()):
-            print(f"{arguments[0].rstrip('/')}/{entry.name}")
+            if not entry.name.startswith("."):
+                print(f"{arguments[0].rstrip('/')}/{entry.name}")
     else:
         raise Failed(f"Invalid command: {command}")
 
 
 def main(argv: list[str]) -> int:
     batch = Path(argv[argv.index("-b") + 1])
-    cut = int(os.environ.get("FAKE_SFTP_CUT_AT_RM", "0"))
-    deletions = 0
+    cut_rm = int(os.environ.get("FAKE_SFTP_CUT_AT_RM", "0"))
+    cut_put = int(os.environ.get("FAKE_SFTP_CUT_AT_PUT", "0"))
+    deletions = puts = 0
     for raw in batch.read_text(encoding="utf-8").splitlines():
         if not raw.strip():
             continue
-        if raw.lstrip("-").startswith("rm "):
+        if raw.lstrip("-").startswith("rm ") and "/.subiendo-" not in raw:
             deletions += 1
-            if deletions == cut:
+            if deletions == cut_rm:
                 print("Connection closed", file=sys.stderr)
                 return 255
+        if raw.startswith("put "):
+            puts += 1
         print(f"sftp> {raw}")
         tolerant = raw.startswith("-")
         try:
-            run(raw[1:] if tolerant else raw)
+            run(raw[1:] if tolerant else raw, raw.startswith("put ") and puts == cut_put)
+        except Cut:
+            print("Connection closed", file=sys.stderr)
+            return 255
         except (Failed, OSError, IndexError) as error:
             print(str(error), file=sys.stderr)
             if not tolerant:

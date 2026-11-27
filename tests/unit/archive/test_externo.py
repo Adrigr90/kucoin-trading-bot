@@ -643,6 +643,16 @@ def test_processed_files_are_published_for_the_pc_and_forgotten_after_30_days(
     assert json.loads((s.base / "publico" / "procesados.json").read_text(encoding="utf-8")) == {}
 
 
+def test_a_file_still_being_sent_under_a_temporary_name_is_never_read(tmp_path: Path) -> None:
+    """Residual of E4C3-16: the PC sends each file as ``.subiendo-<name>`` and renames it;
+    until then the verifier does not read it, nor record it."""
+    s = Setup(tmp_path)
+    (s.receipts / f".subiendo-recibo_{GENERATION}.json").write_text('{"tipo": "gen', "utf-8")
+    report = s.run()
+    assert report.rejected == [] and report.accepted == []
+    assert s.state()["procesados"] == {}
+
+
 def test_sizes_kinds_and_the_eligibility_that_is_never_inserted(tmp_path: Path) -> None:
     s = Setup(tmp_path)
     (s.receipts / "grande.json").write_bytes(b" " * (externo.RECEIPT_LIMIT + 1))

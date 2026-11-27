@@ -29,7 +29,8 @@ Every transition is saved before anything announces it (E4C3-09): the challenges
 withdrawal, the observations of each disk and the acknowledgements of ``procesados.json``
 are published only from the saved state, at the end of each run and again at the start of
 the next one. A file of ``recibos/`` already processed and not touched since is skipped
-without reading it, so the limit of reads per run always moves the queue on (E4C3-13).
+without reading it, so the limit of reads per run always moves the queue on (E4C3-13); one
+whose name starts with a dot is still being sent by the PC and is never read.
 
 It never inserts ``elegible_para_exclusion_backup``: that comes with stage E4c-4.
 """
@@ -324,6 +325,8 @@ class Verifier:
             for name in sorted(os.listdir(self.receipts)):
                 if reads == 0:
                     break
+                if name.startswith("."):
+                    continue  # still being sent by the PC under a temporary name: never read
                 if self._unchanged(name):
                     continue  # processed and not touched since: not even read (E4C3-13)
                 reads -= 1

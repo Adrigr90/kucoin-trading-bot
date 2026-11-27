@@ -215,11 +215,23 @@ if ($discosServidor -and (Has-Property $discosServidor $Disco)) {
 }
 $enviada = [int64]0
 $shaEnviada = $null
+$ContadorFiable = $true
 $ultimaEnviada = Join-Path $meta 'ultima_observacion.json'
-$ultima = Read-Optional $ultimaEnviada
-if ($ultima -and (Has-Property $ultima 'disco') -and $ultima.disco -eq $Disco -and (Has-Property $ultima 'secuencia')) {
-    $enviada = [int64]$ultima.secuencia
+if (Test-Path -LiteralPath $ultimaEnviada) {
     $shaEnviada = (Get-FileHash -Algorithm SHA256 -LiteralPath $ultimaEnviada).Hash.ToLowerInvariant()
+    $ultima = Read-Optional $ultimaEnviada
+    if ($ultima -and (Has-Property $ultima 'disco') -and $ultima.disco -eq $Disco -and (Has-Property $ultima 'secuencia')) {
+        $enviada = [int64]$ultima.secuencia
+    } elseif (-not ((Has-Property $procesados $PuntoNombre) -and [string]$procesados.$PuntoNombre -eq $shaEnviada)) {
+        # The disk's own file cannot be read and the server has not processed it yet, so
+        # discos.json may be behind it. When the server has processed it, discos.json is at
+        # least as recent: the server writes it before procesados.json, and this visit reads
+        # procesados.json first.
+        $ContadorFiable = $false
+    }
+} elseif ($SecuenciaLocal -eq 0 -and $observada -gt 0) {
+    # Something of this disk was accepted, but its file is gone and the disk lost its state.
+    $ContadorFiable = $false
 }
 $Secuencia = [Math]::Max([Math]::Max($observada, $SecuenciaLocal), $enviada) + 1
 # The last observation this disk sent, already processed by the server but not the accepted
@@ -462,23 +474,37 @@ $observacion = $punto
 if (-not $observacion) {
     $observacion = [ordered]@{ tipo = 'punto'; disco = $Disco; secuencia = $Secuencia; copia = $null; sin_errores = ($Errores.Count -eq 0) }
 }
-Write-Utf8 (Join-Path $Salida $PuntoNombre) (ConvertTo-Json $observacion -Depth 6 -Compress)
+if ($ContadorFiable) {
+    Write-Utf8 (Join-Path $Salida $PuntoNombre) (ConvertTo-Json $observacion -Depth 6 -Compress)
+} else {
+    # Without a reliable number, no observation is sent (residual of E4C3-16): one with a used
+    # number would be refused and the server would keep a point this disk may have lost.
+    $Errores.Add('no se sabe con seguridad el número de la última observación de este disco, así que esta vez no se envía. Vuelve a ejecutar el guion dentro de 15 minutos; si se repite, avisa a Claude')
+}
 
 # --- 7. delete what the server already processed, then upload ----------------------------------
 $salientes = @{}   # name -> SHA-256 of what this visit sends
 foreach ($file in @(Get-ChildItem -LiteralPath $Salida -File)) {
     $salientes[$file.Name] = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName).Hash.ToLowerInvariant()
 }
-$comandos = @()
+# What a cut visit left half sent is removed first; it never had its final name.
+$comandos = @('-rm recibos/.subiendo-*')
 foreach ($p in $procesados.PSObject.Properties) {
     # Only a file the server processed exactly as this disk last sent it (E4C3-09); one that
     # is sent again now is simply replaced. It is forgotten only once the listing of
     # recibos/ after the upload shows it gone (E4C3-17).
-    if ($Subidos.ContainsKey($p.Name) -and $Subidos[$p.Name] -eq [string]$p.Value -and -not $salientes.ContainsKey($p.Name)) {
+    # The disk's own observation file is never deleted: it is the reference of its number.
+    if ($Subidos.ContainsKey($p.Name) -and $Subidos[$p.Name] -eq [string]$p.Value -and -not $salientes.ContainsKey($p.Name) -and $p.Name -ne $PuntoNombre) {
         $comandos += "-rm recibos/$($p.Name)"
     }
 }
-foreach ($file in @(Get-ChildItem -LiteralPath $Salida -File)) { $comandos += "put $(Quote $file.FullName) recibos/$($file.Name)" }
+foreach ($file in @(Get-ChildItem -LiteralPath $Salida -File)) {
+    # put empties its target before writing, so each file goes up under a temporary name
+    # that the server never reads, and a rename puts it in place whole: a cut connection
+    # leaves the previous file, never an empty one (residual of E4C3-16).
+    $comandos += "put $(Quote $file.FullName) recibos/.subiendo-$($file.Name)"
+    $comandos += "rename recibos/.subiendo-$($file.Name) recibos/$($file.Name)"
+}
 foreach ($name in @($salientes.Keys)) { $Subidos[$name] = $salientes[$name] }
 
 function Save-State([bool]$Done) {
@@ -509,7 +535,7 @@ $libre = $null
 try { $libre = [System.IO.DriveInfo]::new((Get-Item -LiteralPath $Destino).FullName).AvailableFreeSpace } catch { }
 Write-Host "== kbot: sincronización del disco $Disco"
 Write-Host "Descargado y comprobado: $($Descargados.Count) archivos."
-Write-Host "Recibos enviados: $recibosEscritos de generación y el del punto recuperable (observación $Secuencia)."
+Write-Host "Recibos enviados: $recibosEscritos de generación$(if ($ContadorFiable) { " y el del punto recuperable (observación $Secuencia)" } else { ', sin el del punto recuperable' })."
 Write-Host "Desafíos respondidos: $respondidos."
 if ($punto) {
     $hora = [datetime]::ParseExact($punto.copia.Substring(9), 'yyyyMMddTHHmmssZ', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AdjustToUniversal -bor [Globalization.DateTimeStyles]::AssumeUniversal)

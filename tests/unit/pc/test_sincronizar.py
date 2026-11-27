@@ -69,7 +69,7 @@ def test_three_visits_through_a_fake_sftp_verify_and_clean_up(tmp_path: Path) ->
         FAKE_SFTP_RECIBOS=str(s.receipts),
     )
 
-    def visit(*extra: str, cut: str = "0") -> subprocess.CompletedProcess[str]:
+    def visit(*extra: str, cut: str = "0", cut_put: str = "0") -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [
                 shell,
@@ -91,7 +91,7 @@ def test_three_visits_through_a_fake_sftp_verify_and_clean_up(tmp_path: Path) ->
             errors="replace",
             check=False,
             timeout=300,
-            env=dict(environment, FAKE_SFTP_CUT_AT_RM=cut),
+            env=dict(environment, FAKE_SFTP_CUT_AT_RM=cut, FAKE_SFTP_CUT_AT_PUT=cut_put),
         )
 
     s.run()
@@ -133,24 +133,44 @@ def test_three_visits_through_a_fake_sftp_verify_and_clean_up(tmp_path: Path) ->
     s.run()
     assert point() == {"copia": hot.path.name, "hora": "2026-11-27T00:40:00+00:00"}
 
-    # E4C3-16: the server accepted that observation but its discos.json fell behind; the disk
-    # loses its state and its only complete hot copy, gone from the server too. The next
-    # observation still gets a new number, and the point goes; the old one sent again is
-    # refused.
+    # E4C3-16: the server accepted that observation, but its discos.json fell behind. The next
+    # visit is cut inside the put of its observation, after the target is emptied: the
+    # observation file keeps the last one whole, because it goes up under a temporary name.
     old = observation.read_bytes()
     (s.base / "publico" / "discos.json").write_text("{}", encoding="utf-8")
+    cut_put = visit(cut_put="1")
+    assert cut_put.returncode != 0, cut_put.stdout + cut_put.stderr
+    assert observation.read_bytes() == old
+    assert [p.name for p in s.receipts.glob(".subiendo-*")] == [f".subiendo-{observation.name}"]
+    # Then the disk loses its state and its only complete hot copy, gone from the server
+    # too. The number comes back from the disk's own file on the server, not from the clock:
+    # the old one plus one. The point goes, and the old observation sent again is refused.
     (disk / ".kbot-estado.json").write_text("", encoding="utf-8")
     shutil.rmtree(disk / "copias" / hot.path.name)
     shutil.rmtree(hot.path)  # local retention took it; its register stays
     fourth = visit()
     assert fourth.returncode == 0, fourth.stdout + fourth.stderr
     assert "ninguna copia caliente completa" in fourth.stdout, fourth.stdout
-    # The number came back from the disk's own file on the server, not from the clock.
-    assert json.loads(observation.read_text("utf-8"))["secuencia"] == (
-        json.loads(old)["secuencia"] + 1
-    )
+    assert not list(s.receipts.glob(".subiendo-*"))  # the half-sent file is cleaned up
+    number = json.loads(old)["secuencia"] + 1
+    assert json.loads(observation.read_text("utf-8"))["secuencia"] == number
     s.run()
     assert point() is None
     observation.write_bytes(old)
     assert any("not newer" in r for r in s.run().rejected)
     assert point() is None
+
+    # Without a reliable number the visit sends no observation and says so; once the server
+    # has processed the disk's file, discos.json is recent enough and the next visit goes on.
+    observation.write_text('{"tipo": "punto", "secu', encoding="utf-8")
+    (disk / ".kbot-estado.json").write_text("", encoding="utf-8")
+    stopped = visit()
+    assert stopped.returncode == 1 and "no se sabe con seguridad" in stopped.stdout, stopped.stdout
+    assert observation.read_text("utf-8") == '{"tipo": "punto", "secu'
+    s.run()  # processes it: a malformed file, acknowledged
+    resumed = visit()
+    assert resumed.returncode == 0, resumed.stdout + resumed.stderr
+    # Above the last accepted one; the stopped visit kept a number it never used.
+    assert json.loads(observation.read_text("utf-8"))["secuencia"] > number
+    report = s.run()
+    assert report.rejected == [] and point() is None

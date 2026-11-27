@@ -4,13 +4,19 @@ As root: the real Match block of sshd for kbot_sync in a test sshd on 127.0.0.1:
 chroot /srv/kbot/sftp with its three read-only bind mounts and the 256 MiB image of
 recibos/. A day is sealed and archived in PostgreSQL; a sealed-day copy and a hot copy that
 relies on it are published. Then the owner's script, tools/pc/sincronizar.ps1 under pwsh,
-makes two visits, and the verifier runs after each: the first gives ``replicado_fuera`` and
-the challenges, the second answers them from the disk and gives ``verificado_fuera`` and the
-recoverable point. What kbot_sync must not do is tried through the same sftp.
+makes three visits, and the verifier runs after each: the first gives ``replicado_fuera``,
+the challenges and the recoverable point; the second answers the challenges from the disk
+and gives ``verificado_fuera``, while a newer hot copy that relies on another identity of
+its day copy (S1 in the bucket, S2 on the server: E4C3-02) does not move the point; the
+third gets a hot copy that does not match its register, which is not kept and does not move
+the point either (E4C3-03). What kbot_sync must not do is tried through the same sftp.
 
-The verifier runs in the test, as the runner with the role kbot_archive (the only OS user
+The verifier runs in the test as the runner with the role kbot_archive (the only OS user
 the CI maps to the roles), so recibos/ belongs here to the runner's group instead of
 kbot_archive; the real ownership of the server is checked by 06_externo.sh, as each user.
+What the verifier reads, though, is tried as its unit runs it (E4C3-07): the OS user
+kbot_archive with the group kbot_upload validates a recoverable point from the register and
+the manifest, and can modify no copy nor read /srv/kbot/subidas.
 """
 
 from __future__ import annotations
@@ -20,9 +26,11 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from collections.abc import Callable, Iterator
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 import psycopg
 import pytest
@@ -43,12 +51,18 @@ Connect = Callable[..., psycopg.Connection]
 SETUP = r"""
 set -euo pipefail
 group="$(id -gn "$RUNNER")"
-getent passwd kbot_sync >/dev/null ||
-  useradd --system --shell /usr/sbin/nologin --no-create-home kbot_sync
 getent group kbot_upload >/dev/null || groupadd --system kbot_upload
+getent group kbot_backup >/dev/null || groupadd --system kbot_backup
+for user in kbot_sync kbot_archive; do
+  getent passwd "$user" >/dev/null ||
+    useradd --system --shell /usr/sbin/nologin --no-create-home "$user"
+done
+getent passwd kbot_upload >/dev/null ||
+  useradd --system --shell /usr/sbin/nologin --no-create-home -g kbot_upload kbot_upload
 usermod -a -G kbot_upload kbot_sync
 install -d -o root -g root -m 0755 /srv /srv/kbot /srv/kbot/sftp /etc/kbot
-install -d -o "$RUNNER" -g kbot_upload -m 2755 /srv/kbot/backups
+install -d -o "$RUNNER" -g kbot_upload -m 2750 /srv/kbot/backups
+install -d -o kbot_upload -g kbot_backup -m 2750 /srv/kbot/subidas
 install -d -o "$RUNNER" -g kbot_sync -m 2750 /srv/kbot/archive
 install -d -o "$RUNNER" -g "$group" -m 0700 /srv/kbot/externo
 install -d -o "$RUNNER" -g kbot_sync -m 2750 /srv/kbot/externo/publico
@@ -68,6 +82,7 @@ mount -o loop,nodev,nosuid,noexec /srv/kbot/externo/recibos.img /srv/kbot/sftp/r
 chown kbot_sync:"$group" /srv/kbot/sftp/recibos
 chmod 2750 /srv/kbot/sftp/recibos
 install -o root -g root -m 0644 "$KEY" /etc/kbot/kbot_sync_authorized_keys
+install -d -o root -g root -m 0755 /run/sshd  # sshd's privilege separation
 cat > "$CONFIG" <<EOF
 Port 2222
 ListenAddress 127.0.0.1
@@ -86,6 +101,71 @@ set +e
 for view in copias archivo desafios recibos; do umount /srv/kbot/sftp/$view; done
 rm -rf /srv/kbot /etc/kbot/kbot_sync_authorized_keys
 true
+"""
+
+
+# E4C3-07, as root: the identity of kbot-archive-externo.service (User=kbot_archive,
+# SupplementaryGroups=kbot_upload). The home of the runner is not open to other users on the
+# images of GitHub, so only the traversal (o+x) of the ancestors of the repository and of the
+# interpreter is opened, and closed again at the end.
+AS_THE_VERIFIER = r"""
+set -euo pipefail
+opened=()
+restore() { for p in "${opened[@]}"; do chmod o-x "$p"; done; }
+trap restore EXIT
+for path in "$REPO" "$PYTHON" "$BASE"; do
+  p="$path"
+  while [ "$p" != / ]; do
+    p="$(dirname "$p")"
+    if (( (8#$(stat -c %a "$p") & 1) == 0 )); then chmod o+x "$p"; opened+=("$p"); fi
+  done
+done
+setpriv --reuid=kbot_archive --regid=kbot_archive --groups=kbot_upload -- \
+  "$PYTHON" -B -c "$CODE" "$HOT" "$DISK"
+if setpriv --reuid=kbot_archive --regid=kbot_archive --init-groups -- \
+  cat /srv/kbot/backups/registro.jsonl >/dev/null 2>&1; then
+  echo "kbot_archive read the register without the group of its unit" >&2
+  exit 1
+fi
+"""
+
+VERIFIER_CODE = """
+import base64, hashlib, json, os, sys
+from pathlib import Path
+from kbot.archive import externo
+name, disk = sys.argv[1], sys.argv[2]
+copies = Path("/srv/kbot/backups")
+dump = (copies / name / "volcado.age").read_bytes()
+manifest = (copies / name / "manifiesto.json").read_bytes()
+held = [
+    {k: item["copia_de_dia"][k] for k in ("copia", "sha256", "sha256_manifiesto")}
+    for item in json.loads(manifest)["dias_excluidos"]
+]
+verifier = externo.Verifier(None, base=Path("/nonexistent"), copies=copies)
+verifier._admit(disk)
+report = externo.Report()
+verifier._point(
+    {
+        "tipo": "punto", "disco": disk, "copia": name,
+        "sha256": hashlib.sha256(dump).hexdigest(),
+        "sha256_manifiesto": hashlib.sha256(manifest).hexdigest(),
+        "manifiesto_base64": base64.b64encode(manifest).decode(),
+        "dependencias": held, "sin_errores": True,
+    },
+    report,
+)
+assert report.points == [name], report
+for attempt in (
+    lambda: (copies / "x").touch(),
+    lambda: (copies / name / "volcado.age").open("ab").close(),
+    lambda: os.listdir("/srv/kbot/subidas"),
+):
+    try:
+        attempt()
+    except PermissionError:
+        continue
+    raise SystemExit("kbot_archive was allowed something it must not do")
+print("point valid as kbot_archive")
 """
 
 
@@ -111,7 +191,7 @@ def server(tmp_path: Path) -> Iterator[dict[str, Path]]:
         pytest.skip("the server side is Linux")
     import pwd
 
-    for name in ("sudo", "sshd", "sftp", "ssh-keygen", "pwsh", "mkfs.ext4"):
+    for name in ("sudo", "sshd", "sftp", "ssh-keygen", "pwsh", "mkfs.ext4", "setpriv"):
         tool(name)
     keys = tmp_path / "claves"
     keys.mkdir()
@@ -195,6 +275,12 @@ def sftp(server: dict[str, Path], *commands: str) -> subprocess.CompletedProcess
     )
 
 
+def disk_record() -> dict[str, Any]:
+    state = json.loads(Path("/srv/kbot/externo/privado/estado.json").read_text(encoding="utf-8"))
+    [record] = state["discos"].values()
+    return dict(record)
+
+
 def states(connect: Connect, generation: str) -> set[str]:
     with connect("kbot_archive") as conn:
         rows = conn.execute(
@@ -237,9 +323,12 @@ def test_two_visits_of_the_pc_verify_a_generation_through_the_real_sftp(
         lambda: connect("kbot_archive"), owner=pwd.getpwnam("kbot_sync").pw_uid
     )
 
-    # Without the disk, nothing happens.
+    # Without the disk, or with a folder that is not the disk, nothing is written.
     missing = visit(server)
     assert missing.returncode != 0 and not server["disk"].exists(), missing.stdout
+    server["disk"].mkdir()
+    unmarked = visit(server)
+    assert unmarked.returncode != 0 and not any(server["disk"].iterdir()), unmarked.stdout
 
     verifier.run()  # publishes the index before the first visit
     first = visit(server, "-Inicializar")
@@ -253,16 +342,57 @@ def test_two_visits_of_the_pc_verify_a_generation_through_the_real_sftp(
     assert "replicado_fuera" in states(connect, generation)
     assert "verificado_fuera" not in states(connect, generation)
 
+    # E4C3-02: a newer hot copy fixes its day copy with the identity S1, which only the
+    # bucket has; the server and the disk have S2. The disk does not credit it.
+    s1 = dict(identity, sha256="0" * 64)
+    newer = publish(
+        backups,
+        "caliente-20150409T004000Z",
+        b"newer hot copy",
+        dias_excluidos=[{"dia": "2015-04-04", "copia_de_dia": s1, "generacion": generation}],
+    )
     second = visit(server)
     assert second.returncode == 0, second.stdout + second.stderr
-    assert "Desafíos respondidos:" in second.stdout
+    assert "Desafíos respondidos: 1." in second.stdout, second.stdout
+    assert f"{newer.path.name} no es recuperable desde el disco: falta dia-2015-04-04" in (
+        second.stdout
+    )
     report = verifier.run()
     assert generation in report.verified, report
     assert "verificado_fuera" in states(connect, generation)
     assert "elegible_para_exclusion_backup" not in states(connect, generation)
-    state = json.loads(Path("/srv/kbot/externo/privado/estado.json").read_text(encoding="utf-8"))
-    [record] = state["discos"].values()
-    assert record["punto"]["copia"] == hot.path.name
+    record = disk_record()
+    assert record["punto"]["copia"] == hot.path.name  # not the newer one
+
+    # E4C3-03: a hot copy whose bytes do not match its register (as a download cut short) is
+    # not kept, the visit ends with an error, and neither the point nor the last sync
+    # without errors moves.
+    broken = publish(backups, "caliente-20150410T004000Z", b"broken hot copy")
+    (broken.path / "volcado.age").write_bytes(b"cut")
+    third = visit(server)
+    assert third.returncode == 1 and "no coincide con su SHA-256" in third.stdout, third.stdout
+    assert not (disk / "copias" / broken.path.name).exists()
+    verifier.run()
+    after = disk_record()
+    assert after["punto"] == record["punto"]
+    assert after["ultima_sin_errores"] == record["ultima_sin_errores"]
+    assert after["ultima_visita"] > record["ultima_visita"]
+
+    # E4C3-07: what the verifier reads, as its unit runs it.
+    marker = (disk / ".kbot-disco").read_text(encoding="utf-8").strip()
+    as_verifier = as_root(
+        AS_THE_VERIFIER,
+        {
+            "REPO": str(ROOT),
+            "PYTHON": sys.executable,
+            "BASE": os.path.realpath(sys.executable),
+            "CODE": VERIFIER_CODE,
+            "HOT": hot.path.name,
+            "DISK": marker,
+        },
+    )
+    assert as_verifier.returncode == 0, as_verifier.stdout + as_verifier.stderr
+    assert "point valid as kbot_archive" in as_verifier.stdout
 
     # What kbot_sync cannot do, through the very same SFTP.
     probe = server["disk"].parent / "probe.txt"
@@ -271,7 +401,16 @@ def test_two_visits_of_the_pc_verify_a_generation_through_the_real_sftp(
         assert sftp(server, command).returncode != 0, command
     assert sftp(server, f"put {probe} recibos/x", "rm recibos/x").returncode == 0
     assert sftp(server, f"put {probe} recibos/a", "symlink recibos/a recibos/b").returncode != 0
+    assert sftp(server, "ln recibos/a recibos/c").returncode != 0  # nor a hard link
     assert sftp(server, "cd /srv/kbot/backups").returncode != 0  # the chroot hides the server
+    copy = server["disk"].parent / "estado.json"
+    assert sftp(server, f"get /srv/kbot/externo/privado/estado.json {copy}").returncode != 0
+    assert not copy.exists()
+    big = server["disk"].parent / "grande.bin"
+    with big.open("wb") as handle:
+        handle.truncate(300 << 20)  # more than the 256 MiB of recibos/
+    assert sftp(server, f"put {big} recibos/grande").returncode != 0
+    sftp(server, "-rm recibos/grande")
     shell = subprocess.run(
         [
             "ssh",

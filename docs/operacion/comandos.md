@@ -9,7 +9,9 @@ Cada comando que Claude ejecuta en el servidor por SSH (respuesta P-E4-1) aparec
 | `ssh-keygen -t ed25519 -f "$env:USERPROFILE\.ssh\kbot_admin" -C "kbot admin"` | Crea el par de claves del administrador. La frase de paso solo la conoce el propietario |
 | `ssh-add "$env:USERPROFILE\.ssh\kbot_admin"` | Carga la clave en el agente de Windows hasta el siguiente reinicio: Claude puede conectarse sin ver la frase |
 | `ssh ubuntu@<IP> 'comando'` | Ejecuta un comando en el servidor y vuelve. Es la forma en que Claude trabaja: un comando visible cada vez |
-| `ssh-keygen -t ed25519 -f "$env:USERPROFILE\.ssh\kbot_sync" -C "kbot sync"` | La clave del usuario de sincronización del disco externo (E4c), distinta de la del administrador |
+| `ssh-keygen -t ed25519 -f "$env:USERPROFILE\.ssh\kbot_sync" -C "kbot sync"` | La clave del usuario de sincronización del disco externo (E4c), distinta de la del administrador. Solo pasa a Claude la línea de `kbot_sync.pub` (`disco_externo.md`) |
+| `ssh-add "$env:USERPROFILE\.ssh\kbot_sync"` | Carga esa clave en el agente de Windows hasta el siguiente reinicio, para que el guion del disco externo no pida la frase |
+| `powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\pc\sincronizar.ps1 -Destino E:\kbot` | Desde la carpeta del repositorio: copia al disco externo lo nuevo del servidor, lo comprueba, deja los recibos y responde a los desafíos (E4c-3). La primera vez, con `-Inicializar`; con `-Completa`, comprueba también lo ya verificado. Sin el disco conectado se detiene sin escribir nada |
 
 ## E4a. Sistema
 
@@ -61,6 +63,11 @@ Cada comando que Claude ejecuta en el servidor por SSH (respuesta P-E4-1) aparec
 | `sudo cat /srv/kbot/subidas/estado.json` | El estado de las subidas: el último listado, las copias verificadas fuera, lo que ocupa el cubo, las peticiones de los últimos 32 días y la hora de la última subida completa (el RPO frente a la pérdida del servidor) |
 | `sudo systemctl start kbot-guardcheck@kbot_upload` | Comprueba que `kbot_upload` llega a los metadatos de la instancia (y con `@kbot_backup`, que `kbot_backup` no) |
 | `sudo systemctl start kbot-backup-previa.service` | La copia autocontenida previa a una actualización; `02_codigo.sh` la hace sola desde E4c-2 |
+| `sudo bash /opt/kbot/deploy/install/06_externo.sh` | E4c-3, el disco externo: instala la clave pública de `kbot_sync` (nunca una privada; se detiene si el archivo no es exactamente una clave pública), le deja leer las copias y el archivo, monta su chroot de solo lectura con la carpeta de recibos de 256 MiB, activa su bloque de `sshd` solo si `sshd -t` acepta toda la configuración (si no, deja la anterior y no recarga nada), lo comprueba desde su propia identidad y arranca la verificación cada 15 minutos. Se puede repetir |
+| `sudo systemctl start kbot-archive-externo.service` | Hace ahora una verificación del disco externo: publica el índice de generaciones, lee los recibos y las respuestas del PC e inserta `replicado_fuera` y `verificado_fuera` (nunca la elegibilidad) |
+| `sudo journalctl -u kbot-archive-externo -n 30` | Registro de las últimas verificaciones, con lo rechazado y por qué |
+| `sudo cat /srv/kbot/externo/privado/estado.json` | El estado de la verificación: por disco, la última visita, la última sincronización sin errores y el punto recuperable (el RPO de la copia externa); por generación y disco, el último recibo y el desafío pendiente |
+| `sudo -u kbot_archive /opt/kbot/.venv/bin/python -m kbot.archive.externo retirar-disco <identificador>` | Retira un disco externo, con el permiso del propietario, para admitir otro (como mucho 2). Espera a que termine la verificación en curso |
 | `python -m tools.simular_copias --subida-caliente-cada 6` | En el PC, no en el servidor: la simulación del presupuesto del cubo (120 días por defecto) |
 
 Las copias solo se descifran con las claves privadas del propietario, que nunca están en el servidor.

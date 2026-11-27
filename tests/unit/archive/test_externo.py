@@ -196,6 +196,56 @@ def test_an_answer_in_the_run_that_issued_the_challenge_does_not_count(
     assert (GENERATION, "verificado_fuera") not in s.conn.inserted
 
 
+def test_an_answer_with_the_bytes_of_another_position_is_rejected(tmp_path: Path) -> None:
+    """The answer must hash the bytes at the very offset the challenge names: the bytes of
+    another position of the same file are refused, and the challenge stays pending."""
+    s = Setup(tmp_path)
+    s.send(f"recibo_{GENERATION}.json", s.receipt())
+    s.run()
+    challenge = s.challenge()
+    shifted = json.loads(json.dumps(challenge))
+    [item] = [i for i in shifted["pruebas"] if i["ruta"].endswith("candles.parquet")]
+    item["desde"] = item["desde"] + 1 if item["desde"] == 0 else item["desde"] - 1
+    s.send(f"respuesta_{challenge['id']}.json", s.answer(shifted))
+    assert any("not the server's" in r for r in s.run().rejected)
+    assert (GENERATION, "verificado_fuera") not in s.conn.inserted
+    assert s.challenge()["id"] == challenge["id"]  # still pending, still the same
+    s.send(f"respuesta_{challenge['id']}.json", s.answer(challenge))
+    assert s.run().verified == [GENERATION]
+
+
+def test_a_verified_generation_whose_last_receipt_fails_is_checked_again_in_each_visit(
+    tmp_path: Path,
+) -> None:
+    """The index lists a disk under ``verificada_en_discos`` only while its last receipt
+    holds, so after a failure the PC proves that generation again in every visit."""
+    s = Setup(tmp_path)
+    s.send(f"recibo_{GENERATION}.json", s.receipt())
+    s.run()
+    challenge = s.challenge()
+    s.send(f"respuesta_{challenge['id']}.json", s.answer(challenge))
+    s.run()
+
+    def listed() -> list[str]:
+        [entry] = json.loads((s.base / "publico" / "generaciones.json").read_text("utf-8"))
+        return list(entry["verificada_en_discos"])
+
+    s.run()
+    assert listed() == [DISK]
+    corrupted = dict(s.files)
+    path = f"market/{DAY}/g{GENERATION}/depth_metrics.parquet"
+    corrupted[path] = b"y" + s.files[path][1:]
+    s.send(f"recibo_{GENERATION}.json", s.receipt(files=corrupted))
+    s.run()
+    s.run()  # the index of the next run
+    assert listed() == []
+    s.send(f"recibo_{GENERATION}.json", s.receipt())  # repaired
+    s.run()
+    s.run()
+    assert listed() == [DISK]
+    assert not list((s.base / "publico").glob("desafio_*.json"))  # nothing new to prove
+
+
 def test_a_receipt_with_other_bytes_or_missing_a_file_is_rejected(tmp_path: Path) -> None:
     s = Setup(tmp_path)
     changed = dict(s.files)
@@ -338,6 +388,35 @@ def test_the_recoverable_point_is_authenticated_by_the_register_and_never_goes_b
     assert s.state()["discos"][DISK]["punto"]["copia"] == h
 
 
+def test_the_rpo_of_the_disk_is_the_age_of_its_point_and_not_of_the_visit(
+    tmp_path: Path,
+) -> None:
+    """E4C3-03: the hot copy of 00:40 copied to the disk at 23:00 gives 22 h 20 min, not
+    zero; a later visit without a newer complete hot copy moves the last visit and the last
+    sync without errors, never the point."""
+    s = Setup(tmp_path)
+    s.now = datetime(2026, 11, 27, 23, 0, tzinfo=UTC)
+    s.send(f"recibo_{GENERATION}.json", s.receipt())  # admits the disk
+    s.run()
+    h = "caliente-20261127T004000Z"
+    dump, manifest = b"hot", manifest_of(h, [])
+    register(s, h, dump, manifest)
+    s.send("recibo_punto.json", point(h, dump, manifest, []))
+    s.run()
+    record = s.state()["discos"][DISK]
+    assert s.now - datetime.fromisoformat(record["punto"]["hora"]) == timedelta(
+        hours=22, minutes=20
+    )
+    assert record["ultima_visita"] == record["ultima_sin_errores"] == s.now.isoformat()
+    s.now += timedelta(days=1)
+    s.send("recibo_punto.json", point(h, dump, manifest, []) | {"sin_errores": False})
+    s.run()
+    later = s.state()["discos"][DISK]
+    assert later["punto"] == record["punto"]
+    assert later["ultima_visita"] == s.now.isoformat()
+    assert later["ultima_sin_errores"] == record["ultima_sin_errores"]  # that visit had errors
+
+
 def test_processed_files_are_published_for_the_pc_and_forgotten_after_30_days(
     tmp_path: Path,
 ) -> None:
@@ -378,3 +457,36 @@ def test_links_directories_and_files_of_another_owner_are_never_read(tmp_path: P
     verifier = s.verifier()
     verifier.owner = os.getuid() + 1  # type: ignore[attr-defined]
     assert any("not a file of kbot_sync" in r for r in verifier.run().rejected)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the lock is the server's, Linux")
+def test_a_run_and_a_retirement_never_write_the_state_at_once(tmp_path: Path) -> None:
+    import threading
+
+    order: list[str] = []
+    inside = threading.Event()
+    release = threading.Event()
+
+    def first() -> None:
+        with externo.exclusive(tmp_path):
+            order.append("run begins")
+            inside.set()
+            release.wait(5)
+            order.append("run ends")
+
+    thread = threading.Thread(target=first)
+    thread.start()
+    assert inside.wait(5)
+
+    def second() -> None:
+        with externo.exclusive(tmp_path):
+            order.append("retirement")
+
+    waiting = threading.Thread(target=second)
+    waiting.start()
+    waiting.join(0.3)
+    assert waiting.is_alive()  # it waits for the run
+    release.set()
+    thread.join(5)
+    waiting.join(5)
+    assert order == ["run begins", "run ends", "retirement"]

@@ -2995,7 +2995,7 @@ El revisor lo reprodujo de forma sintética, no en Oracle. **Verificación del r
 
 **Verificación del revisor:** 87 pruebas locales y las reproducciones de cada hallazgo; sin acciones en Oracle.
 
-**E4c-3: diseño de detalle del disco externo** [27 nov 2026; **APROBADO** por el revisor el 27 nov 2026 en `4227572`, tras tres revisiones, con E4C3-01 a E4C3-08 resueltos e incorporados abajo; **el código, pendiente**]. Aplica el diseño aprobado de este punto 4 («Copia al disco externo» y «Lo que un recibo demuestra y lo que no»; E4-D01, E4-D03 y R-E4-05) y precisa lo que aquel dejaba abierto.
+**E4c-3: diseño de detalle del disco externo** [27 nov 2026; **APROBADO** por el revisor el 27 nov 2026 en `4227572`, tras tres revisiones, con E4C3-01 a E4C3-08 resueltos e incorporados abajo; **el código, en revisión** en la misma rama (abajo, «Implementado en E4c-3»)]. Aplica el diseño aprobado de este punto 4 («Copia al disco externo» y «Lo que un recibo demuestra y lo que no»; E4-D01, E4-D03 y R-E4-05) y precisa lo que aquel dejaba abierto.
 
 - **Lo medido en el servidor** el 27 nov 2026:
   - el archivo Parquet ocupa 225 MB; un día completo con datos, unos 90 MB (el 18 nov, 94 MB, de ellos 60 MB de `depth_metrics`);
@@ -3168,6 +3168,75 @@ El revisor lo reprodujo de forma sintética, no en Oracle. **Verificación del r
 - la clave de `kbot_sync`, con una guía paso a paso (`docs/operacion/disco_externo.md`): solo pasa la pública;
 - conectar el disco al menos una vez por semana y ejecutar el guion (P-E4-2);
 - la instalación en el servidor, con su permiso, como siempre.
+
+**Implementado en E4c-3** [27 nov 2026, rama `fase-2-e4c3`; **pendiente de la revisión del código**; sin instalar]. Aplica el diseño de detalle aprobado en `4227572`.
+
+- **El código:**
+  - **`kbot.archive.externo`:** `Verifier.run` es una ejecución del verificador (puntos 2 y 4), `retire_disk` retira un disco y `main` da las dos órdenes (`run` y `retirar-disco <id>`). El estado privado se escribe con la secuencia de persistencia de E4c-2 (`kbot.upload.durable`).
+  - **`tools/pc/sincronizar.ps1`:** el guion del PC (punto 3).
+  - **El despliegue:**
+    - el bloque `Match User kbot_sync` en `10-kbot.conf`;
+    - las unidades `srv-kbot-sftp-copias.mount`, `…-archivo.mount`, `…-desafios.mount` y `…-recibos.mount`;
+    - `kbot-archive-externo.service` con su temporizador, cada 15 minutos (en los minutos 3, 18, 33 y 48);
+    - `UMask=0027` en `kbot-archive-daily` y `kbot-archive-prepare`;
+    - `deploy/install/06_externo.sh`.
+  - **Para el propietario:** la guía `docs/operacion/disco_externo.md` y las órdenes nuevas en `docs/operacion/comandos.md`.
+- **Precisiones de la implementación:**
+  - **La clave pública de `kbot_sync`** va en el repositorio, en `deploy/etc/kbot/kbot_sync.pub`, como las claves públicas de `age`. `06_externo.sh` se detiene si falta, si tiene más de una línea o si contiene `PRIVATE KEY`, y la instala en `/etc/kbot/kbot_sync_authorized_keys` (de `root`, `0644`).
+  - **El orden de `06_externo.sh`:**
+    1. la clave;
+    2. `kbot_sync` en el grupo `kbot_upload`, y el archivo pasado a `kbot_archive:kbot_sync` con `2750`;
+    3. los directorios del verificador y la imagen de `recibos/`, que se crea una sola vez;
+    4. el chroot y los montajes;
+    5. las comprobaciones como `kbot_sync`, con `setpriv`: lee las tres vistas y escribe en `recibos/`; no escribe en las otras tres ni lee `privado` ni `/srv/kbot/subidas`;
+    6. **solo después, `sshd`:** guarda el drop-in anterior y pasa `sshd -t`; si falla, vuelve a poner el anterior y no recarga nada. Luego comprueba con `sshd -T` lo efectivo para `kbot_sync`, y que el administrador no recibe `ForceCommand internal-sftp` ni un chroot;
+    7. una primera verificación y el temporizador.
+  - **El índice** (`generaciones.json`) lleva también `verificada_en_discos`: los discos en los que cada generación quedó verificada y cuyo último recibo sigue siendo válido. El guion vuelve a probar en cada visita las generaciones que no están verificadas en su disco, y todas en la comprobación mensual. **Tras un recibo con fallo,** el disco sale de esa lista, así que la generación se prueba de nuevo en la visita siguiente, no al mes.
+  - **Lo ya procesado:** el verificador anota cada archivo de `recibos/` con su nombre y su SHA-256. Si el mismo archivo sigue ahí sin cambios, no lo procesa de nuevo; el guion lo borrará en su visita siguiente. La idempotencia de los recibos no depende de esto: se mide contra el último recibo del par.
+  - **El caché de huellas del guion** (`.kbot-huellas.json`, en el disco) guarda el SHA-256 de cada archivo junto con su tamaño y su hora de modificación.
+    - Se calcula de nuevo sobre el disco todo lo que se acaba de descargar y todos los archivos de las generaciones que se prueban en esa visita. Cada archivo se lee como mucho una vez por visita.
+    - **El punto recuperable:** la copia caliente y las copias de día de las que depende se comprueban al descargarlas, y de nuevo, enteras, en la comprobación mensual o con `-Completa`. Entre medias vale el caché, si no han cambiado ni el tamaño ni la hora. Es el mismo criterio que fija el diseño para las generaciones ya verificadas, y por la misma razón: que no haya que leer el disco entero cada semana.
+  - **Las copias del mismo nombre con otra identidad** se guardan como `<nombre>~<8 primeros del SHA-256 del volcado>`. Una dependencia se busca en el nombre exacto y en esas variantes.
+  - **La copia caliente diaria** que se descarga es la primera del día UTC más reciente que tiene el servidor. Las que ya están en el disco se quedan.
+  - **Un disco se admite solo con un recibo de generación válido.** El recibo del punto recuperable de un disco no admitido se rechaza.
+  - **`retirar-disco` y la verificación nunca escriben el estado a la vez:** las dos toman un candado (`flock`) en `/srv/kbot/externo/privado/.lock`, y la segunda espera.
+  - **Con dos discos, los nombres de los recibos coinciden** (`recibo_<generación>.json` y `recibo_punto.json`). Si los dos visitan el servidor dentro de los mismos 15 minutos, el recibo de uno puede sustituir al del otro antes de procesarse. Eso solo lo retrasa a la visita siguiente de ese disco.
+  - **El resumen del guion** da la antigüedad del punto recuperable desde la hora de su copia caliente (punto 6), y avisa si pasa de 7 días.
+  - **Con Windows PowerShell 5.1,** una línea de `sftp` en stderr no se convierte en error: solo cuenta su código de salida. De los listados solo se toman nombres seguros (letras, cifras y `._~-`).
+- **Las pruebas** (punto 7):
+  - **`tests/unit/archive/test_externo.py`:**
+    - el índice, y una generación que pierde `verificada_en_discos` tras un recibo con fallo y la recupera al repararse;
+    - recibo y respuesta en ejecuciones distintas, y las dos barreras de una misma ejecución;
+    - recibos con otros bytes o sin un archivo, y una respuesta con los bytes de otra posición;
+    - E4C3-01 y su residual: A, luego B con un byte cambiado fuera del rango desafiado, y A otra vez. Cada paso usa un verificador nuevo, como tras un reinicio;
+    - E4C3-04: retransmisiones, un tercer disco y la retirada;
+    - E4C3-02, E4C3-03 y E4C3-08 en el punto recuperable:
+      - el manifiesto autenticado por el registro, con la copia ya borrada del servidor;
+      - un manifiesto alterado y otras dependencias, rechazados;
+      - el punto nunca va hacia atrás;
+      - la caliente de las 00:40 a las 23:00 da 22 h 20 min, y una visita sin caliente nueva no mueve el punto;
+    - lo procesado se olvida a los 30 días;
+    - tamaños, tipos, y la elegibilidad nunca insertada;
+    - en Linux: enlaces, directorios y archivos de otro dueño, y el candado.
+  - **`tests/ci/test_deploy.py`:**
+    - `sshd -T` con el bloque solo, y dentro de la configuración entera de Ubuntu 24.04 (la del ejecutor de la CI), para `kbot_sync` y para el administrador;
+    - las unidades de los montajes, del verificador y del archivo;
+    - el orden de `06_externo.sh`;
+    - `shellcheck` del guion de instalación.
+  - **`tests/db/test_externo_e2e.py`, como root en la CI:**
+    - **el montaje:** el `sshd` de prueba en 127.0.0.1:2222 con el drop-in real, el chroot, los tres montajes `bind,ro` y la imagen de 256 MiB, y un día sellado y archivado en PostgreSQL;
+    - **las visitas de `sincronizar.ps1` con `pwsh`:**
+      - sin el disco, o con una carpeta sin `.kbot-disco`, se detiene sin escribir nada;
+      - la primera, con `-Inicializar`, da `replicado_fuera` y el punto recuperable;
+      - la segunda responde los desafíos y da `verificado_fuera`, nunca la elegibilidad;
+    - **E4C3-02 en el guion:** una caliente más nueva que fija S1 (en el cubo) mientras el servidor y el disco tienen S2 no mueve el punto, y el resumen dice qué falta;
+    - **E4C3-03:** en una tercera visita, una caliente que no coincide con su registro, como una descarga a medias, no se guarda. La visita termina con error y no mueve ni el punto ni la última sincronización sin errores;
+    - **E4C3-07:** como `kbot_archive` con el grupo `kbot_upload`, valida un punto leyendo el registro y el manifiesto, y no puede modificar ninguna copia ni leer `/srv/kbot/subidas`. Sin el grupo, no lee el registro;
+    - **lo que `kbot_sync` no puede hacer, por el SFTP real:** escribir en `copias/`, `archivo/` o `desafios/`, pasar de 256 MiB en `recibos/`, crear un enlace simbólico o duro, leer `privado`, salir del chroot, abrir una shell o reenviar un puerto.
+- **Lo que queda para la instalación,** con el permiso del propietario:
+  - la clave pública de `kbot_sync` y `06_externo.sh`;
+  - la primera sincronización real y la siguiente, con los desafíos;
+  - las comprobaciones de aislamiento desde la sesión SFTP real, con su informe en `docs/operacion/`.
 
 **Revisión del diseño (11 nov 2026): APROBABLE CON CORRECCIONES.** El revisor confirmó el orden instantánea → comprobaciones → `pg_dump --snapshot` y lo contrastó en PostgreSQL 18.6 (una inserción concurrente no aparece ni en el volcado ni en el manifiesto si van en la misma instantánea). Hallazgos, todos incorporados arriba: **E4-D01** (ALTO) un recibo podía acreditar una copia externa inexistente → recibo completo, desafío en una sincronización posterior y parte confiable con garantía acotada; **E4-D02** (MEDIO) `pg_restore` reponía el sello antes de cargar el Parquet (`23514`) → restauración por fases; **E4-D03** (MEDIO) el perfil SFTP permitía reenvíos y `AllowUsers` excluía a `kbot_sync` → bloque `Match` completo con `DisableForwarding`; **E4-D04** (MEDIO) `IPAddressDeny` no acreditaba el aislamiento de metadatos → cortafuegos por usuario, comprobación desde cada contexto real y parada de la instalación si no funciona; **E4-D05** (MEDIO) faltaba el descifrado para la restauración mensual → ensayo automático con clave de prueba y restauración integral descifrada en el PC; **E4-D06** (MEDIO) el bloqueo REST no era escribible con `ProtectSystem=strict` → precreado por `tmpfiles.d` y `ReadWritePaths`; **E4-D07** (MEDIO) la cadencia semanal no garantizaba copias de 3-7 días → copia de cada día sellado una sola vez, medición del presupuesto y antigüedad de la última subida como RPO efectivo.
 
@@ -3621,3 +3690,4 @@ $$\Delta Cap=\underbrace{8}_{\text{distancia mark-stop de lo cerrado}}+\underbra
 | 27 nov 2026 | **Segunda revisión del diseño de detalle de E4c-3 (commit `1c8cfee`): APROBABLE CON CORRECCIONES.** E4C3-02 a E4C3-06, RESUELTOS. **E4C3-01, PARCIAL:** deduplicar contra 30 días de SHA-256 bloqueaba la recuperación tras reparar (A → B inválido → A otra vez). **E4C3-07** (MEDIO): el verificador, como `kbot_archive`, no tenía acceso definido al registro ni a los manifiestos de las copias. **E4C3-08** (MEDIO): la retención podía borrar el manifiesto de la caliente antes de validar su recibo. Revisó la zona de cada uno y no ve más. **Verificación del revisor:** los 314 archivos del ZIP y el diff; modelos sintéticos | Revisor |
 | 27 nov 2026 | **Residual de E4C3-01, E4C3-07 y E4C3-08, corregidos** (§13.1, punto 4). La idempotencia se mide contra el último recibo del par, no contra un historial. `kbot-archive-externo` lee las copias con `SupplementaryGroups=kbot_upload` solo en su unidad, sin poder modificarlas ni leer el estado de las subidas. `recibo_punto.json` lleva el manifiesto entero, autenticado contra el SHA-256 del registro, que nunca se borra | Claude |
 | 27 nov 2026 | **Tercera revisión del diseño de detalle de E4c-3 (commit `4227572`): APROBADO.** El residual de E4C3-01, RESUELTO: A → A conserva el desafío, y A → B inválido → A reparado se recupera con un único desafío nuevo, también tras reinicios. E4C3-07, RESUELTO: el grupo suplementario, limitado a `kbot-archive-externo.service`. E4C3-08, RESUELTO: el manifiesto en el recibo, autenticado contra el registro permanente. E4C3-02 a E4C3-06 siguen resueltos. Sin hallazgos nuevos ni residuales. La aprobación cubre el diseño: quedan el código, sus pruebas y la instalación; la elegibilidad y las omisiones por generación siguen bloqueadas hasta E4c-4. **Verificación del revisor:** los 314 archivos del ZIP, el diff y modelos de cierre | Revisor |
+| 27 nov 2026 | **E4c-3 programada** (rama `fase-2-e4c3`, **pendiente de la revisión del código**; §13.1, punto 4, «Implementado en E4c-3»). `kbot.archive.externo`: el índice de generaciones, los recibos y los desafíos atados al último recibo válido de cada par, como mucho 2 discos, el punto recuperable autenticado con el manifiesto del recibo contra el registro, y nunca la elegibilidad. `tools/pc/sincronizar.ps1`, para PowerShell 5.1 y 7. El bloque `Match` de `kbot_sync`, los montajes de solo lectura y la imagen de 256 MiB de `recibos/`, `kbot-archive-externo` cada 15 minutos, el archivo con `UMask=0027` y `06_externo.sh`. La guía `docs/operacion/disco_externo.md`. Las pruebas de extremo a extremo, en la CI con `sshd`, `pwsh` y PostgreSQL reales, cubren cada punto de la lista del punto 7 | Claude |

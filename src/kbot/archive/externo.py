@@ -308,9 +308,11 @@ class Verifier:
             del processed[name]
 
     def _verified_disks(self) -> dict[str, list[str]]:
+        """The disks on which each generation is verified and still holds: after a failed
+        receipt the PC checks that generation again in every visit, not only monthly."""
         found: dict[str, list[str]] = {}
         for key, pair in self.state["pares"].items():
-            if pair.get("verificado"):
+            if pair.get("verificado") and pair.get("valido"):
                 generation, disk = key.split("|")
                 found.setdefault(generation, []).append(disk)
         return found
@@ -479,6 +481,20 @@ class Verifier:
         report.points.append(name)
 
 
+@contextmanager
+def exclusive(directory: Path) -> Iterator[None]:
+    """A run and a retirement never write the state at once: the second one waits (a lock
+    the system releases when the process ends)."""
+    import fcntl  # only on the server, which is Linux
+
+    descriptor = os.open(directory / ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(descriptor)
+
+
 def main(argv: list[str] | None = None) -> int:
     import argparse
     import pwd  # only on the server, which is Linux
@@ -501,10 +517,12 @@ def main(argv: list[str] | None = None) -> int:
     if arguments.command == "retirar-disco":
         if not arguments.disk:
             parser.error("retirar-disco needs the identifier of the disk")
-        verifier.retire_disk(arguments.disk)
+        with exclusive(BASE / "privado"):
+            verifier.retire_disk(arguments.disk)
         log.info("disk_retired", disk=arguments.disk)
         return 0
-    report = verifier.run()
+    with exclusive(BASE / "privado"):
+        report = verifier.run()
     for generation in report.accepted:
         log.info("receipt_accepted", generation=generation)
     for generation in report.verified:

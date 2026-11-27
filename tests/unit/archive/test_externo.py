@@ -32,6 +32,7 @@ class FakeConn:
 
     def __init__(self, files: dict[str, bytes]) -> None:
         self.files = files
+        self.generations: dict[str, tuple[date, dict[str, bytes]]] = {GENERATION: (DAY, files)}
         self.states: dict[str, set[str]] = {GENERATION: {"archivado_local"}}
         self.inserted: list[tuple[str, str]] = []
 
@@ -39,8 +40,9 @@ class FakeConn:
         if query.startswith("SELECT g.generation_id, g.day"):
             return _Rows(
                 [
-                    (GENERATION, DAY, path, len(data), 7, hashlib.sha256(data).hexdigest())
-                    for path, data in sorted(self.files.items())
+                    (generation, day, path, len(data), 7, hashlib.sha256(data).hexdigest())
+                    for generation, (day, files) in sorted(self.generations.items())
+                    for path, data in sorted(files.items())
                 ]
             )
         if query.startswith("SELECT generation_id, state"):
@@ -102,12 +104,27 @@ class Setup:
     def send(self, name: str, document: dict[str, Any]) -> None:
         (self.receipts / name).write_text(json.dumps(document), encoding="utf-8")
 
-    def receipt(self, disk: str = DISK, files: dict[str, bytes] | None = None) -> dict[str, Any]:
-        files = self.files if files is None else files
+    def add_generation(self, generation: str, day: date) -> None:
+        """A second archived generation, with its own files."""
+        files = {f"market/{day}/g{generation}/candles.parquet": bytes(range(255, -1, -1)) * 30}
+        for path, data in files.items():
+            (self.root / path).parent.mkdir(parents=True, exist_ok=True)
+            (self.root / path).write_bytes(data)
+        self.conn.generations[generation] = (day, files)
+
+    def receipt(
+        self,
+        disk: str = DISK,
+        files: dict[str, bytes] | None = None,
+        generation: str = GENERATION,
+    ) -> dict[str, Any]:
+        day = self.conn.generations[generation][0]
+        if files is None:
+            files = self.conn.generations[generation][1]
         return {
             "tipo": "generacion",
-            "generacion": GENERATION,
-            "dia": DAY.isoformat(),
+            "generacion": generation,
+            "dia": day.isoformat(),
             "disco": disk,
             "archivos": [
                 {"ruta": p, "bytes": len(d), "filas": 7, "sha256": hashlib.sha256(d).hexdigest()}
@@ -123,7 +140,8 @@ class Setup:
         self, challenge: dict[str, Any], files: dict[str, bytes] | None = None
     ) -> dict[str, Any]:
         """What the PC answers, reading its own copy of the files."""
-        files = self.files if files is None else files
+        if files is None:
+            files = self.conn.generations[challenge["generacion"]][1]
         hashes = []
         for item in challenge["pruebas"]:
             data = files[item["ruta"]][item["desde"] : item["desde"] + item["bytes"]]
@@ -698,6 +716,43 @@ def test_a_disk_retired_and_admitted_again_keeps_its_counter(tmp_path: Path) -> 
     s.send(POINT, old)
     assert any("not newer" in r for r in s.run().rejected)
     assert s.state()["discos"][DISK]["punto"] is None
+
+
+@pytest.mark.parametrize("second_first", [False, True])
+def test_a_retired_disk_rebuilds_its_pairs_from_byte_identical_receipts(
+    tmp_path: Path, second_first: bool
+) -> None:
+    """E4C3-18: G1 verified on a disk; the disk is retired and admitted again, by the very
+    same bytes of the receipt of G1, or first by the receipt of another generation G2. G1
+    gets back one challenge and is verified again; repeating its receipt changes nothing."""
+    s = Setup(tmp_path)
+    g2 = str(uuid.UUID("2c8e7cde-ccfe-4c3e-8c6e-bc9e0ccecc5e"))
+    s.add_generation(g2, date(2026, 11, 23))
+    g1_name = f"recibo_{GENERATION}.json"
+    s.send(g1_name, s.receipt())
+    s.run()
+    s.send(f"respuesta_{s.challenge()['id']}.json", s.answer(s.challenge()))
+    assert s.run().verified == [GENERATION]
+    g1_bytes = (s.receipts / g1_name).read_bytes()
+    (s.receipts / g1_name).unlink()  # the PC deleted it once acknowledged
+    s.verifier().retire_disk(DISK)
+    assert DISK not in s.state()["discos"] and s.state()["pares"] == {}
+    if second_first:
+        s.send(f"recibo_{g2}.json", s.receipt(generation=g2))
+        assert s.run().accepted == [g2]
+    (s.receipts / g1_name).write_bytes(g1_bytes)  # sent again, byte for byte
+    assert s.run().accepted == [GENERATION]
+    assert set(s.state()["discos"]) == {DISK}
+    mine = [
+        json.loads(p.read_text("utf-8"))
+        for p in (s.base / "publico").glob("desafio_*.json")
+        if json.loads(p.read_text("utf-8"))["generacion"] == GENERATION
+    ]
+    assert len(mine) == 1  # one challenge for G1
+    (s.receipts / g1_name).write_bytes(g1_bytes)  # and again: nothing new
+    assert s.run().accepted == []
+    s.send(f"respuesta_{mine[0]['id']}.json", s.answer(mine[0]))
+    assert s.run().verified == [GENERATION]
 
 
 def test_a_file_still_being_sent_under_a_temporary_name_is_never_read(tmp_path: Path) -> None:

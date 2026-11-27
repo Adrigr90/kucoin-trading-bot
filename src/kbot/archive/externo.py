@@ -359,15 +359,14 @@ class Verifier:
         path = self.receipts / name
         limit = POINT_LIMIT if name.startswith(POINT_PREFIX) else RECEIPT_LIMIT
         processed = self.state["procesados"]
-        previous = processed.get(name, {})
         try:
             with _opened(path, self.owner, limit) as (content, seen):
                 digest = hashlib.sha256(content).hexdigest()
+                # Recorded by its stamp, and dispatched again even when its bytes are the
+                # ones seen before (E4C3-18): what makes a repeated receipt change nothing is
+                # the state of its pair, never this record, so a pair that is gone, such as
+                # those of a retired disk, is rebuilt from the very same bytes.
                 processed[name] = {"sha256": digest, "sello": seen, "fecha": self._today()}
-                if previous.get("sha256") == digest:
-                    if previous.get("por_discos"):
-                        processed[name]["por_discos"] = True
-                    return  # the same bytes written again: processed already
                 document = json.loads(content)
                 if not isinstance(document, dict):
                     raise Rejected("not a JSON object")
@@ -449,6 +448,9 @@ class Verifier:
             self.state.setdefault("retirados", {})[disk] = int(record.get("observacion", 0))
         for key in [k for k in self.state["pares"] if k.endswith(f"|{disk}")]:
             del self.state["pares"][key]
+        # What was refused for lack of room is read again (E4C3-12). What lies untouched in
+        # recibos/ is not: the old receipts of this very disk would admit it back. A receipt
+        # sent again, even byte for byte, is read and rebuilds its pair (E4C3-18).
         self._disks_changed()
         self._save()
         self._announce()  # its challenges are withdrawn only once that is saved

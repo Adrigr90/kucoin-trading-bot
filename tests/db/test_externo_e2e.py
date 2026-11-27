@@ -89,6 +89,8 @@ ListenAddress 127.0.0.1
 HostKey $HOSTKEY
 PidFile $PIDFILE
 UsePAM yes
+# The line of the image of Ubuntu 24.04: ForceCommand needs a subsystem to replace.
+Subsystem sftp /usr/lib/openssh/sftp-server
 Include $DROPIN
 EOF
 /usr/sbin/sshd -t -f "$CONFIG"

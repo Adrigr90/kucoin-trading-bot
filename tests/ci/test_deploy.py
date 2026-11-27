@@ -230,7 +230,10 @@ def test_kbot_sync_gets_only_sftp_in_its_chroot_and_the_administrator_nothing_of
     assert "chrootdirectory none" in admin.splitlines()
     assert "permittty yes" in admin.splitlines()
     assert any(line.startswith("subsystem sftp") for line in admin.splitlines())
-    assert "forcecommand internal-sftp -u 0027 -P symlink,hardlink" in effective(copy, SYNC)
+    whole = effective(copy, SYNC).splitlines()
+    assert "forcecommand internal-sftp -u 0027 -P symlink,hardlink" in whole
+    # sshd refuses a subsystem it does not know before ForceCommand replaces it.
+    assert any(line.startswith("subsystem sftp ") for line in whole)
 
 
 def test_the_external_disk_units_mount_read_only_and_the_verifier_reads_only_copies() -> None:

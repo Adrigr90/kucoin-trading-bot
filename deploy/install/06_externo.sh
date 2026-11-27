@@ -120,6 +120,7 @@ effective="$(sshd -T -C user=kbot_sync,host=localhost,addr=127.0.0.1)"
 grep -qx 'forcecommand internal-sftp -u 0027 -P symlink,hardlink' <<<"$effective"
 grep -qx 'chrootdirectory /srv/kbot/sftp' <<<"$effective"
 grep -qx 'permittty no' <<<"$effective"
+grep -q '^subsystem sftp ' <<<"$effective"  # ForceCommand replaces it; without it, no SFTP
 administrator="$(sshd -T -C user=ubuntu,host=localhost,addr=127.0.0.1)"
 if grep -q '^forcecommand internal-sftp' <<<"$administrator" || grep -q '^chrootdirectory /' <<<"$administrator"; then
   echo "the SFTP block reaches the administrator: stopping" >&2

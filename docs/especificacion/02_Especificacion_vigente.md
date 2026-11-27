@@ -2866,7 +2866,7 @@ Las cuatro dudas [P] del diseño, contrastadas por el revisor: la política del 
 
 **Segunda revisión del diseño de detalle de E4c-2 (26 nov 2026, `79fac56`): APROBABLE CON CORRECCIONES.** E4C2-01 y E4C2-02, RESUELTOS. E4C2-03, PARCIAL: el tope y la reserva son coherentes, pero la secuencia sincronizaba el archivo temporal y lo renombraba sin sincronizar el directorio, y tras una caída podía reaparecer el contador anterior. Corregido arriba con la secuencia completa y su prueba. Sin hallazgos nuevos. El revisor acepta los 2 días de retraso del ciclo de vida como supuesto de la simulación: un retraso mayor puede alargar el RPO, pero el límite sobre lo ocupado de verdad sigue actuando.
 
-**Implementado en E4c-2** [26 nov 2026, rama `fase-2-e4c2`; revisado en `cc79eea`, `24ba53a` y `d3a4c5b`: APROBABLE CON CORRECCIONES, con E4C2-04 a E4C2-10 corregidos abajo; **pendiente de la cuarta revisión del código**; sin instalar]. Aplica el diseño de detalle aprobado en `ae0b217`.
+**Implementado en E4c-2** [26 nov 2026, rama `fase-2-e4c2`; revisado en `cc79eea`, `24ba53a`, `d3a4c5b` y `7b4c374`: APROBABLE CON CORRECCIONES, con E4C2-04 a E4C2-11 corregidos abajo; **pendiente de la quinta revisión del código**; sin instalar]. Aplica el diseño de detalle aprobado en `ae0b217`.
 
 - **El código:**
   - `kbot.upload`:
@@ -2901,6 +2901,7 @@ Las cuatro dudas [P] del diseño, contrastadas por el revisor: la política del 
   - **La versión actual de un objeto** es la más reciente por su hora, porque el listado no la marca, y solo si ninguna otra versión comparte esa hora (E4C2-10). Ni la posición en el listado ni el identificador de versión ordenan dos versiones de la misma hora. Un objeto así nunca es actual, así que ninguna verificación suya se mantiene:
     - si una de las versiones empatadas es una marca de borrado, puede no existir, y se intenta subir;
     - si ninguna lo es, es **ambiguo**: no se sube, se vuelve a leer, y deciden la versión y el SHA-256 que llegan.
+  - **El presupuesto de espacio cuenta solo lo que se subiría** (E4C2-11): los bytes de los objetos de la copia que no están en el cubo, ni actuales ni ambiguos. Volver a leer lo que ya está no añade nada, así que en el límite se puede releer, y una subida que sí añadiría bytes por encima de 19 GB se sigue rechazando.
   - **Una copia de día sale del cubo solo cuando la copia caliente más reciente ya omite ese día sin ella,** por su generación verificada fuera (la alternativa 2 de este punto, que llega con E4c-3). Si saliera antes, las copias calientes siguientes volverían a llevar el día hasta que saliera de PostgreSQL.
 - **Los permisos en el servidor:**
   - `/srv/kbot/backups` pasa a `kbot_backup:kbot_upload`, `2750`, y `globales` a `postgres:kbot_upload`, `2750`. `kbot_backup` ya no lee los globales: los sube `kbot_upload`.
@@ -2948,7 +2949,8 @@ Las cuatro dudas [P] del diseño, contrastadas por el revisor: la política del 
     - el caso de aceptación del residual de R-E4-01, directo y a través del servicio, con el índice perdido y rehecho desde el cubo, y la copia de día que no sale mientras la copia caliente más reciente lleve el día;
     - el punto recuperable, que no se mueve en cinco ciclos sin copias nuevas ni en uno que solo sube globales (E4C2-06);
     - el caso de E4C2-09: la copia de día rehecha con otro cifrado y vuelta a subir lleva el punto recuperable a la caliente anterior; con los objetos originales repuestos, vuelve la que dependía de ellos;
-    - las versiones de la misma hora con una marca de borrado, y dos versiones sin marca empatadas en las dos ordenaciones del listado: ninguna conserva la verificación sin volver a leer (E4C2-10).
+    - las versiones de la misma hora con una marca de borrado, y dos versiones sin marca empatadas en las dos ordenaciones del listado: ninguna conserva la verificación sin volver a leer (E4C2-10);
+    - en el límite de espacio, una copia con sus dos objetos ambiguos se vuelve a leer sin subir nada y recupera el punto recuperable, y una copia nueva se rechaza (E4C2-11).
   - **El tope de peticiones:**
     - con 0, 1, 2 y 3 restantes, un listado de 2 páginas con un reintento, y un reinicio;
     - el orden exacto de la secuencia de persistencia, con un fallo inyectado en cada paso;
@@ -2961,6 +2963,11 @@ Las cuatro dudas [P] del diseño, contrastadas por el revisor: la política del 
   - **Con PostgreSQL:** la copia caliente deja fuera los datos de un día por partición y conserva sus tablas, y la previa lo lleva todo.
   - **Como root:** los permisos reales de las copias y del estado, con los usuarios reales.
   - **El resto:** el guardián con `nft -c` y el usuario creado, las unidades con `systemd-analyze`, los guiones con `shellcheck`, y la simulación.
+
+**Cuarta revisión del código de E4c-2 (27 nov 2026, `7b4c374`): APROBABLE CON CORRECCIONES.** E4C2-10, RESUELTO: las dos ordenaciones deshacen la verificación anterior, y la relectura decide sin sobrescribir los objetos ambiguos. Hallazgo nuevo, corregido arriba:
+- **E4C2-11 (MEDIO):** antes de volver a leer una copia con objetos ambiguos, el ciclo exigía sitio para la copia entera, aunque no iba a subir nada. En el límite se registraba «no cabe», no se hacía ninguna lectura y el RPO retrocedía → el presupuesto cuenta solo los bytes que se subirían.
+
+**Verificación del revisor:** el ZIP con los 314 archivos y 59 pruebas de subida.
 
 **Tercera revisión del código de E4c-2 (26 nov 2026, `d3a4c5b`): APROBABLE CON CORRECCIONES.** E4C2-09, RESUELTO en su caso de aceptación (el punto recuperable sigue H06:40 → H00:40 → H06:40). Hallazgo nuevo, corregido arriba:
 - **E4C2-10 (MEDIO):** con dos versiones de la misma hora y ninguna marca de borrado, se tomaba la primera del listado. Una verificación antigua podía mantenerse sin volver a leer, y con ella el punto recuperable y la omisión → ese empate también es ambiguo y se vuelve a leer.
@@ -3427,3 +3434,5 @@ $$\Delta Cap=\underbrace{8}_{\text{distancia mark-stop de lo cerrado}}+\underbra
 | 26 nov 2026 | **E4C2-09, corregido** (§13.1, punto 4, «Implementado en E4c-2»). El índice de dependencias guarda la identidad exacta de cada copia de día (objeto y SHA-256 del volcado y del manifiesto), y una caliente cuenta como punto recuperable solo si la copia verificada en el cubo tiene esa identidad. Cada verificación guarda la versión leída (`version-id` de `GetObject`), y si otra versión ocupa su lugar se deshace. La prueba reproduce el caso del revisor y la vuelta de los objetos originales | Claude |
 | 26 nov 2026 | **Tercera revisión del código de E4c-2 (commit `d3a4c5b`): APROBABLE CON CORRECCIONES.** E4C2-09, RESUELTO: identidades completas, el índice rehecho y el punto recuperable H06:40 → H00:40 → H06:40. **E4C2-10** (MEDIO): con dos versiones de la misma hora y sin marca de borrado se tomaba la primera del listado, y una verificación antigua podía mantenerse sin ninguna lectura. Reproducción sintética, no observada en Oracle. **Verificación del revisor:** el ZIP con los 314 archivos y 100 pruebas locales | Revisor |
 | 26 nov 2026 | **E4C2-10, corregido** (§13.1, punto 4). Un objeto cuya hora más reciente comparten varias versiones nunca es actual: con una marca de borrado se intenta subir; sin ella es ambiguo, no se sube y se vuelve a leer, y deciden la versión y el SHA-256 leídos. Probado en las dos ordenaciones del listado | Claude |
+| 27 nov 2026 | **Cuarta revisión del código de E4c-2 (commit `7b4c374`): APROBABLE CON CORRECCIONES.** E4C2-10, RESUELTO. **E4C2-11** (MEDIO): la comprobación de espacio pedía sitio para una copia entera antes de volver a leer una cuyos objetos ya estaban en el cubo, ambiguos. En el límite: «no cabe», ninguna lectura y el RPO en H00:40, cuando releer no añade bytes. Reproducción con almacenamiento simulado y límite reducido. **Verificación del revisor:** el ZIP con los 314 archivos y 59 pruebas de subida | Revisor |
+| 27 nov 2026 | **E4C2-11, corregido** (§13.1, punto 4). El presupuesto de espacio cuenta los bytes de los objetos que de verdad se subirían, los que no están en el cubo ni actuales ni ambiguos: releer lo que ya está no añade nada. La prueba lo hace en el límite, y rechaza a la vez una copia nueva que sí añadiría bytes | Claude |

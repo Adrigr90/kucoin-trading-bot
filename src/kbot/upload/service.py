@@ -148,6 +148,19 @@ class Bucket:
     def has(self, copy: str) -> bool:
         return all(name in self.current for name in objects_of(copy))
 
+    def bytes_to_send(self, copy: LocalCopy) -> int:
+        """The bytes an upload of the copy would add: those of its objects that are
+        neither current nor ambiguous, the only ones it would send (E4C2-11)."""
+        dump, manifest = objects_of(copy.name)
+        return sum(
+            path.stat().st_size
+            for name, path in (
+                (dump, copy.path / local.DUMP),
+                (manifest, copy.path / local.MANIFEST),
+            )
+            if name not in self.current and name not in self.ambiguous
+        )
+
     def holds(self, copy: str, entry: dict[str, Any]) -> bool:
         """Whether the two objects of a copy are still the very versions that were read
         and verified (E4C2-09)."""
@@ -286,7 +299,10 @@ class Uploader:
                 "more than 40000 requests in 32 days: only the sealed-day copies are uploaded"
             )
         for copy in wanted:
-            if bucket.used + copy.size > BUDGET_BYTES and not bucket.has(copy.name):
+            # Only the bytes that would really go up count (E4C2-11): reading again what is
+            # already there, current or ambiguous, adds nothing to the bucket.
+            extra = bucket.bytes_to_send(copy)
+            if extra and bucket.used + extra > BUDGET_BYTES:
                 report.errors.append(f"{copy.name}: it does not fit in the 19 GB of the budget")
                 continue
             if not self.budget.covers(4):

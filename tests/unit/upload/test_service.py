@@ -493,3 +493,42 @@ def test_tied_versions_without_a_marker_are_ambiguous_in_either_order() -> None:
         bucket = service.Bucket.of(versions)
         assert "s" not in bucket.current and bucket.ambiguous == {"s"}
         assert not bucket.holds("dia-x", {"version_objeto": "v1", "version_manifiesto": "v1"})
+
+
+def test_at_the_limit_an_ambiguous_copy_is_read_again_and_a_new_one_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """E4C2-11: with the bucket at the limit, a copy whose two objects are already there,
+    ambiguous, is read again without sending a byte, and its SHA-256 decide; a copy that
+    would add bytes is still refused."""
+    s = Setup(tmp_path)
+    publish(s.backups, "dia-2026-11-27", b"day")
+    h0 = hot_name(START.replace(minute=40))
+    publish(s.backups, h0, b"h0")
+    s.clock.now = START
+    assert s.run(hot_every_hours=6).errors == []
+    h6 = hot_name(START.replace(hour=6, minute=40))
+    publish(s.backups, h6, b"h6", dias_excluidos=[relying_on(s, "dia-2026-11-27")])
+    s.clock.now = START.replace(hour=6)
+    assert s.run(hot_every_hours=6).errors == []
+    for name in service.objects_of("dia-2026-11-27"):  # the same bytes, at the same time
+        original = s.storage.objects[name][-1]
+        s.storage.tamper(name, original.data or b"")
+        s.storage.objects[name][-1].modified = original.modified
+    publish(s.backups, "dia-2026-11-28", b"new day")  # this one would add bytes
+    occupied = (
+        s.state()["ocupado"]
+        + len(b"day")
+        + 2 * len(s.storage.bytes_of(service.objects_of("dia-2026-11-27")[1]))
+    )
+    monkeypatch.setattr(service, "BUDGET_BYTES", occupied)
+    puts = len(s.storage.sent("PutObject"))
+    s.clock.now = START.replace(hour=7)
+    report = s.run(hot_every_hours=6)
+    assert report.errors == ["dia-2026-11-28: it does not fit in the 19 GB of the budget"]
+    assert len(s.storage.sent("PutObject")) == puts  # nothing sent
+    reads = [n for n in s.storage.sent("GetObject")[-2:]]
+    assert reads == list(service.objects_of("dia-2026-11-27"))  # both read again
+    assert "dia-2026-11-27" in s.state()["verificadas"]  # type: ignore[operator]
+    assert s.state()["ultima_caliente_fuera"] == h6
+    assert s.state()["ocupado"] <= occupied

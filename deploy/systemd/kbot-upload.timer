@@ -1,0 +1,12 @@
+# kbot: the upload to Object Storage (stage E4c-2), at minute 55 of every hour, after the
+# hot copy of minute 40.
+[Unit]
+Description=kbot: hourly upload of the copies to Object Storage
+
+[Timer]
+OnCalendar=*-*-* *:55:00
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

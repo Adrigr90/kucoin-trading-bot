@@ -3,12 +3,18 @@
 # the instance metadata, which hands out the instance principal tokens. Oracle grants their
 # privileges to the whole instance, so the server itself keeps every other user away from
 # it. This is a kernel rule by user, independent of cgroups and eBPF, and it covers SFTP
-# sessions and processes outside systemd. Stage E4c adds kbot_backup to the allowed users.
+# sessions and processes outside systemd.
 #
 # The users go by number, the same on every Ubuntu: 0 is root, and 584788 is snap_daemon,
 # the fixed id snapd gives to the user its snaps run as. The Oracle Cloud Agent is a snap
 # and runs as snap_daemon: on the instance (17 Nov 2026) its updater was connected to
 # 169.254.169.254:80, so without it the agent and its monitoring would stop.
+#
+# From stage E4c-2 kbot_upload, the user of the uploads to Object Storage, may reach it too:
+# it has no access to the database and sees only encrypted copies, while kbot_backup, which
+# reads the whole database, stays rejected (02 §13.1, point 4, E4c-2, point 1). It goes by
+# name, resolved when the rule is loaded: the user must exist before (01_sistema.sh and
+# 05_copias.sh create it).
 #
 # Only the HTTP ports: the same address serves DNS (port 53, used by systemd-resolved)
 # and NTP (port 123, used by chrony) on Oracle Cloud, and those must keep working.
@@ -17,7 +23,7 @@ delete table inet kbot_guard
 table inet kbot_guard {
 	chain output {
 		type filter hook output priority filter - 10; policy accept;
-		ip daddr 169.254.169.254 tcp dport { 80, 443 } meta skuid != { 0, 584788 } counter reject
-		ip6 daddr fd00:c1::a9fe:a9fe tcp dport { 80, 443 } meta skuid != { 0, 584788 } counter reject
+		ip daddr 169.254.169.254 tcp dport { 80, 443 } meta skuid != { 0, 584788, kbot_upload } counter reject
+		ip6 daddr fd00:c1::a9fe:a9fe tcp dport { 80, 443 } meta skuid != { 0, 584788, kbot_upload } counter reject
 	}
 }

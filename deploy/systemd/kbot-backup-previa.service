@@ -1,0 +1,48 @@
+# kbot: the copy taken before an update, as kbot_backup (02 §13.1, point 4; stage E4c-2):
+# self-contained, it leaves out no sealed day, so it depends on no other copy. 02_codigo.sh
+# starts it, with the global objects, before it changes the code; kbot-upload takes it to
+# Object Storage, where the last two stay (D25). The same isolation as the hourly copy: no
+# network at all, only the socket of PostgreSQL. No timer.
+# @resources is not denied: age is a Go program and raises its open file limit at start.
+[Unit]
+Description=kbot: the self-contained copy of the database taken before an update
+Documentation=file:///opt/kbot/docs/especificacion/02_Especificacion_vigente.md
+After=postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=oneshot
+User=kbot_backup
+Group=kbot_backup
+WorkingDirectory=/opt/kbot
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/kbot/.venv/bin/python -m kbot.backup run --previa
+TimeoutStartSec=50min
+Nice=10
+IOSchedulingClass=idle
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0027
+ReadWritePaths=/srv/kbot/backups
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any

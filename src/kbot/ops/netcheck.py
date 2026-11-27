@@ -8,8 +8,9 @@ E4a-04: each case runs where nothing else could produce its result):
   unreachable (B19, point 35);
 - ``guard`` inside ``kbot-guardcheck@<user>``, which sets no address filter at all: the
   instance metadata is rejected by the kernel rule of ``/etc/kbot/metadata-guard.nft``
-  for every user but the exempted ones (``root`` and ``snap_daemon``, the user of the
-  Oracle Cloud Agent, now; ``kbot_backup`` from E4c), for which it is reachable.
+  for every user but the exempted ones (``root``, ``snap_daemon``, the user of the Oracle
+  Cloud Agent, and ``kbot_upload``, the user of the uploads, from E4c-2), for which it is
+  reachable.
 
 A user without a SQL role (``kbot_restore``, ``kbot_sync``) must be refused by peer.
 Exit 0 when every expectation of the case holds, 1 otherwise, one line per expectation.

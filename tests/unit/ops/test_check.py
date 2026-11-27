@@ -78,7 +78,7 @@ def nft_json(
     accept_first: bool = False,
 ) -> str:
     """What ``nft -j list table inet kbot_guard`` prints for the guard, with variations."""
-    users = ["root", "snap_daemon"] if users is None else users
+    users = ["root", "snap_daemon", "kbot_upload"] if users is None else users
     chain = {"family": "inet", "table": "kbot_guard", "name": "output", "handle": 1}
     if hooked:
         chain |= {"type": "filter", "hook": "output", "prio": -10, "policy": "accept"}
@@ -263,8 +263,8 @@ def test_metadata_guard_is_checked_structurally() -> None:
     and exempt exactly the allowed users; the kernel's JSON is what is parsed."""
     assert check.metadata_guard(NFT_OK).ok
     # By number when nft cannot name them: 0 is root, 584788 snap_daemon (snapd's fixed id).
-    assert check.metadata_guard(nft_json(users=[0, 584788])).ok
-    assert check.metadata_guard(nft_json(users=["root", "584788"])).ok
+    assert check.metadata_guard(nft_json(users=[0, 584788, "kbot_upload"])).ok
+    assert check.metadata_guard(nft_json(users=["root", "584788", "kbot_upload"])).ok
     # Root alone would cut off the Oracle Cloud Agent, which runs as snap_daemon (17 Nov).
     root_only = check.metadata_guard(nft_json(users=["root"]))
     assert not root_only.ok and "users exempted: ['root']" in root_only.detail
@@ -275,7 +275,9 @@ def test_metadata_guard_is_checked_structurally() -> None:
     assert "reachable" in check.metadata_guard(nft_json(rule_chain="unused")).detail
     # A rule behind an unconditional accept is never reached either.
     assert "reachable" in check.metadata_guard(nft_json(accept_first=True)).detail
-    extra = check.metadata_guard(nft_json(users=["root", "snap_daemon", "kbot_ingest"]))
+    extra = check.metadata_guard(
+        nft_json(users=["root", "snap_daemon", "kbot_upload", "kbot_ingest"])
+    )
     assert not extra.ok and "kbot_ingest" in extra.detail
     # Third round: an element the parser does not interpret (a range of user ids) must
     # fail the check, never be dropped to leave only root.
@@ -283,9 +285,31 @@ def test_metadata_guard_is_checked_structurally() -> None:
     assert not ranged.ok and "not understood" in ranged.detail
     prefix = check.metadata_guard(nft_json(users=[{"prefix": {"addr": "0", "len": 8}}]))
     assert not prefix.ok
-    e4c = nft_json(users=["root", "snap_daemon", "kbot_backup"])
-    assert not check.metadata_guard(e4c).ok
-    assert check.metadata_guard(e4c, check.METADATA_ALLOWED | {"kbot_backup"}).ok
+    # E4c-2: kbot_upload, which has no access to the database, is exempted; kbot_backup,
+    # which reads all of it, never is, and the guard of before E4c-2 no longer passes.
+    backup = check.metadata_guard(nft_json(users=["root", "snap_daemon", "kbot_backup"]))
+    assert not backup.ok and "kbot_backup" in backup.detail
+    assert not check.metadata_guard(nft_json(users=[0, 584788])).ok
+    assert {"root", "snap_daemon", "kbot_upload"} == check.METADATA_ALLOWED
+
+
+def test_the_guard_check_names_the_users_by_their_real_ids() -> None:
+    """E4C2-07: nft -j prints numbers, and kbot_upload has no fixed id. Its id from
+    /etc/passwd passes; an extra id or another one in its place fails."""
+    users_file = (
+        "root:x:0:0::/root:/bin/bash\nkbot_upload:x:1234:1234::/nonexistent:/usr/sbin/nologin\n"
+    )
+    names = check.uid_names(
+        users_file + "kbot_backup:x:1235:1235::/nonexistent:/usr/sbin/nologin\n"
+    )
+    assert names[1234] == "kbot_upload"
+    assert check.metadata_guard(nft_json(users=[0, 584788, 1234]), names=names).ok
+    assert not check.metadata_guard(nft_json(users=[0, 584788, 1234])).ok  # unknown id
+    extra = check.metadata_guard(nft_json(users=[0, 584788, 1234, 1235]), names=names)
+    assert not extra.ok and "kbot_backup" in extra.detail
+    swapped = check.metadata_guard(nft_json(users=[0, 584788, 1235]), names=names)
+    assert not swapped.ok
+    assert not check.metadata_guard(nft_json(users=[0, 584788, 4321]), names=names).ok
 
 
 def test_run_all_uses_the_commands_and_files_of_the_server() -> None:
@@ -338,7 +362,8 @@ def test_a_failed_command_or_unreadable_file_fails_its_check() -> None:
     verdicts = {v.name: v for v in check.run_all(run, read, pg_conf_dir="/nonexistent")}
     assert not verdicts["listening ports"].ok and "exit 1" in verdicts["listening ports"].detail
     assert not verdicts["service users"].ok and "cannot read" in verdicts["service users"].detail
-    assert verdicts["metadata guard"].ok
+    # E4C2-07: without /etc/passwd the ids of the guard cannot be named, so it fails too.
+    assert not verdicts["metadata guard"].ok and "cannot read" in verdicts["metadata guard"].detail
 
 
 @pytest.mark.parametrize(
@@ -347,7 +372,8 @@ def test_a_failed_command_or_unreadable_file_fails_its_check() -> None:
         ("b19", "kbot_ingest", {"postgresql socket accepts", "kucoin unreachable"}),
         ("b19", "kbot_sync", {"postgresql socket refuses", "kucoin unreachable"}),
         ("guard", "kbot_ingest", {"metadata rejected"}),
-        ("guard", "kbot_backup", {"metadata rejected"}),  # exempted only from E4c
+        ("guard", "kbot_backup", {"metadata rejected"}),  # it reads the whole database
+        ("guard", "kbot_upload", {"metadata reachable"}),  # the uploads, from E4c-2
         ("guard", "root", {"metadata reachable"}),
         ("guard", "snap_daemon", {"metadata reachable"}),  # the Oracle Cloud Agent
     ],

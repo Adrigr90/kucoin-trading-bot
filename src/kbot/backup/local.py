@@ -32,9 +32,18 @@ its fingerprint is the one its sealed-day copy took once; the hot copy counts it
 its own snapshot and stops if the counts differ. Every other fingerprint is taken in the
 snapshot of the dump.
 
-In E4c-1 nothing leaves the server. No sealed day has a verified external alternative
-(R-E4-01), so the hot copy carries every day, and no copy of a sealed day is deleted
-until its day is ``elegible_para_exclusion_backup``.
+In E4c-1 nothing left the server. From E4c-2, kbot-upload (another user, with network
+and no access to the database) uploads the published copies to Object Storage, reads them
+again and writes its state in /srv/kbot/subidas/estado.json. The hot copy leaves out the
+data of a sealed day only when that state says the copy of the day is verified in the
+bucket and was in the last listing, and that listing finished well, is less than an hour
+old and authorised no earlier hot copy (R-E4-01; 02 §13.1, point 4, E4c-2, point 4;
+E4C2-02). The manifest fixes the identity of each such copy, and without a usable state
+nothing is left out: the copy grows, but is never incomplete. No copy of a sealed day is
+deleted here until its day is ``elegible_para_exclusion_backup``.
+
+``python -m kbot.backup run --previa`` makes the copy taken before an update: like the hot
+copy, but self-contained, so it never leaves anything out (``previa-...``).
 """
 
 from __future__ import annotations
@@ -45,7 +54,7 @@ import os
 import platform
 import shutil
 import subprocess
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -59,11 +68,16 @@ import kbot
 from kbot.archive import archiver, parquet
 from kbot.archive.canonical import Fingerprint, json_text
 from kbot.db.roles import DATABASE, SOCKET_DIR
+from kbot.upload import durable
+from kbot.upload import state as upload_state
 
 DSN = f"host={SOCKET_DIR} dbname={DATABASE} user=kbot_backup"
 BACKUP_DIR = Path("/srv/kbot/backups")
 GLOBALS_DIR = BACKUP_DIR / "globales"
 RECIPIENTS = Path("/etc/kbot/age-recipients.txt")
+UPLOAD_STATE = upload_state.UPLOAD_DIR / upload_state.STATE
+# The last listing of the uploads a hot copy relied on (E4C2-04), written by kbot_backup.
+CONSUMED_LISTING = "listado_consumido.json"
 REGISTER = "registro.jsonl"
 DUMP = "volcado.age"
 MANIFEST = "manifiesto.json"
@@ -71,9 +85,11 @@ FORMAT = "kbot-copia-1"
 HOT_PREFIX = "caliente-"
 DAY_PREFIX = "dia-"
 GLOBALS_PREFIX = "globales-"
-COPY_PREFIXES = (HOT_PREFIX, DAY_PREFIX, GLOBALS_PREFIX)
+PREVIA_PREFIX = "previa-"
+COPY_PREFIXES = (HOT_PREFIX, DAY_PREFIX, GLOBALS_PREFIX, PREVIA_PREFIX)
 HOT_KEEP = 3  # the last three hourly copies, plus the last daily one (02 §13.1, point 4)
 GLOBALS_KEEP = 2
+PREVIA_KEEP = 2
 BATCH = 20_000
 # The schemas the copies describe: every schema of the database except the system ones.
 _USER_SCHEMAS = sql.SQL(
@@ -296,11 +312,17 @@ def _sealed_fingerprints(directory: Path) -> dict[str, tuple[int, str, str]]:
 
 
 def table_fingerprints(
-    conn: psycopg.Connection, sealed: set[date], from_copies: dict[str, tuple[int, str, str]]
+    conn: psycopg.Connection,
+    sealed: set[date],
+    from_copies: dict[str, tuple[int, str, str]],
+    excluded: set[date] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Mode, rows and fingerprint of every table and every partition (02 §10.1, E4c1-02),
     in the open snapshot. A sealed partition with a registered copy reuses that copy's
-    fingerprint, after counting it here: a different count stops the copy."""
+    fingerprint, after counting it here: a different count stops the copy. The partitions
+    of an excluded day (E4c-2) are ``excluido``: their data stay out of the dump, and
+    their rows and fingerprint are those of the copy of the day, which must exist."""
+    excluded = excluded or set()
     relations = conn.execute(
         _over_user_schemas(
             "SELECT n.nspname, c.relname, p.relname"
@@ -321,6 +343,8 @@ def table_fingerprints(
                 day = datetime.strptime(name[len(parent) + 2 :], "%Y%m%d").date()
             except ValueError:
                 day = None  # not a daily partition: fingerprinted as any other table
+        if day is not None and day in excluded and qualified not in from_copies:
+            raise BackupError(f"{qualified} cannot be left out: no copy of its day")
         if day is not None and day in sealed and qualified in from_copies:
             rows = _count(conn, schema, name)
             copied_rows, fingerprint, origin = from_copies[qualified]
@@ -329,7 +353,7 @@ def table_fingerprints(
                     f"{qualified} is sealed but has {rows} rows, its copy {copied_rows}"
                 )
             tables[qualified] = {
-                "modo": "incluido",
+                "modo": "excluido" if day in excluded else "incluido",
                 "filas": rows,
                 "huella": fingerprint,
                 "origen": origin,
@@ -508,17 +532,120 @@ def _encrypt_and_drop(plain: Path, temporary: Path, recipients_file: Path) -> di
     return info
 
 
-def hot_copy(
+def archive_knowledge(conn: psycopg.Connection) -> dict[str, list[str]]:
+    """What kbot-upload, which has no access to the database, needs to decide whether a
+    sealed-day copy may leave the bucket (residual of R-E4-01): the days that are
+    ``elegible_para_exclusion_backup`` and the generations ``verificado_fuera``, read in the
+    snapshot of the copy."""
+    eligible = conn.execute(
+        "SELECT DISTINCT g.day FROM market.archive_generations g"
+        " JOIN market.archive_generation_states s ON s.generation_id = g.generation_id"
+        " WHERE s.state = 'elegible_para_exclusion_backup' ORDER BY 1"
+    ).fetchall()
+    verified = conn.execute(
+        "SELECT DISTINCT generation_id FROM market.archive_generation_states"
+        " WHERE state = 'verificado_fuera' ORDER BY 1"
+    ).fetchall()
+    return {
+        "dias_elegibles": [row[0].isoformat() for row in eligible],
+        "generaciones_verificadas_fuera": [str(row[0]) for row in verified],
+    }
+
+
+def _newest_generations(conn: psycopg.Connection, days: Sequence[date]) -> dict[date, str]:
+    """The newest archive generation of each day, which the manifest fixes with its omitted
+    days (02 §13.1, point 4: a restore never looks for "the latest")."""
+    if not days:
+        return {}
+    rows = conn.execute(
+        "SELECT DISTINCT ON (day) day, generation_id FROM market.archive_generations"
+        " WHERE day = ANY(%s) ORDER BY day, recorded_at DESC, generation_id",
+        (list(days),),
+    ).fetchall()
+    return {row[0]: str(row[1]) for row in rows}
+
+
+def omissions(
+    directory: Path, state: dict[str, Any] | None, now: datetime
+) -> tuple[str | None, dict[date, dict[str, Any]]]:
+    """The listing a hot copy relies on, and the sealed days it leaves out with the identity
+    of the copy of each in the bucket (R-E4-01; 02 §13.1, point 4, E4c-2, point 4).
+
+    A day is left out only when its copy is published here and the state of the uploads
+    says that copy is verified in the bucket, with the same partitions, and was seen by a
+    listing that is the last attempt, finished well and is less than an hour old (E4C2-02).
+    Each listing authorises one hot copy only (E4C2-04): ``claim_omissions`` records it
+    durably as consumed before the copy is made, and a consumed listing authorises
+    nothing more, whatever the copies in between did. Anything missing or unreadable
+    leaves nothing out."""
+    listing = upload_state.usable_listing(state, now)
+    if state is None or listing is None:
+        return None, {}
+    readable, consumed = consumed_listing(directory)
+    if not readable or consumed == listing["id"]:
+        return None, {}
+    omitted: dict[date, dict[str, Any]] = {}
+    for copy in published(directory, DAY_PREFIX):
+        entry = upload_state.verified_in(state, listing["id"], copy.path.name)
+        if entry is None:
+            continue
+        try:
+            same = entry["particiones"] == upload_state.partitions_digest(
+                copy.manifest["particiones"]
+            )
+            dependency = {
+                "copia": copy.path.name,
+                **{k: str(entry[k]) for k in upload_state.IDENTITY},
+            }
+            day = date.fromisoformat(copy.manifest["dia"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if same:
+            omitted[day] = dependency
+    return str(listing["id"]), omitted
+
+
+def consumed_listing(directory: Path) -> tuple[bool, str | None]:
+    """The last listing a hot copy relied on: (True, None) when none ever did, and
+    (False, None) when the record cannot be read, which authorises nothing."""
+    path = directory / CONSUMED_LISTING
+    if not path.exists():
+        return True, None
+    try:
+        value = durable.read_json(path)
+        return True, str(value["listado"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return False, None
+
+
+def claim_omissions(
+    directory: Path, state: dict[str, Any] | None, now: datetime
+) -> tuple[str | None, dict[date, dict[str, Any]]]:
+    """``omissions``, with the listing recorded durably as consumed before the copy is
+    made (E4C2-04): a copy that then fails has used it anyway, a restart or the local
+    retention cannot bring it back, and the next copy relies on no older listing."""
+    listing, omitted = omissions(directory, state, now)
+    if listing is not None:
+        durable.write_json(directory / CONSUMED_LISTING, {"listado": listing})
+    return listing, omitted
+
+
+def _database_copy(
     directory: Path,
     recipients_file: Path,
+    prefix: str,
+    kind: str,
     *,
     now: datetime,
-    dsn: str = DSN,
-    before_dump: Callable[[], None] = lambda: None,
+    dsn: str,
+    before_dump: Callable[[], None],
+    omit: Mapping[date, dict[str, Any]],
+    listing: str | None,
 ) -> Copy:
-    """The hourly copy of the whole database, from one snapshot (02 §13.1, point 4)."""
+    """A copy of the whole database from one snapshot, leaving out the data of the days of
+    ``omit``, whose copies the manifest fixes as its dependencies."""
     keys = recipients(recipients_file)
-    name = f"{HOT_PREFIX}{now.astimezone(UTC):%Y%m%dT%H%M%SZ}"
+    name = f"{prefix}{now.astimezone(UTC):%Y%m%dT%H%M%SZ}"
     from_copies = _sealed_fingerprints(directory)
     with _attempt(directory, name) as (temporary, final):
         plain = temporary / "volcado.dump"
@@ -527,7 +654,12 @@ def hot_copy(
             sealed_days = [
                 row[0] for row in conn.execute("SELECT day FROM market.archive_seals ORDER BY day")
             ]
-            tables = table_fingerprints(conn, set(sealed_days), from_copies)
+            unsealed = sorted(set(omit) - set(sealed_days))
+            if unsealed:
+                raise BackupError(f"days not sealed cannot be left out: {unsealed}")
+            tables = table_fingerprints(conn, set(sealed_days), from_copies, set(omit))
+            generations = _newest_generations(conn, sorted(omit))
+            knowledge = archive_knowledge(conn)
             catalog = catalog_fingerprint(conn)
             fixed = versions(conn)
             before_dump()
@@ -537,19 +669,33 @@ def hot_copy(
                     "--format=custom",
                     "--compress=zstd:3",
                     f"--snapshot={snapshot}",
+                    # By partition, never with --exclude-table-data-and-children (02 §13.1).
+                    *(
+                        f"--exclude-table-data={qualified}"
+                        for qualified, table in sorted(tables.items())
+                        if table["modo"] == "excluido"
+                    ),
                     f"--file={plain}",
                     f"--dbname={dsn}",
                 ]
             )
         manifest = {
             "formato": FORMAT,
-            "clase": "caliente",
+            "clase": kind,
             "nombre": name,
             "creada": now.astimezone(UTC).isoformat(),
             "instantanea": snapshot_at.astimezone(UTC).isoformat(),
             "dias_sellados": [day.isoformat() for day in sealed_days],
-            # E4c-1: no sealed day has a verified external alternative yet (R-E4-01).
-            "dias_excluidos": [],
+            "dias_excluidos": [
+                {
+                    "dia": day.isoformat(),
+                    "copia_de_dia": omit[day],
+                    "generacion": generations.get(day),
+                }
+                for day in sorted(omit)
+            ],
+            "listado": listing,
+            "archivo": knowledge,
             "tablas": tables,
             "catalogo": catalog,
             "versiones": fixed,
@@ -557,6 +703,53 @@ def hot_copy(
             "volcado": _encrypt_and_drop(plain, temporary, recipients_file),
         }
         return _finish(directory, temporary, final, manifest)
+
+
+def hot_copy(
+    directory: Path,
+    recipients_file: Path,
+    *,
+    now: datetime,
+    dsn: str = DSN,
+    before_dump: Callable[[], None] = lambda: None,
+    omit: Mapping[date, dict[str, Any]] | None = None,
+    listing: str | None = None,
+) -> Copy:
+    """The hourly copy of the whole database, from one snapshot (02 §13.1, point 4),
+    without the data of the sealed days of ``omit`` (``omissions``)."""
+    return _database_copy(
+        directory,
+        recipients_file,
+        HOT_PREFIX,
+        "caliente",
+        now=now,
+        dsn=dsn,
+        before_dump=before_dump,
+        omit=omit or {},
+        listing=listing,
+    )
+
+
+def previa_copy(
+    directory: Path,
+    recipients_file: Path,
+    *,
+    now: datetime,
+    dsn: str = DSN,
+) -> Copy:
+    """The copy taken before an update: self-contained, it never leaves out anything, so it
+    has no dependency on any sealed-day copy (02 §13.1, point 4; E4c-2, point 4)."""
+    return _database_copy(
+        directory,
+        recipients_file,
+        PREVIA_PREFIX,
+        "previa",
+        now=now,
+        dsn=dsn,
+        before_dump=lambda: None,
+        omit={},
+        listing=None,
+    )
 
 
 def sealed_day_copy(
@@ -703,6 +896,14 @@ def globals_retention(directory: Path) -> list[Path]:
     for path in copies[:-GLOBALS_KEEP]:
         shutil.rmtree(path)
     return copies[:-GLOBALS_KEEP]
+
+
+def previa_retention(directory: Path) -> list[Path]:
+    """The last two copies taken before an update stay, as in the bucket (D25)."""
+    copies = _named(directory, PREVIA_PREFIX)
+    for path in copies[:-PREVIA_KEEP]:
+        shutil.rmtree(path)
+    return copies[:-PREVIA_KEEP]
 
 
 def pending_sealed_days(directory: Path, eligible: set[date], dsn: str = DSN) -> list[date]:

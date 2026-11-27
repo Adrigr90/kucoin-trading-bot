@@ -46,6 +46,8 @@ Menú ☰ → **Storage** → **Block Volumes** → **Create block volume**: nom
 
 En la VCN → **Security Lists** → la lista por defecto → **Ingress Rules**: la regla de entrada de SSH (origen `0.0.0.0/0`, TCP, puerto 22) se edita para que su origen sea `<IP pública del propietario>/32`. Las reglas ICMP se dejan: son avisos de la red y no abren ningún servicio. (La IP del propietario se ve en https://api.ipify.org desde el PC.) **Esta regla es el único filtro por IP** (decisión del propietario del 17 nov 2026): cuando la IP doméstica cambie, basta con editar aquí el origen de la regla de SSH, desde el PC o desde el móvil, sin entrar en el servidor.
 
+**Desde el 26 nov 2026** (decisión del propietario, provisional mientras se desarrolla), el origen es el bloque del proveedor, **`79.112.0.0/12`**: la IP de casa cambió tres veces en nueve días (79.112…, 79.117… y 79.116…), siempre dentro de él. El acceso sigue siendo solo con clave, y `fail2ban` sigue activo.
+
 ## 5. Primera conexión
 
 En PowerShell:

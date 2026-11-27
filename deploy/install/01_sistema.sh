@@ -68,7 +68,7 @@ apt-get install -y -qq fail2ban nftables unattended-upgrades age chrony iptables
 
 step "system users: one per service, named after its SQL role, without a shell"
 getent group kbot >/dev/null || groupadd --system kbot
-for user in kbot_ingest kbot_archive kbot_backup kbot_restore kbot_sync; do
+for user in kbot_ingest kbot_archive kbot_backup kbot_upload kbot_restore kbot_sync; do
   if ! id "$user" >/dev/null 2>&1; then
     useradd --system --shell /usr/sbin/nologin --home-dir /nonexistent --no-create-home "$user"
   fi

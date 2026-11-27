@@ -1,8 +1,8 @@
 # kbot: the weekly copy of the global objects (roles and memberships), as postgres (02 §13.1,
 # point 4; stage E4c-1). pg_dumpall --globals-only reads pg_authid, which pg_read_all_data
 # cannot, so it is a service of its own. Encrypted with age like every copy. Its
-# directory is postgres:kbot_backup with the setgid bit, and UMask=0027 leaves each copy
-# readable by kbot_backup, which uploads it from stage E4c-2. No network at all.
+# directory is postgres:kbot_upload with the setgid bit, and UMask=0027 leaves each copy
+# readable by kbot_upload, which uploads it (stage E4c-2). No network at all.
 [Unit]
 Description=kbot: weekly copy of the global objects of PostgreSQL
 Documentation=file:///opt/kbot/docs/especificacion/02_Especificacion_vigente.md
@@ -13,9 +13,10 @@ Wants=postgresql.service
 Type=oneshot
 User=postgres
 Group=postgres
-# To reach its directory it must search /srv/kbot/backups (kbot_backup, 0750); this grants
-# only that, in this unit: writing stays with kbot_backup (review of E4c-1, E4c1-01).
-SupplementaryGroups=kbot_backup
+# To reach its directory it must search /srv/kbot/backups (kbot_backup:kbot_upload, 2750);
+# this grants only that, in this unit: writing stays with kbot_backup (review of E4c-1,
+# E4c1-01; E4c-2).
+SupplementaryGroups=kbot_upload
 WorkingDirectory=/opt/kbot
 Environment=PYTHONUNBUFFERED=1
 ExecStart=/opt/kbot/.venv/bin/python -m kbot.backup globals

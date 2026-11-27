@@ -68,6 +68,7 @@ PER_RUN = 1000
 CHALLENGE_BYTES = 4096
 PROCESSED_DAYS = 30
 HOT_PREFIX = "caliente-"
+POINT_PREFIX = "recibo_punto_"  # recibo_punto_<disk>.json: one per disk, never deleted
 _DISK = frozenset("0123456789abcdef")
 
 
@@ -352,7 +353,7 @@ class Verifier:
         report: Report,
     ) -> None:
         path = self.receipts / name
-        limit = POINT_LIMIT if name == "recibo_punto.json" else RECEIPT_LIMIT
+        limit = POINT_LIMIT if name.startswith(POINT_PREFIX) else RECEIPT_LIMIT
         processed = self.state["procesados"]
         previous = processed.get(name, {})
         try:
@@ -372,7 +373,7 @@ class Verifier:
                 elif kind == "respuesta":
                     self._answer(conn, document, states, report)
                 elif kind == "punto":
-                    self._point(document, digest, report)
+                    self._point(document, digest, report, name)
                 else:
                     raise Rejected(f"unknown kind {kind!r}")
         except Ignored as error:
@@ -537,12 +538,14 @@ class Verifier:
         report.verified.append(generation)
 
     # -- the recoverable point (E4C3-02, E4C3-03, E4C3-08, E4C3-10 and E4C3-14) --------------
-    def _point(self, document: Mapping[str, Any], digest: str, report: Report) -> None:
+    def _point(self, document: Mapping[str, Any], digest: str, report: Report, name: str) -> None:
         """The disk's observation of its recoverable point in one visit. The PC numbers its
         observations (``secuencia``), above the last one the server accepted; a newer one
         replaces the point, even with an older hot copy or with none (``copia`` null), and
         an older one is refused. Nothing of the disk changes unless it is accepted whole."""
         disk = _disk(document["disco"])
+        if name != f"{POINT_PREFIX}{disk}.json":
+            raise Rejected(f"the observation of disk {disk} goes in {POINT_PREFIX}{disk}.json")
         record = self.state["discos"].get(disk)
         if record is None:
             raise NotAdmitted(f"disk {disk} not admitted")
@@ -554,8 +557,8 @@ class Verifier:
                 f"an observation ({sequence}) not newer than the last accepted one"
                 f" ({record.get('observacion', 0)})"
             )
-        name = document["copia"]
-        point = None if name is None else self._hot_point(str(name), document)
+        copy = document["copia"]
+        point = None if copy is None else self._hot_point(str(copy), document)
         now = self.clock().isoformat()
         record["observacion"] = sequence
         record["sha256_observacion"] = digest  # the PC compares it with what it sent

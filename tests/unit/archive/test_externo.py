@@ -24,6 +24,7 @@ DISK = "a" * 32
 OTHER = "b" * 32
 THIRD = "c" * 32
 NOW = datetime(2026, 11, 28, 10, 0, tzinfo=UTC)
+POINT = f"recibo_punto_{DISK}.json"  # the observation of the disk, in its own file
 
 
 class FakeConn:
@@ -375,7 +376,7 @@ def test_the_recoverable_point_is_authenticated_by_the_register(tmp_path: Path) 
     h = "caliente-20261127T004139Z"
     dump, manifest = b"hot", manifest_of(h, [s1])
     register(s, h, dump, manifest)  # the copy itself is not in the backups: retention took it
-    s.send("recibo_punto.json", point(h, dump, manifest, [s1]))
+    s.send(POINT, point(h, dump, manifest, [s1]))
     assert s.run().points == [h]
     record = s.state()["discos"][DISK]
     assert record["punto"] == {"copia": h, "hora": "2026-11-27T00:41:39+00:00"}
@@ -385,17 +386,17 @@ def test_the_recoverable_point_is_authenticated_by_the_register(tmp_path: Path) 
     s.now = NOW + timedelta(hours=1)
     altered = manifest.replace(b"2026-11-22", b"2026-11-23")
     s.send(
-        "recibo_punto.json",
+        POINT,
         point(h, dump, altered, [s1], 2)
         | {"sha256_manifiesto": hashlib.sha256(manifest).hexdigest()},
     )
     assert any("not the one of the register" in r for r in s.run().rejected)
     s2 = dict(s1, sha256="3" * 64)  # the same day with another identity (S1 / S2)
-    s.send("recibo_punto.json", point(h, dump, manifest, [s2], 3))
+    s.send(POINT, point(h, dump, manifest, [s2], 3))
     assert any("dependencies" in r for r in s.run().rejected)
-    s.send("recibo_punto.json", point(h, b"other", manifest, [s1], 4))
+    s.send(POINT, point(h, b"other", manifest, [s1], 4))
     assert any("not the ones of the register" in r for r in s.run().rejected)
-    s.send("recibo_punto.json", point("caliente-20261128T004000Z", dump, manifest, [s1], 5))
+    s.send(POINT, point("caliente-20261128T004000Z", dump, manifest, [s1], 5))
     assert any("not a hot copy of the register" in r for r in s.run().rejected)
     assert s.state()["discos"][DISK] == record
 
@@ -418,20 +419,24 @@ def test_the_point_follows_the_disk_and_never_an_older_observation(tmp_path: Pat
         return s.state()["discos"][DISK]["punto"]  # type: ignore[no-any-return]
 
     first = point(h27, dump27, manifest27, [d27], 1)
-    s.send("recibo_punto.json", first)
+    s.send(POINT, first)
     s.run()
     assert observed() == {"copia": h27, "hora": "2026-11-27T00:40:00+00:00"}
-    s.send("recibo_punto.json", point(h20, dump20, manifest20, [], 2))  # d27 lost
+    s.send(POINT, point(h20, dump20, manifest20, [], 2))  # d27 lost
     s.run()
     assert observed() == {"copia": h20, "hora": "2026-11-20T00:40:00+00:00"}
-    s.send("recibo_punto.json", point(h20, dump20, manifest20, [], 3) | {"copia": None})
+    s.send(POINT, point(h20, dump20, manifest20, [], 3) | {"copia": None})
     s.run()
     assert observed() is None  # nothing complete on the disk
     public = json.loads((s.base / "publico" / "discos.json").read_text(encoding="utf-8"))
-    sent = hashlib.sha256((s.receipts / "recibo_punto.json").read_bytes()).hexdigest()
+    sent = hashlib.sha256((s.receipts / POINT).read_bytes()).hexdigest()
     assert public == {DISK: {"observacion": 3, "sha256": sent}}  # E4C3-16: what was accepted
-    s.send("recibo_punto.json", first)  # an old observation, byte for byte
+    s.send(POINT, first)  # an old observation, byte for byte
     assert any("not newer" in r for r in s.run().rejected)
+    assert observed() is None
+    # Each disk sends its observation in its own file, which the PC reads back (E4C3-16).
+    s.send("recibo_punto_" + OTHER + ".json", point(h20, dump20, manifest20, [], 9))
+    assert any("goes in" in r for r in s.run().rejected)
     assert observed() is None
 
 
@@ -448,7 +453,7 @@ def test_the_rpo_of_the_disk_is_the_age_of_its_point_and_not_of_the_visit(
     h = "caliente-20261127T004000Z"
     dump, manifest = b"hot", manifest_of(h, [])
     register(s, h, dump, manifest)
-    s.send("recibo_punto.json", point(h, dump, manifest, []))
+    s.send(POINT, point(h, dump, manifest, []))
     s.run()
     record = s.state()["discos"][DISK]
     assert s.now - datetime.fromisoformat(record["punto"]["hora"]) == timedelta(
@@ -456,7 +461,7 @@ def test_the_rpo_of_the_disk_is_the_age_of_its_point_and_not_of_the_visit(
     )
     assert record["ultima_visita"] == record["ultima_sin_errores"] == s.now.isoformat()
     s.now += timedelta(days=1)
-    s.send("recibo_punto.json", point(h, dump, manifest, [], 2) | {"sin_errores": False})
+    s.send(POINT, point(h, dump, manifest, [], 2) | {"sin_errores": False})
     s.run()
     later = s.state()["discos"][DISK]
     assert later["punto"] == record["punto"]
@@ -612,7 +617,7 @@ def test_a_queue_longer_than_the_reads_of_one_run_moves_on_without_the_pc(
     h = "caliente-20261127T004000Z"
     dump, manifest = b"hot", manifest_of(h, [])
     register(s, h, dump, manifest)
-    s.send("recibo_punto.json", point(h, dump, manifest, []))
+    s.send(POINT, point(h, dump, manifest, []))
     first = s.run()
     assert first.accepted == [GENERATION] and first.points == []
     second = s.run()

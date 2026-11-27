@@ -156,6 +156,7 @@ verifier._point(
     },
     "0" * 64,
     report,
+    f"recibo_punto_{disk}.json",
 )
 assert report.points == [name], report
 for attempt in (

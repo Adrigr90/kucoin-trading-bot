@@ -193,16 +193,19 @@ Invoke-Sftp @(
     "get desafios/generaciones.json $(Quote $meta)/",
     "get desafios/procesados.json $(Quote $meta)/",
     "-get desafios/discos.json $(Quote $meta)/",
+    "-get recibos/recibo_punto_$Disco.json $(Quote $meta)/ultima_observacion.json",
     "-get desafios/desafio_*.json $(Quote $desafiosLocal)/",
     "get copias/registro.jsonl $(Quote $meta)/registro.jsonl",
     "-get copias/globales/registro.jsonl $(Quote $meta)/registro_globales.jsonl"
 )
 $indice = @(Read-Json (Join-Path $meta 'generaciones.json'))
 $procesados = Read-Json (Join-Path $meta 'procesados.json')
-# The number of this visit's observation of the recoverable point (E4C3-10 and E4C3-16):
-# above the last one the server accepted for this disk, above the last one this disk sent,
-# and never below the current time in milliseconds, so that it is not used twice even when
-# the disk lost its state while the server's discos.json was behind.
+# The number of this visit's observation of the recoverable point (E4C3-10 and E4C3-16),
+# never from the clock: above the last one the server accepted for this disk (discos.json),
+# above the last one this disk kept, and above the last one this disk sent, read back from
+# its own file in recibos/, which is replaced in every visit and never deleted. So it is
+# never used twice, even when the disk lost its state while discos.json was behind.
+$PuntoNombre = "recibo_punto_$Disco.json"
 $observada = [int64]0
 $aceptada = $null
 $discosServidor = Read-Optional (Join-Path $meta 'discos.json')
@@ -210,12 +213,19 @@ if ($discosServidor -and (Has-Property $discosServidor $Disco)) {
     if (Has-Property $discosServidor.$Disco 'observacion') { $observada = [int64]$discosServidor.$Disco.observacion }
     if (Has-Property $discosServidor.$Disco 'sha256') { $aceptada = $discosServidor.$Disco.sha256 }
 }
-$reloj = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
-$Secuencia = [Math]::Max([Math]::Max($observada, $SecuenciaLocal), $reloj) + 1
+$enviada = [int64]0
+$shaEnviada = $null
+$ultimaEnviada = Join-Path $meta 'ultima_observacion.json'
+$ultima = Read-Optional $ultimaEnviada
+if ($ultima -and (Has-Property $ultima 'disco') -and $ultima.disco -eq $Disco -and (Has-Property $ultima 'secuencia')) {
+    $enviada = [int64]$ultima.secuencia
+    $shaEnviada = (Get-FileHash -Algorithm SHA256 -LiteralPath $ultimaEnviada).Hash.ToLowerInvariant()
+}
+$Secuencia = [Math]::Max([Math]::Max($observada, $SecuenciaLocal), $enviada) + 1
 # The last observation this disk sent, already processed by the server but not the accepted
 # one: it was refused, and this visit sends a newer one in its place.
-if ($Subidos.ContainsKey('recibo_punto.json') -and (Has-Property $procesados 'recibo_punto.json') -and
-    [string]$procesados.'recibo_punto.json' -eq $Subidos['recibo_punto.json'] -and $aceptada -ne $Subidos['recibo_punto.json']) {
+if ($shaEnviada -and (Has-Property $procesados $PuntoNombre) -and
+    [string]$procesados.$PuntoNombre -eq $shaEnviada -and $aceptada -ne $shaEnviada) {
     $Avisos.Add('el servidor no aceptó la observación anterior de este disco; esta visita envía una nueva, con un número mayor')
 }
 $listaCopias = @(Invoke-Sftp @('ls -1 copias') -Listing)
@@ -452,7 +462,7 @@ $observacion = $punto
 if (-not $observacion) {
     $observacion = [ordered]@{ tipo = 'punto'; disco = $Disco; secuencia = $Secuencia; copia = $null; sin_errores = ($Errores.Count -eq 0) }
 }
-Write-Utf8 (Join-Path $Salida 'recibo_punto.json') (ConvertTo-Json $observacion -Depth 6 -Compress)
+Write-Utf8 (Join-Path $Salida $PuntoNombre) (ConvertTo-Json $observacion -Depth 6 -Compress)
 
 # --- 7. delete what the server already processed, then upload ----------------------------------
 $salientes = @{}   # name -> SHA-256 of what this visit sends

@@ -68,7 +68,7 @@ def test_three_visits_through_a_fake_sftp_verify_and_clean_up(tmp_path: Path) ->
         FAKE_SFTP_RECIBOS=str(s.receipts),
     )
 
-    def visit(*extra: str) -> subprocess.CompletedProcess[str]:
+    def visit(*extra: str, cut: str = "0") -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [
                 shell,
@@ -90,7 +90,7 @@ def test_three_visits_through_a_fake_sftp_verify_and_clean_up(tmp_path: Path) ->
             errors="replace",
             check=False,
             timeout=300,
-            env=environment,
+            env=dict(environment, FAKE_SFTP_CUT_AT_RM=cut),
         )
 
     s.run()
@@ -109,12 +109,41 @@ def test_three_visits_through_a_fake_sftp_verify_and_clean_up(tmp_path: Path) ->
     report = s.run()
     assert report.verified == [GENERATION], report
 
-    # E4C3-09: the PC deletes what the server processed exactly as this disk sent it.
+    def receipts() -> list[str]:
+        return sorted(p.name for p in s.receipts.iterdir())
+
+    def point() -> object:
+        marker = disk.joinpath(".kbot-disco").read_text(encoding="utf-8").strip()
+        return s.state()["discos"][marker]["punto"]
+
+    # E4C3-09 and E4C3-17: the PC deletes what the server processed exactly as this disk sent
+    # it, also when the connection is cut before the first deletion and after it.
+    pending = receipts()
+    assert len(pending) == 3, pending  # the receipt, the answer and the point
+    before = visit(cut="1")
+    assert before.returncode != 0 and receipts() == pending, before.stdout + before.stderr
+    after = visit(cut="2")
+    assert after.returncode != 0 and len(receipts()) == 2, after.stdout + after.stderr
     third = visit()
     assert third.returncode == 0, third.stdout + third.stderr
-    assert sorted(p.name for p in s.receipts.iterdir()) == ["recibo_punto.json"]
+    assert receipts() == ["recibo_punto.json"]
     s.run()
-    assert (
-        s.state()["discos"][disk.joinpath(".kbot-disco").read_text().strip()]["punto"]["copia"]
-        == hot.path.name
-    )
+    assert point() == {"copia": hot.path.name, "hora": "2026-11-27T00:40:00+00:00"}
+
+    # E4C3-16: the server accepted that observation but its discos.json fell behind; the disk
+    # loses its state and its only complete hot copy, gone from the server too. The next
+    # observation still gets a new number, and the point goes; the old one sent again is
+    # refused.
+    old = (s.receipts / "recibo_punto.json").read_bytes()
+    (s.base / "publico" / "discos.json").write_text("{}", encoding="utf-8")
+    (disk / ".kbot-estado.json").write_text("", encoding="utf-8")
+    shutil.rmtree(disk / "copias" / hot.path.name)
+    shutil.rmtree(hot.path)  # local retention took it; its register stays
+    fourth = visit()
+    assert fourth.returncode == 0, fourth.stdout + fourth.stderr
+    assert "ninguna copia caliente completa" in fourth.stdout, fourth.stdout
+    s.run()
+    assert point() is None
+    (s.receipts / "recibo_punto.json").write_bytes(old)
+    assert any("not newer" in r for r in s.run().rejected)
+    assert point() is None

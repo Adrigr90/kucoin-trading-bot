@@ -154,6 +154,7 @@ verifier._point(
         "manifiesto_base64": base64.b64encode(manifest).decode(),
         "dependencias": held, "sin_errores": True, "secuencia": 1,
     },
+    "0" * 64,
     report,
 )
 assert report.points == [name], report

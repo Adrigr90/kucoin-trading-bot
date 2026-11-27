@@ -199,14 +199,25 @@ Invoke-Sftp @(
 )
 $indice = @(Read-Json (Join-Path $meta 'generaciones.json'))
 $procesados = Read-Json (Join-Path $meta 'procesados.json')
-# The number of this visit's observation of the recoverable point: above the last one the
-# server accepted for this disk and above the last one this disk sent (E4C3-10).
+# The number of this visit's observation of the recoverable point (E4C3-10 and E4C3-16):
+# above the last one the server accepted for this disk, above the last one this disk sent,
+# and never below the current time in milliseconds, so that it is not used twice even when
+# the disk lost its state while the server's discos.json was behind.
 $observada = [int64]0
+$aceptada = $null
 $discosServidor = Read-Optional (Join-Path $meta 'discos.json')
-if ($discosServidor -and (Has-Property $discosServidor $Disco) -and (Has-Property $discosServidor.$Disco 'observacion')) {
-    $observada = [int64]$discosServidor.$Disco.observacion
+if ($discosServidor -and (Has-Property $discosServidor $Disco)) {
+    if (Has-Property $discosServidor.$Disco 'observacion') { $observada = [int64]$discosServidor.$Disco.observacion }
+    if (Has-Property $discosServidor.$Disco 'sha256') { $aceptada = $discosServidor.$Disco.sha256 }
 }
-$Secuencia = [Math]::Max($observada, $SecuenciaLocal) + 1
+$reloj = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+$Secuencia = [Math]::Max([Math]::Max($observada, $SecuenciaLocal), $reloj) + 1
+# The last observation this disk sent, already processed by the server but not the accepted
+# one: it was refused, and this visit sends a newer one in its place.
+if ($Subidos.ContainsKey('recibo_punto.json') -and (Has-Property $procesados 'recibo_punto.json') -and
+    [string]$procesados.'recibo_punto.json' -eq $Subidos['recibo_punto.json'] -and $aceptada -ne $Subidos['recibo_punto.json']) {
+    $Avisos.Add('el servidor no aceptó la observación anterior de este disco; esta visita envía una nueva, con un número mayor')
+}
 $listaCopias = @(Invoke-Sftp @('ls -1 copias') -Listing)
 $listaGlobales = @(Invoke-Sftp @('-ls -1 copias/globales') -Listing)
 
@@ -451,10 +462,10 @@ foreach ($file in @(Get-ChildItem -LiteralPath $Salida -File)) {
 $comandos = @()
 foreach ($p in $procesados.PSObject.Properties) {
     # Only a file the server processed exactly as this disk last sent it (E4C3-09); one that
-    # is sent again now is simply replaced.
+    # is sent again now is simply replaced. It is forgotten only once the listing of
+    # recibos/ after the upload shows it gone (E4C3-17).
     if ($Subidos.ContainsKey($p.Name) -and $Subidos[$p.Name] -eq [string]$p.Value -and -not $salientes.ContainsKey($p.Name)) {
         $comandos += "-rm recibos/$($p.Name)"
-        $Subidos.Remove($p.Name)
     }
 }
 foreach ($file in @(Get-ChildItem -LiteralPath $Salida -File)) { $comandos += "put $(Quote $file.FullName) recibos/$($file.Name)" }
@@ -469,9 +480,15 @@ function Save-State([bool]$Done) {
     }
     Write-Utf8Durable $EstadoDisco (ConvertTo-Json $estado -Depth 4)
 }
-# The number of the observation is kept before sending it, so that it is never used twice.
+# The number of the observation, and what is still to be deleted, are kept before sending:
+# a cut connection forgets neither (E4C3-16 and E4C3-17).
 Save-State $false
 Invoke-Sftp $comandos
+# What this disk keeps track of in recibos/ is what is really there now: what was deleted,
+# or never arrived, is forgotten; what is still there waits for the server and the next visit.
+$presentes = @{}
+foreach ($name in @(Invoke-Sftp @('ls -1 recibos') -Listing)) { $presentes[$name] = $true }
+foreach ($name in @($Subidos.Keys)) { if (-not $presentes.ContainsKey($name)) { $Subidos.Remove($name) } }
 
 # --- 8. the state of the disk, and the summary ------------------------------------------------
 Save-State $true

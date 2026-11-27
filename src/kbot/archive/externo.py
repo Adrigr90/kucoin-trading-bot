@@ -255,6 +255,19 @@ class Verifier:
     def _save(self) -> None:
         durable.write_json(self.private / "estado.json", self.state, self.ops)
 
+    def _confirm(self) -> None:
+        """The state as loaded is made durable, its directory entry included, before
+        anything is announced from it (residual of E4C3-09): a save whose last fsync failed
+        leaves the new state visible but not yet on the disk."""
+        path = self.private / "estado.json"
+        if not path.exists():
+            return
+        try:
+            self.ops.fsync_file(path)
+            self.ops.fsync_directory(self.private)
+        except OSError as error:
+            raise durable.PersistenceError(f"{path}: {error}") from error
+
     def _publish(self, name: str, value: Any) -> None:
         path = self.public / name
         data = (json.dumps(value, ensure_ascii=False, indent=1, sort_keys=True) + "\n").encode()
@@ -282,7 +295,10 @@ class Verifier:
         self._publish(
             "discos.json",
             {
-                disk: {"observacion": int(record.get("observacion", 0))}
+                disk: {
+                    "observacion": int(record.get("observacion", 0)),
+                    "sha256": record.get("sha256_observacion"),
+                }
                 for disk, record in sorted(self.state["discos"].items())
             },
         )
@@ -295,6 +311,7 @@ class Verifier:
     def run(self) -> Report:
         report = Report()
         self._load()
+        self._confirm()
         self._announce()  # what an interrupted run could not publish, from the saved state
         self.state["ejecucion"] = int(self.state.get("ejecucion", 0)) + 1
         with self.connect() as conn:
@@ -355,7 +372,7 @@ class Verifier:
                 elif kind == "respuesta":
                     self._answer(conn, document, states, report)
                 elif kind == "punto":
-                    self._point(document, report)
+                    self._point(document, digest, report)
                 else:
                     raise Rejected(f"unknown kind {kind!r}")
         except Ignored as error:
@@ -417,6 +434,7 @@ class Verifier:
 
     def retire_disk(self, disk: str) -> None:
         self._load()
+        self._confirm()
         self.state["discos"].pop(_disk(disk), None)
         for key in [k for k in self.state["pares"] if k.endswith(f"|{disk}")]:
             del self.state["pares"][key]
@@ -519,7 +537,7 @@ class Verifier:
         report.verified.append(generation)
 
     # -- the recoverable point (E4C3-02, E4C3-03, E4C3-08, E4C3-10 and E4C3-14) --------------
-    def _point(self, document: Mapping[str, Any], report: Report) -> None:
+    def _point(self, document: Mapping[str, Any], digest: str, report: Report) -> None:
         """The disk's observation of its recoverable point in one visit. The PC numbers its
         observations (``secuencia``), above the last one the server accepted; a newer one
         replaces the point, even with an older hot copy or with none (``copia`` null), and
@@ -540,6 +558,7 @@ class Verifier:
         point = None if name is None else self._hot_point(str(name), document)
         now = self.clock().isoformat()
         record["observacion"] = sequence
+        record["sha256_observacion"] = digest  # the PC compares it with what it sent
         record["punto"] = point
         record["ultima_visita"] = now
         if document.get("sin_errores") is True:

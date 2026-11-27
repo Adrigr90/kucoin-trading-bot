@@ -5,6 +5,9 @@ the environment (FAKE_SFTP_COPIAS, FAKE_SFTP_ARCHIVO, FAKE_SFTP_DESAFIOS, FAKE_S
 Like sftp -b: each line is echoed as ``sftp> …``; a command that fails stops the batch with
 exit code 1, unless it starts with ``-``; a path outside the four folders does not exist,
 as in the chroot. Only what the script uses: get [-p], ls -1, rm and put.
+
+FAKE_SFTP_CUT_AT_RM=n cuts the connection (exit code 255) just before the n-th ``rm`` of a
+batch, as a dropped network would: n=1 before any deletion, n=2 after the first one.
 """
 
 from __future__ import annotations
@@ -71,9 +74,16 @@ def run(line: str) -> None:
 
 def main(argv: list[str]) -> int:
     batch = Path(argv[argv.index("-b") + 1])
+    cut = int(os.environ.get("FAKE_SFTP_CUT_AT_RM", "0"))
+    deletions = 0
     for raw in batch.read_text(encoding="utf-8").splitlines():
         if not raw.strip():
             continue
+        if raw.lstrip("-").startswith("rm "):
+            deletions += 1
+            if deletions == cut:
+                print("Connection closed", file=sys.stderr)
+                return 255
         print(f"sftp> {raw}")
         tolerant = raw.startswith("-")
         try:

@@ -428,7 +428,8 @@ def test_the_point_follows_the_disk_and_never_an_older_observation(tmp_path: Pat
     s.run()
     assert observed() is None  # nothing complete on the disk
     public = json.loads((s.base / "publico" / "discos.json").read_text(encoding="utf-8"))
-    assert public == {DISK: {"observacion": 3}}
+    sent = hashlib.sha256((s.receipts / "recibo_punto.json").read_bytes()).hexdigest()
+    assert public == {DISK: {"observacion": 3, "sha256": sent}}  # E4C3-16: what was accepted
     s.send("recibo_punto.json", first)  # an old observation, byte for byte
     assert any("not newer" in r for r in s.run().rejected)
     assert observed() is None
@@ -517,6 +518,59 @@ def test_nothing_is_announced_before_the_state_that_holds_it_is_saved(tmp_path: 
     disks = [json.loads((s.base / "publico" / c).read_text("utf-8"))["disco"] for c in challenges]
     assert disks == [OTHER]  # the annulled challenge withdrawn, the other disk's published
     assert acknowledged[f"recibo_{GENERATION}.json"] == hashlib.sha256(receipt).hexdigest()
+
+
+class PrivateStepFails(durable.FileOps):
+    """One step of the durable write of the private state fails, every time."""
+
+    def __init__(self, step: str) -> None:
+        self.step = step
+
+    def _private(self, path: Path) -> bool:
+        return "privado" in path.parts
+
+    def write(self, path: Path, data: bytes) -> None:
+        if self.step == "write" and self._private(path):
+            raise OSError(5, "Input/output error")
+        super().write(path, data)
+
+    def fsync_file(self, path: Path) -> None:
+        if self.step == "fsync_file" and self._private(path):
+            raise OSError(5, "Input/output error")
+        super().fsync_file(path)
+
+    def rename(self, source: Path, target: Path) -> None:
+        if self.step == "rename" and self._private(target):
+            raise OSError(5, "Input/output error")
+        super().rename(source, target)
+
+    def fsync_directory(self, directory: Path) -> None:
+        if self.step == "fsync_directory" and self._private(directory / "x"):
+            raise OSError(5, "Input/output error")
+        super().fsync_directory(directory)
+
+
+@pytest.mark.parametrize("step", ["write", "fsync_file", "rename", "fsync_directory"])
+def test_no_effect_comes_from_a_state_whose_persistence_is_not_confirmed(
+    tmp_path: Path, step: str
+) -> None:
+    """Residual of E4C3-09: whichever step of the durable write fails, the last fsync of
+    the directory included (the new state then visible but not durable), no run and no
+    restart announces anything from that state. Once the disk works, the next run confirms
+    the state and only then announces it."""
+    s = Setup(tmp_path)
+    s.ops = PrivateStepFails(step)
+    s.send(f"recibo_{GENERATION}.json", s.receipt())
+    for _ in range(3):  # the run, then restarts
+        with pytest.raises(durable.PersistenceError):
+            s.run()
+        assert not list((s.base / "publico").glob("desafio_*.json"))
+        acknowledged = s.base / "publico" / "procesados.json"
+        assert not acknowledged.exists() or json.loads(acknowledged.read_text("utf-8")) == {}
+    s.ops = durable.REAL
+    s.run()
+    assert len(list((s.base / "publico").glob("desafio_*.json"))) == 1
+    assert f"recibo_{GENERATION}.json" in published(s)[1]
 
 
 def test_a_challenge_that_could_not_be_published_is_published_by_the_next_run(

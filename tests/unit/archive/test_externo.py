@@ -9,6 +9,7 @@ import json
 import os
 import sys
 import time
+import types
 import uuid
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -796,6 +797,88 @@ def test_the_old_receipt_of_a_retired_disk_never_admits_it_again(
     assert s.run().accepted == [GENERATION]
     assert set(s.state()["discos"]) == {OTHER, DISK}
     assert s.state()["pares"][f"{GENERATION}|{DISK}"]["desafio"] is not None
+
+
+def put_in_place(path: Path, data: bytes) -> None:
+    """As the PC does: under a temporary name, then renamed over the target."""
+    temporary = path.with_name(f".subiendo-{path.name}")
+    temporary.write_bytes(data)
+    os.replace(temporary, path)
+
+
+@pytest.mark.parametrize("case", ["pending", "replaced"])
+def test_a_receipt_in_recibos_when_its_disk_is_retired_never_admits_it(
+    tmp_path: Path, case: str
+) -> None:
+    """E4C3-19: at the retirement, a receipt of the disk that arrived after the last run is
+    still pending, or its processed receipt was replaced and not read yet. Neither admits
+    the disk again; a file put in place after the retirement, with the same bytes, does."""
+    s = Setup(tmp_path)
+    g2 = str(uuid.UUID("2c8e7cde-ccfe-4c3e-8c6e-bc9e0ccecc5e"))
+    s.add_generation(g2, date(2026, 11, 23))
+    mine = s.receipts / "recibo_a.json"
+    s.send(mine.name, s.receipt(disk=DISK))
+    s.send("recibo_b.json", s.receipt(disk=OTHER))
+    s.run()
+    late = s.receipts / "recibo_a_g2.json"
+    if case == "pending":
+        put_in_place(late, json.dumps(s.receipt(disk=DISK, generation=g2)).encode())
+    else:
+        late = mine
+        put_in_place(mine, mine.read_bytes())  # a new file, the same bytes
+    s.verifier().retire_disk(DISK)
+    s.send("recibo_c.json", s.receipt(disk=THIRD))
+    report = s.run()
+    assert set(s.state()["discos"]) == {OTHER, THIRD}
+    assert any("when disk" in r and "was retired" in r for r in report.rejected), report
+    s.verifier().retire_disk(THIRD)
+    s.run()
+    assert set(s.state()["discos"]) == {OTHER}
+    put_in_place(late, late.read_bytes())  # put in place after the retirement
+    assert s.run().accepted != []
+    assert set(s.state()["discos"]) == {OTHER, DISK}
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="statvfs and ext4, as on the server (Linux)")
+def test_the_identity_of_a_file_does_not_depend_on_the_loop_device(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """E4C3-19: the same image of recibos/ mounted on another loop device keeps the identity
+    of its files, since it names the file system by its own identity (``f_fsid``), not by
+    the device number. A retired disk is not admitted again by its intact receipt, also if
+    the record of what was processed were lost."""
+    s = Setup(tmp_path)
+    for name, disk in (("recibo_a.json", DISK), ("recibo_b.json", OTHER)):
+        s.send(name, s.receipt(disk=disk))
+    s.run()
+    s.verifier().retire_disk(DISK)
+    s.send("recibo_c.json", s.receipt(disk=THIRD))
+    s.run()
+    real = os.fstat
+
+    def another_device(descriptor: int) -> Any:
+        found = real(descriptor)
+        return types.SimpleNamespace(
+            st_mode=found.st_mode,
+            st_uid=found.st_uid,
+            st_size=found.st_size,
+            st_ino=found.st_ino,
+            st_mtime_ns=found.st_mtime_ns,
+            st_dev=found.st_dev + 1000,
+        )
+
+    before = externo._identity(s.receipts / "recibo_a.json")
+    monkeypatch.setattr(externo.os, "fstat", another_device)
+    assert externo._identity(s.receipts / "recibo_a.json") == before
+    assert before is not None and before.startswith("fs")
+    s.verifier().retire_disk(THIRD)  # a free place
+    s.run()
+    state = s.state()
+    del state["procesados"]["recibo_a.json"]  # even with that record lost
+    (s.base / "privado" / "estado.json").write_text(json.dumps(state), encoding="utf-8")
+    report = s.run()
+    assert set(s.state()["discos"]) == {OTHER}
+    assert any("was retired" in r for r in report.rejected), report
 
 
 def test_a_file_still_being_sent_under_a_temporary_name_is_never_read(tmp_path: Path) -> None:

@@ -129,12 +129,26 @@ def _generation(descriptor: int) -> str:
     return str(int.from_bytes(answer[:4], "little"))
 
 
-def _stamp(info: os.stat_result, generation: str = "-") -> str:
+def _filesystem(where: int | Path) -> str | None:
+    """The identity of the file system, kept across mounts: its ``f_fsid``, which ext4
+    derives from the UUID of its superblock, so that mounting the same image of recibos/ on
+    another loop device does not change it. None where there is no statvfs (Windows)."""
+    try:
+        found = os.fstatvfs(where) if isinstance(where, int) else os.statvfs(where)
+    except (AttributeError, OSError):
+        return None
+    return f"fs{found.f_fsid}"
+
+
+def _stamp(info: os.stat_result, generation: str = "-", filesystem: str | None = None) -> str:
     """The identity of a file of ``recibos/``, without any clock but as a last resort: a file
     put in place by the PC (written under a temporary name and renamed) is a new inode, with
     a new generation, even when its bytes and its time are those of an earlier one
-    (E4C3-19). Size and time only tell an in-place change."""
-    return f"{info.st_dev}:{info.st_ino}:{generation}:{info.st_size}:{info.st_mtime_ns}"
+    (E4C3-19). The file system is named by its own identity, not by the number of the
+    device it is mounted on, which can change from one mount to the next. Size and time only
+    tell an in-place change."""
+    where = filesystem or f"dev{info.st_dev}"
+    return f"{where}:{info.st_ino}:{generation}:{info.st_size}:{info.st_mtime_ns}"
 
 
 def _identity(path: Path) -> str | None:
@@ -144,11 +158,11 @@ def _identity(path: Path) -> str | None:
         descriptor = os.open(path, flags)
     except OSError:
         try:  # a link, or what this system does not open: its lstat
-            return _stamp(os.lstat(path))
+            return _stamp(os.lstat(path), "-", _filesystem(path.parent))
         except OSError:
             return None
     try:
-        return _stamp(os.fstat(descriptor), _generation(descriptor))
+        return _stamp(os.fstat(descriptor), _generation(descriptor), _filesystem(descriptor))
     finally:
         os.close(descriptor)
 
@@ -174,7 +188,7 @@ def _opened(path: Path, owner: int | None, limit: int) -> Iterator[tuple[bytes, 
             content = handle.read(limit + 1)
         if len(content) > limit:
             raise Ignored(f"bigger than {limit} bytes")
-        yield content, _stamp(info, _generation(descriptor))
+        yield content, _stamp(info, _generation(descriptor), _filesystem(descriptor))
     finally:
         os.close(descriptor)
 
@@ -405,7 +419,7 @@ class Verifier:
                     raise Rejected("not a JSON object")
                 kind = document.get("tipo")
                 if kind == "generacion":
-                    self._receipt(conn, document, digest, generations, states, report)
+                    self._receipt(conn, document, digest, generations, states, report, seen)
                 elif kind == "respuesta":
                     self._answer(conn, document, states, report)
                 elif kind == "punto":
@@ -483,9 +497,19 @@ class Verifier:
         retired = self.state.setdefault("retirados", {})
         before = retired.get(disk, {})
         # Kept for good, one small entry per disk ever retired: its last accepted observation
-        # (E4C3-16). Its receipts left in recibos/ are not read again (E4C3-19): what was
-        # processed is remembered while its file is there.
-        retired[disk] = {"observacion": int((record or before).get("observacion", 0))}
+        # (E4C3-16), and a barrier (E4C3-19): the identity of every file in recibos/ at the
+        # moment of the retirement, processed or still pending, so that none of them admits
+        # this disk again. Only a file put there afterwards can. It is bounded by the files
+        # there were then, and an identity is never taken by a later file.
+        barrier = {
+            seen
+            for name in os.listdir(self.receipts)
+            if not name.startswith(".") and (seen := _identity(self.receipts / name)) is not None
+        }
+        retired[disk] = {
+            "observacion": int((record or before).get("observacion", 0)),
+            "barrera": sorted(barrier | set(before.get("barrera", []))),
+        }
         for key in [k for k in self.state["pares"] if k.endswith(f"|{disk}")]:
             del self.state["pares"][key]
         # What was refused for lack of room is read again (E4C3-12). What lies untouched in
@@ -504,6 +528,7 @@ class Verifier:
         generations: Mapping[str, tuple[date, Mapping[str, ServerFile]]],
         states: dict[str, set[str]],
         report: Report,
+        seen: str,
     ) -> None:
         disk = _disk(document["disco"])
         generation = str(uuid.UUID(str(document["generacion"])))
@@ -517,6 +542,10 @@ class Verifier:
         }
         if not valid and disk not in self.state["discos"]:
             raise Rejected("an invalid receipt from a disk that is not admitted")
+        retired = self.state.get("retirados", {}).get(disk, {})
+        if disk not in self.state["discos"] and seen in retired.get("barrera", []):
+            # Already in recibos/ when the disk was retired (E4C3-19), processed or not.
+            raise Rejected(f"a receipt that was in recibos/ when disk {disk} was retired")
         self._admit(disk)
         key = f"{generation}|{disk}"
         pair = self.state["pares"].setdefault(
